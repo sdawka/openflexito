@@ -140,6 +140,17 @@ await step('settings persist across reload', async () => {
   await page.locator('label:has-text("invert Y for keyboard") input').setChecked(was)
 })
 
+await step('device logs panel fetches and downloads', async () => {
+  await nav('settings')
+  await page.click('button:has-text("Fetch")')
+  await page.waitForSelector('pre.logs', { timeout: 10000 })
+  const text = await page.locator('pre.logs').innerText()
+  expect(text.length > 10, 'empty log output')
+  await page.locator('.panel:has(h3:has-text("Device logs")) select').nth(0).selectOption('app')
+  await page.click('button:has-text("Fetch")'); await page.waitForTimeout(800)
+  expect(/listening on|encoder|openflexito/.test(await page.locator('pre.logs').innerText()), 'app records missing expected lines')
+})
+
 await step('no page errors during the run', async () => { expect(problems.length === 0, problems.join(' | ')) })
 
 await browser.close()

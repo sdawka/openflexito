@@ -7,7 +7,7 @@ Wants=NetworkManager.service
 Type=simple
 User=openflexito
 Group=openflexito
-SupplementaryGroups=video dialout input render
+SupplementaryGroups=video dialout input render systemd-journal
 # Runs as root ('+'): select the pattern trigger and hand the ACT LED sysfs files to the service user.
 ExecStartPre=+/bin/sh -c 'L=/sys/class/leds/ACT; [ -d $L ] || exit 0; modprobe ledtrig_pattern 2>/dev/null; grep -q "\[pattern\]" $L/trigger || echo pattern > $L/trigger; for i in 1 2 3 4 5 6 7 8 9 10; do [ -e $L/pattern ] && [ -e $L/repeat ] && break; sleep 0.2; done; chgrp openflexito $L/trigger $L/brightness $L/pattern $L/repeat 2>/dev/null; chmod g+w $L/trigger $L/brightness $L/pattern $L/repeat 2>/dev/null; exit 0'
 ExecStart=/opt/openflexito/venv/bin/python -m openflexito --config /etc/openflexito/config.toml

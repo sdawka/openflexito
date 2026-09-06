@@ -36,7 +36,7 @@ echo "== building webapp"
 
 echo "== packaging project"
 TAR="$BUILD/openflexito.tar.gz"
-COPYFILE_DISABLE=1 tar -czf "$TAR" -C "$REPO" --exclude=.git --exclude=node_modules --exclude=.venv --exclude=image/build --exclude=image/secrets.env \
+COPYFILE_DISABLE=1 tar --uid 0 --gid 0 --uname root --gname root -czf "$TAR" -C "$REPO" --exclude=.git --exclude=node_modules --exclude=.venv --exclude=image/build --exclude=image/secrets.env \
     --exclude='*.egg-info' --exclude=__pycache__ --exclude=.pytest_cache device webapp/dist image README.md LICENSE
 
 echo "== decompressing base image"

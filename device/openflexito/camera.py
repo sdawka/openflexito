@@ -216,6 +216,7 @@ class PiCamera(CameraBase):
         self._picam = None
         self._encoders: dict = {}
         self._meta_ring: deque = deque(maxlen=8)
+        self._meta_lock = threading.Lock()
         self._lock = asyncio.Lock()
 
     def _open(self):
@@ -263,7 +264,8 @@ class PiCamera(CameraBase):
 
     def _on_request(self, request) -> None:
         md = request.get_metadata()
-        self._meta_ring.append({
+        with self._meta_lock:
+            self._meta_ring.append({
             "ts": md.get("SensorTimestamp"), "exposure": md.get("ExposureTime"), "gain": md.get("AnalogueGain"),
             "digital_gain": md.get("DigitalGain"), "colour_gains": list(md.get("ColourGains", ()) or ()),
             "focus_fom": md.get("FocusFoM"), "lux": md.get("Lux"), "frame_duration": md.get("FrameDuration"),
@@ -271,11 +273,16 @@ class PiCamera(CameraBase):
         })
 
     def _meta_for(self, timestamp_us) -> dict:
+        # Called on the encoder output thread while _on_request appends on the camera thread:
+        # copy under the lock, never iterate the live deque (a RuntimeError here killed
+        # picamera2's poll thread and silently froze the stream).
+        with self._meta_lock:
+            ring = list(self._meta_ring)
         if timestamp_us is not None:
-            for m in reversed(self._meta_ring):
+            for m in reversed(ring):
                 if m.get("ts") is not None and m["ts"] // 1000 == timestamp_us:
                     return m
-        return self._meta_ring[-1] if self._meta_ring else {"t": now_ns()}
+        return ring[-1] if ring else {"t": now_ns()}
 
     def _make_output(self, hub: FrameHub, encoder):
         from picamera2.outputs import Output
@@ -285,8 +292,11 @@ class PiCamera(CameraBase):
             def outputframe(self, frame, keyframe=True, timestamp=None, packet=None, audio=False):  # noqa: D401
                 # picamera2 encoders report timestamps relative to their first frame; add the
                 # offset back to get SensorTimestamp/1000 and look up that frame's metadata.
-                abs_us = None if timestamp is None else int(timestamp) + int(encoder.firsttimestamp or 0)
-                hub.publish_threadsafe(bytes(frame), cam._meta_for(abs_us))
+                try:
+                    abs_us = None if timestamp is None else int(timestamp) + int(encoder.firsttimestamp or 0)
+                    hub.publish_threadsafe(bytes(frame), cam._meta_for(abs_us))
+                except Exception:  # noqa: BLE001  an exception here would end the encoder thread for good
+                    log.exception("frame output failed")
         return HubOutput()
 
     def _wanted_encoders(self) -> set[str]:

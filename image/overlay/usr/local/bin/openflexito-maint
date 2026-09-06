@@ -1,0 +1,14 @@
+#!/bin/sh
+# Runs as root when the openflexito service (unprivileged, NoNewPrivileges) drops a request file.
+# Requests: clear-logs, reboot, poweroff. The file is removed when handled.
+DIR=/var/lib/openflexito/requests
+for f in "$DIR"/*.request; do
+  [ -e "$f" ] || continue
+  case "$(basename "$f" .request)" in
+    clear-logs) journalctl --rotate; journalctl --vacuum-time=1s; echo done > "$f.result" ;;
+    reboot)     rm -f "$f"; systemctl reboot ;;
+    poweroff)   rm -f "$f"; systemctl poweroff ;;
+    *)          echo "unknown request $f" >&2 ;;
+  esac
+  rm -f "$f"
+done

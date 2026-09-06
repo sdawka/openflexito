@@ -36,7 +36,10 @@ else
 fi
 
 echo "== overlay files"
-rsync -a --exclude boot "$HERE/overlay/" /
+# --chown: the tarball may carry the build machine's uid; rsync -a would otherwise re-own / and /etc
+rsync -a --chown=root:root --exclude boot "$HERE/overlay/" /
+chmod 600 /etc/NetworkManager/system-connections/openflexito-hotspot.nmconnection
+mkdir -p /var/log/journal && systemd-tmpfiles --create --prefix /var/log/journal 2>/dev/null || true
 [ -f /etc/openflexito/config.toml ] || install -m 0644 "$HERE/overlay/etc/openflexito/config.toml" /etc/openflexito/config.toml
 chmod 600 /etc/NetworkManager/system-connections/*.nmconnection
 chmod +x /usr/local/bin/openflexito-*
@@ -54,7 +57,7 @@ sed -i 's/^127\.0\.1\.1.*/127.0.1.1\tmicroscope/' /etc/hosts
 systemctl daemon-reload
 systemctl disable --now hciuart.service bluetooth.service serial-getty@ttyAMA0.service serial-getty@ttyS0.service 2>/dev/null || true
 systemctl mask serial-getty@ttyAMA0.service 2>/dev/null || true
-systemctl enable avahi-daemon NetworkManager openflexito.service openflexito-firstboot.service openflexito-netfallback.timer
+systemctl enable avahi-daemon NetworkManager openflexito.service openflexito-firstboot.service openflexito-netfallback.timer openflexito-maint.path
 systemctl restart avahi-daemon || true
 systemctl restart openflexito.service
 

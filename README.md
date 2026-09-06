@@ -88,6 +88,9 @@ the bundled `imx219.json` tuning file comes from that project.
 - The ACT LED's `pattern`/`repeat` sysfs files are recreated as root whenever the trigger is
   re-selected, so the unit selects the trigger once in `ExecStartPre` and hands the files to the
   service user; `leds.py` never re-selects an active trigger.
+- The overlay is copied with `rsync --chown=root:root` and the tarball is built with uid 0. An earlier build
+  re-owned `/`, `/etc` and `/usr` to the build machine's uid, which made NetworkManager ignore the hotspot
+  profile (it requires root-owned 0600 files) and broke sudo's path checks.
 - First-boot install waits for NTP sync (`timedatectl`) before `apt`, otherwise the Pi's clock is
   still at the image date and apt rejects every release file as "not valid yet".
 - CPU on the Pi 3B+: picamera2 alone (1640×1232 + 410×308 YUV420, no raw stream, 30 fps) costs
@@ -99,6 +102,18 @@ the bundled `imx219.json` tuning file comes from that project.
   lag from sensor to JPEG output is ~60 ms.
 - `/raw.bin` (3280×2464 SBGGR10 unpacked to 16 MB) takes ~14 s over WiFi; the tuning reload via a
   fresh `CameraManager` takes 1.5 s.
+
+## Logs and crashes
+
+The service log lives in the systemd journal, which the image makes persistent and size-capped
+(64 MB, two months) so crashes survive a reboot. Uncaught exceptions in threads, the asyncio loop and
+the main thread are routed through `logging`, so a dying camera or stage thread leaves a traceback.
+Settings → Device logs fetches the tail (journal or in-memory records, filtered by level), downloads it
+for a bug report, or clears it. RPC: `system.logs`, `system.clear_logs`.
+
+The service runs unprivileged with `NoNewPrivileges`, so privileged actions (clear journal, reboot,
+power off) are request files in `/var/lib/openflexito/requests/` handled by the root-side
+`openflexito-maint.path` unit. No sudo.
 
 ## Status (2026-09-06)
 

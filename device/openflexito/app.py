@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import signal
-import subprocess
 from pathlib import Path
 
 from aiohttp import web
@@ -16,6 +15,7 @@ from .camera import CameraBase, make_camera
 from .config import Config
 from .events import EventBus
 from .leds import LedController
+from . import logbuf
 from .netwatch import network_state, wifi_join, wifi_scan
 from .rpc import RpcRegistry
 from .sangaboard import Sangaboard, SangaboardError
@@ -126,8 +126,28 @@ class Device:
         r.register("system.config", lambda: self.cfg.to_dict(), "Effective configuration.")
         r.register("system.wifi_scan", wifi_scan, "Scan for WiFi networks via NetworkManager.")
         r.register("system.wifi_join", wifi_join, "Join a WiFi network (ssid, psk).")
-        r.register("system.reboot", lambda: _systemctl("reboot"), "Reboot the device.")
-        r.register("system.shutdown", lambda: _systemctl("poweroff"), "Power off the device.")
+        r.register("system.reboot", lambda: _thread(logbuf.request, self.cfg.state_dir, "reboot"), "Reboot the device.")
+        r.register("system.shutdown", lambda: _thread(logbuf.request, self.cfg.state_dir, "poweroff"), "Power off the device.")
+
+        async def system_logs(lines: int = 200, level: str = "INFO", source: str = "journal") -> dict:
+            """Recent logs. source: 'journal' (persistent, includes crashes, survives reboots) or
+            'app' (in-memory structured records). level: DEBUG|INFO|WARNING|ERROR|CRITICAL."""
+            lines = max(1, min(int(lines), 5000))
+            if source == "app":
+                return {"source": "app", "records": logbuf.ring.tail(lines, level)}
+            text = await _thread(logbuf.journal_tail, lines, level)
+            usage = await _thread(logbuf.journal_usage)
+            return {"source": "journal", "lines": text, "disk_usage": usage}
+
+        async def system_clear_logs() -> dict:
+            """Clear the in-memory records and delete the persistent journal for this device."""
+            logbuf.ring.clear()
+            result = await _thread(logbuf.journal_clear, self.cfg.state_dir)
+            log.info("logs cleared by client (%s)", result)
+            return {"journal": result}
+
+        r.register("system.logs", system_logs)
+        r.register("system.clear_logs", system_clear_logs)
 
         if st is not None:
             r.register("stage.status", st.status, "Position, backlash, inversion, firmware.")
@@ -193,6 +213,7 @@ class Device:
     # ---- lifecycle ---------------------------------------------------------------------------
 
     async def run(self) -> None:
+        logbuf.install_loop_hook(asyncio.get_running_loop())
         loop = asyncio.get_running_loop()
         self.events.bind(loop)
         self.open_hardware()
@@ -235,10 +256,3 @@ class Device:
 async def _thread(fn, *args):
     return await asyncio.get_running_loop().run_in_executor(None, fn, *args)
 
-
-async def _systemctl(action: str) -> dict:
-    try:
-        subprocess.Popen(["systemctl", action])
-        return {"ok": True}
-    except OSError as e:
-        return {"ok": False, "error": str(e)}

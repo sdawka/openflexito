@@ -9,6 +9,9 @@ Thin-device microscope stack. **Rule: the Pi only relays; all image maths lives 
 - image: `image/build-mac.sh` (mtools injection into the official Bookworm Lite image; needs `image/secrets.env`) is the working builder; `image/build.sh` (sdm) is untested. `sudo image/install.sh [--trim] [--readonly]` on a live Pi.
 
 ## Conventions
+- The device runs unprivileged with `NoNewPrivileges`; never call sudo. Privileged actions go through `logbuf.request()` (request files handled by `openflexito-maint.path`). Log via `logging` only: the ring handler + persistent journal are what `system.logs` exposes.
+- Anything that touches the camera from another thread (encoder output, picamera2 callbacks) must not iterate shared containers without `_meta_lock`; wrap thread callbacks in try/except, an exception there kills picamera2's thread and freezes the stream silently.
+- Files copied onto the Pi must be root-owned: `rsync --chown=root:root`, `tar --uid 0`; NetworkManager ignores profiles that aren't root:root 0600.
 - RPC methods are registered in `device/openflexito/app.py` (`register_rpc`); names are `group.verb`; params are keyword JSON. `GET /rpc/schema` is generated from type hints, keep hints accurate.
 - Timestamps everywhere are nanoseconds on CLOCK_BOOTTIME (same clock as libcamera `SensorTimestamp`); the browser interpolates z per frame from `event.position` t0/t1.
 - Moves that must not be backlash-compensated (jog, click-to-move, autofocus sweeps, CSM) pass `compensate: false`.

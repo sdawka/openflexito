@@ -39,8 +39,8 @@ def main() -> None:
     if args.webapp_dir is not None:
         cfg.webapp_dir = args.webapp_dir
 
-    logging.basicConfig(level=logging.DEBUG if args.verbose else getattr(logging, cfg.log_level.upper(), logging.INFO),
-                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    from .logbuf import install as install_logging
+    install_logging(logging.DEBUG if args.verbose else getattr(logging, cfg.log_level.upper(), logging.INFO))
     asyncio.run(Device(cfg).run())
 
 

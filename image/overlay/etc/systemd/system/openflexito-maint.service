@@ -1,0 +1,6 @@
+[Unit]
+Description=Handle a maintenance request from the openflexito service (clear logs, reboot, poweroff)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/openflexito-maint
