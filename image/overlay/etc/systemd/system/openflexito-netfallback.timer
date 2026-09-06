@@ -1,0 +1,10 @@
+[Unit]
+Description=openflexito WiFi hotspot fallback (40 s after boot, then every 5 min)
+
+[Timer]
+OnBootSec=40s
+OnUnitActiveSec=5min
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

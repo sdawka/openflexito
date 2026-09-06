@@ -1,0 +1,7 @@
+[Unit]
+Description=openflexito WiFi hotspot fallback check
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/openflexito-netfallback

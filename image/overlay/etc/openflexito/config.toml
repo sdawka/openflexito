@@ -1,0 +1,19 @@
+# openflexito device configuration. Defaults are in openflexito/config.py.
+# host = "0.0.0.0"   # default: all interfaces, IPv4 and IPv6
+port = 80
+state_dir = "/var/lib/openflexito"
+webapp_dir = "/opt/openflexito/webapp"
+led_path = "/sys/class/leds/ACT"
+hotspot_connection = "openflexito-hotspot"
+log_level = "INFO"
+
+[camera]
+sensor_size = [1640, 1232]   # IMX219 binned mode: full field of view
+stream_size = [1640, 1232]
+lores_size = [410, 308]
+bitrate = 25000000
+
+[stage]
+# port = "/dev/ttyAMA0"      # default: autodetect
+backlash = { x = 200, y = 200, z = 200 }
+inverted = { x = true, y = false, z = true }

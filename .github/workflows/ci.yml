@@ -1,0 +1,27 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  device:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install -e "device[dev]"
+      - run: pytest -q device
+  webapp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 26, cache: npm, cache-dependency-path: webapp/package-lock.json }
+      - run: npm ci
+        working-directory: webapp
+      - run: npm run check
+        working-directory: webapp
+      - run: npm test -- --run
+        working-directory: webapp
+      - run: npm run build
+        working-directory: webapp
+      - uses: actions/upload-artifact@v4
+        with: { name: webapp-dist, path: webapp/dist }

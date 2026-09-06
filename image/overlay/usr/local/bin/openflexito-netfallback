@@ -1,0 +1,22 @@
+#!/bin/sh
+# Hotspot fallback: if no WiFi client connection is active, start the hotspot; while the
+# hotspot is up, periodically drop it to give known networks a chance to reconnect.
+set -u
+HOTSPOT=openflexito-hotspot
+active_wifi_client() {
+    nmcli -t -f NAME,TYPE connection show --active | grep -E ':(802-11-wireless|wifi)$' | grep -v "^$HOTSPOT:" -q
+}
+hotspot_up() {
+    nmcli -t -f NAME connection show --active | grep -qx "$HOTSPOT"
+}
+if active_wifi_client; then
+    exit 0
+fi
+if hotspot_up; then
+    # Retry known networks every run (timer decides cadence): drop hotspot, scan, reconnect.
+    nmcli connection down "$HOTSPOT" >/dev/null 2>&1 || true
+    nmcli device wifi rescan >/dev/null 2>&1 || true
+    sleep 20
+    if active_wifi_client; then exit 0; fi
+fi
+nmcli connection up "$HOTSPOT" >/dev/null 2>&1 && echo "hotspot started" || echo "hotspot failed"

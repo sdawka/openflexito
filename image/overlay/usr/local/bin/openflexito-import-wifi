@@ -1,0 +1,37 @@
+#!/bin/sh
+# Reads SSID/PSK/COUNTRY from /boot/firmware/openflexito-wifi.txt, writes a NetworkManager
+# client profile with higher priority than the hotspot, then removes the credentials file.
+set -eu
+F=/boot/firmware/openflexito-wifi.txt
+SSID=$(sed -n 's/^SSID=//p' "$F" | head -1 | tr -d '\r')
+PSK=$(sed -n 's/^PSK=//p' "$F" | head -1 | tr -d '\r')
+COUNTRY=$(sed -n 's/^COUNTRY=//p' "$F" | head -1 | tr -d '\r')
+[ -n "$SSID" ] || { echo "no SSID in $F"; exit 0; }
+[ -n "$COUNTRY" ] && raspi-config nonint do_wifi_country "$COUNTRY" >/dev/null 2>&1 || true
+UUID=$(cat /proc/sys/kernel/random/uuid)
+cat > "/etc/NetworkManager/system-connections/openflexito-client.nmconnection" <<NM
+[connection]
+id=openflexito-client
+uuid=$UUID
+type=wifi
+autoconnect=true
+autoconnect-priority=10
+autoconnect-retries=0
+
+[wifi]
+mode=infrastructure
+ssid=$SSID
+
+[wifi-security]
+key-mgmt=wpa-psk
+psk=$PSK
+
+[ipv4]
+method=auto
+
+[ipv6]
+method=auto
+NM
+chmod 600 /etc/NetworkManager/system-connections/openflexito-client.nmconnection
+rm -f "$F"
+echo "imported WiFi profile for $SSID"

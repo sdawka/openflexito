@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+node_modules/
+webapp/dist/
+image/build/
+image/*.img
+image/*.img.xz
+.DS_Store
+image/secrets.env

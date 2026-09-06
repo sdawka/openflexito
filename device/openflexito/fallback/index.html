@@ -1,0 +1,27 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>openflexito</title>
+<style>
+  body{margin:0;background:#111;color:#ddd;font:14px system-ui;display:grid;grid-template-rows:auto 1fr;height:100vh}
+  header{padding:8px 12px;display:flex;gap:16px;align-items:center;background:#1c1c22}
+  main{display:grid;place-items:center}
+  img{max-width:100%;max-height:100%}
+  button{background:#333;color:#eee;border:1px solid #555;padding:6px 10px;border-radius:4px}
+  code{color:#9cf}
+</style>
+<header>
+  <strong>openflexito</strong>
+  <span>webapp build not installed; minimal fallback. RPC: <code>POST /rpc</code>, schema: <a href="/rpc/schema">/rpc/schema</a></span>
+  <span id="pos"></span>
+  <button onclick="mv(0,0,-200)">Z-</button><button onclick="mv(0,0,200)">Z+</button>
+  <button onclick="mv(-500,0,0)">X-</button><button onclick="mv(500,0,0)">X+</button>
+  <button onclick="mv(0,-500,0)">Y-</button><button onclick="mv(0,500,0)">Y+</button>
+</header>
+<main><img src="/stream.mjpg" alt="camera stream"></main>
+<script>
+  const ws = new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws');
+  ws.onmessage = e => { const m = JSON.parse(e.data); if (m.method==='event.position') pos.textContent = JSON.stringify(m.params.position); };
+  let id = 0;
+  function mv(x,y,z){ ws.send(JSON.stringify({jsonrpc:'2.0',id:++id,method:'stage.move_rel',params:{x,y,z}})); }
+  addEventListener('keydown', e => { const k={ArrowLeft:[-200,0,0],ArrowRight:[200,0,0],ArrowUp:[0,200,0],ArrowDown:[0,-200,0],PageUp:[0,0,100],PageDown:[0,0,-100]}[e.key]; if(k){e.preventDefault();mv(...k);} });
+</script>

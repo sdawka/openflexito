@@ -1,0 +1,11 @@
+[Unit]
+Description=openflexito first boot: import WiFi credentials from /boot/firmware/openflexito-wifi.txt
+Before=NetworkManager.service
+ConditionPathExists=/boot/firmware/openflexito-wifi.txt
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/openflexito-import-wifi
+
+[Install]
+WantedBy=multi-user.target

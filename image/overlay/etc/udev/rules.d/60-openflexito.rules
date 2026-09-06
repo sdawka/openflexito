@@ -1,0 +1,5 @@
+# Device access for the unprivileged openflexito service (replaces what raspberrypi-sys-mods' 99-com.rules would grant).
+SUBSYSTEM=="dma_heap", GROUP="video", MODE="0660"
+SUBSYSTEM=="vchiq", GROUP="video", MODE="0660"
+KERNEL=="vcio", GROUP="video", MODE="0660"
+SUBSYSTEM=="tty", KERNEL=="ttyAMA0", GROUP="dialout", MODE="0660"

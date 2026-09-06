@@ -1,0 +1,8 @@
+# --- openflexito (included from config.txt) ---
+enable_uart=1
+dtoverlay=disable-bt
+dtoverlay=vc4-kms-v3d,cma-256
+camera_auto_detect=1
+disable_camera_led=1
+dtparam=act_led_trigger=none
+dtparam=audio=off
