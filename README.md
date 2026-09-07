@@ -132,10 +132,26 @@ energy; an **LED exposure stack** captures the scene at several LED levels (0.4�
 current brightness, clipped to the range) and fuses them with well-exposedness weights (Mertens-style,
 single scale). Both weight maps are smoothed over neighbouring blocks so seams do not show.
 
-Extra illumination: the Sangaboard v0.5 reports `CC:1 PWM:2`, i.e. one constant-current driver (the main
-LED) and two spare PWM outputs on the board. A side or oblique LED wired to a PWM output is driven with
-`light.set {pwm: [v0, v1]}` and gets its own slider under Illumination; nothing on the Pi's GPIO is
-needed (the HAT covers the header anyway).
+Extra illumination (darkfield, oblique): the Sangaboard v0.5 reports `CC:1 PWM:2`. From the schematic
+(`filipayazi/sangaboard-rp2040`, illumination sheet) and the v7 build docs: the CC channel is a TPS61060
+boost driver, 0–100 mA (default ~30 mA), for an LED with 2.5–5 V forward voltage; each PWM channel is an
+AO3400A MOSFET that switches the LED's cathode to ground through a 1.5 Ω resistor (bypass solder jumpers
+JP5/JP6 underneath), rated up to 1 A, anode side on +5 V. On the 6-pin illumination connector J8: pins 1
+and 3 are +5 V, pin 2 is PWM 1 (`PWM_LED_N`), pin 4 is PWM 2 (`PWM_LED2_N`), pins 5/6 are the CC LED.
+The same PWM nets are on the shield header (pins 25/26). A standard 20 mA 5 mm LED therefore needs its
+own series resistor between +5 V and the PWM pin: ~100 Ω for white/blue (3.2 V), ~150 Ω for red/amber
+(2 V); several LEDs in parallel each with a resistor, up to the 1 A channel limit. `light.set {pwm: [v0,
+v1]}` drives them (0–1 duty), each gets a slider under Illumination, and the Illumination-mode presets
+(Brightfield / Darkfield / Oblique / Rheinberg, editable) switch between the geometries in one click.
+
+Darkfield with plain LEDs: light must reach the sample from outside the objective's acceptance cone, so
+nothing unscattered enters it. For a 40× 0.65 NA objective that is more than ~40° off axis; for 4×/10×
+(NA 0.1–0.25) only 6–15°. A ring of 6–8 white LEDs around the condenser, aimed at the sample from
+~50–60° and driven from PWM 1, gives darkfield with the condenser LED off; one or two LEDs from a
+single side on PWM 2 give oblique illumination; condenser LED dim plus the ring gives a Rheinberg-like
+image. OpenFlexure's own route is the Delta Stage's 8×8 DotStar array (Adafruit 3444) 5 mm under the
+sample with the outer LEDs lit (arXiv 2112.05804); community alternatives are a patch stop in a
+modularised condenser (forum topic 1249) and a Köhler-style condenser with light stops (topic 2400).
 
 ## Logs and crashes
 

@@ -15,12 +15,21 @@ export interface Settings {
   detectIntervalMs: number
   followDeadbandPx: number
   followIntervalMs: number
+  /** Illumination presets: name -> LED levels (cc = main condenser LED, pwm = the board's PWM outputs, e.g. a
+   *  darkfield ring on PWM 0 and an oblique side LED on PWM 1). Editable from the Illumination panel. */
+  lightPresets: Record<string, { cc: number; pwm: number[] }>
 }
 
 const defaults: Settings = {
   deviceUrl: '', stepXY: 500, stepZ: 100, gamepad: true, invertYKeys: false, showLores: false,
   detectModel: 'Xenova/yolos-tiny', clipModel: 'Xenova/clip-vit-base-patch32', detectThreshold: 0.5, detectIntervalMs: 800,
   followDeadbandPx: 12, followIntervalMs: 400,
+  lightPresets: {
+    Brightfield: { cc: 0.32, pwm: [0, 0] },
+    Darkfield: { cc: 0, pwm: [1, 0] },
+    Oblique: { cc: 0, pwm: [0, 1] },
+    Rheinberg: { cc: 0.1, pwm: [1, 0] },
+  },
 }
 
 function load(): Settings {
