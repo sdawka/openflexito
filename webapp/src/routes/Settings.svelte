@@ -88,6 +88,20 @@
   </div>
 
   <div class="panel">
+    <h3>Scale bar &amp; measurement</h3>
+    <p class="muted" style="font-size:12px;margin:0 0 8px">Stage step size (µm/step), used with the CSM calibration to derive µm/px for the scale bar and
+      the measurement tool. Default is the OpenFlexure v7 low-cost actuator's measured resolution (28BYJ-48 motor + printed
+      gears + M3 leadscrew: xy 88 nm/step, z 50 nm/step — Stewart et al., "The OpenFlexure Block Stage", arXiv:1911.09986);
+      override it here if your build differs, or use "Calibrate from this" on a distance measurement of a stage micrometer instead.</p>
+    <div class="row">
+      {#each ['x', 'y', 'z'] as const as a}
+        <div><div class="label">{a} µm/step</div><input class="mono" type="number" step="0.001" min="0" style="width:90px" bind:value={settings.stageStepUm[a]} onchange={saveSettings} /></div>
+      {/each}
+      <label style="display:flex;gap:8px;align-items:center;margin-left:auto"><input type="checkbox" bind:checked={settings.showScaleBar} onchange={saveSettings} /> show scale bar</label>
+    </div>
+  </div>
+
+  <div class="panel">
     <h3>Input</h3>
     <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" bind:checked={settings.gamepad} onchange={saveSettings} /> enable gamepad</label>
     <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" bind:checked={settings.invertYKeys} onchange={saveSettings} /> invert Y for keyboard</label>

@@ -4,6 +4,7 @@
   import { device } from '../lib/store/device.svelte'
   import { wb, gainsToTempTint, tempTintToGains, neutralWholeField } from '../lib/services/whiteBalance.svelte'
   import FlickerCheck from './FlickerCheck.svelte'
+  import Histogram from './Histogram.svelte'
 
   const c = $derived(device.controls)
   const live = $derived(device.frame)
@@ -68,6 +69,7 @@
     </div>
     {#if wb.status}<div class="status-line {wb.status.startsWith('white balance: red') ? 'ok' : wb.status.includes('…') ? 'busy' : 'err'}">{wb.status}</div>{/if}
     <FlickerCheck />
+    <Histogram />
   {:else}
     <span class="muted">camera not available</span>
   {/if}
