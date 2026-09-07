@@ -14,12 +14,15 @@
 
   export interface Box { x: number; y: number; w: number; h: number; label?: string; score?: number; kind?: 'detect' | 'follow' | 'select' }
   export interface Pan { dx: number; dy: number; w: number; h: number; done: boolean }
+  /** a tracked object's trajectory, points as fractions of the frame (0..1) in time order */
+  export interface Path { points: { x: number; y: number }[]; color?: string }
 
   let {
-    boxes = [], panOffset = null, picking = false, onclickimage, onselectregion, onclickbox, onpan,
+    boxes = [], paths = [], panOffset = null, picking = false, onclickimage, onselectregion, onclickbox, onpan,
     scaleInfo = null, measuring = false, measurePoints = [], measureClosed = false, onmeasureclick, onmeasuredblclick,
   }: {
     boxes?: Box[]
+    paths?: Path[]
     panOffset?: [number, number] | null
     picking?: boolean            // eyedropper mode: show a crosshair cursor
     onclickimage?: (p: { x: number; y: number; w: number; h: number }) => void
@@ -148,6 +151,9 @@
       {#each boxes as b}
         <rect x={b.x} y={b.y} width={b.w} height={b.h} class={b.kind ?? 'detect'} vector-effect="non-scaling-stroke" />
       {/each}
+      {#each paths as p}
+        <polyline points={p.points.map((pt) => `${pt.x},${pt.y}`).join(' ')} class="track" style={p.color ? `stroke:${p.color}` : ''} vector-effect="non-scaling-stroke" />
+      {/each}
       {#if drag}
         <rect x={Math.min(drag.x0, drag.x1)} y={Math.min(drag.y0, drag.y1)} width={Math.abs(drag.x1 - drag.x0)} height={Math.abs(drag.y1 - drag.y0)} class="select" vector-effect="non-scaling-stroke" />
       {/if}
@@ -201,6 +207,7 @@
   .overlay rect.detect { stroke: var(--warn); }
   .overlay rect.follow { stroke: var(--ok); stroke-dasharray: 6 4; }
   .overlay rect.select { stroke: var(--accent); fill: rgba(79,140,255,.15); }
+  .overlay polyline.track { fill: none; stroke: var(--accent); stroke-width: 2px; opacity: .85; }
   .tag { position: absolute; transform: translateY(-100%); font-size: 11px; padding: 1px 4px; border-radius: 3px 3px 0 0; pointer-events: none; color: #000; }
   .tag.detect { background: var(--warn); } .tag.follow { background: var(--ok); }
   .crosshair { position: absolute; left: 50%; top: 50%; width: 24px; height: 24px; transform: translate(-50%, -50%);

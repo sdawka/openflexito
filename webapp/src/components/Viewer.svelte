@@ -1,20 +1,24 @@
 <script lang="ts">
-  /** Zoomable image viewer (OpenSeadragon) for an image Blob; a plain player for video Blobs.
+  /** Zoomable image viewer (OpenSeadragon) for an image Blob, a plain player for video Blobs, or the
+   *  time-lapse player (`TimelapseViewer`) when `item` is a time-lapse gallery item.
    *  Also hosts the scale bar and measurement tool for gallery images: `width` (the item's natural
    *  pixel width, from the gallery record) lets `lib/store/scaleCal.svelte.ts` derive µm/px for
    *  whatever zoom level OSD is currently showing. Measurement here shares the same tool state as the
    *  live view (`lib/services/measureService.svelte.ts`) so both feed one results list / CSV export. */
   import { onMount } from 'svelte'
   import OpenSeadragon from 'openseadragon'
+  import type { GalleryItem } from '../lib/store/gallery'
+  import TimelapseViewer from './TimelapseViewer.svelte'
   import { measure } from '../lib/services/measureService.svelte'
   import { currentScale, umPerPxAt } from '../lib/store/scaleCal.svelte'
   import { scaleForWidth, niceScaleBarLength, type Pt } from '../lib/algo/measure'
   import MeasurePanel from './MeasurePanel.svelte'
 
-  let { blob, width, onclose }: { blob: Blob; width?: number; onclose: () => void } = $props()
+  let { blob = null, width, item, onclose }: { blob?: Blob | null; width?: number; item?: GalleryItem; onclose: () => void } = $props()
   let el: HTMLDivElement | undefined = $state()
   let viewer: OpenSeadragon.Viewer | undefined
-  const isVideo = $derived(blob.type.startsWith('video/'))
+  const isTimelapse = $derived(item?.kind === 'timelapse')
+  const isVideo = $derived(!!blob && blob.type.startsWith('video/'))
   let videoUrl = $state('')
   let imgPxPerScreenPx = $state(1)   // how many *image* pixels one screen pixel covers, at the current zoom
 
@@ -27,6 +31,7 @@
   }
 
   onMount(() => {
+    if (isTimelapse || !blob) return
     const url = URL.createObjectURL(blob)
     if (isVideo) { videoUrl = url; return () => URL.revokeObjectURL(url) }
     viewer = OpenSeadragon({
@@ -94,7 +99,9 @@
 
 <div class="overlay">
   <button class="close" onclick={onclose}>✕ close</button>
-  {#if isVideo}
+  {#if isTimelapse && item}
+    <TimelapseViewer {item} />
+  {:else if isVideo}
     <!-- svelte-ignore a11y_media_has_caption -->
     <video class="video" src={videoUrl} controls autoplay loop></video>
   {:else}
