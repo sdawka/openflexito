@@ -23,6 +23,17 @@
   import { getBlob } from '../lib/store/gallery'
   import Viewer from '../components/Viewer.svelte'
   import type { Box } from '../components/StreamView.svelte'
+  import MeasurePanel from '../components/MeasurePanel.svelte'
+  import { measure } from '../lib/services/measureService.svelte'
+  import { umPerPxAt, currentScale } from '../lib/store/scaleCal.svelte'
+
+  // ---- measurement tool: M toggles, Escape leaves; clicks are intercepted by StreamView while active ----
+  let measureImgW = 0
+  function onMeasureClick(p: { x: number; y: number; w: number; h: number }) {
+    measureImgW = p.w
+    measure.addPoint({ x: p.x, y: p.y }, p.w, p.h, umPerPxAt(p.w))
+  }
+  function onMeasureDblClick() { measure.closePolygon(umPerPxAt(measureImgW)) }
 
   // ---- click-hold-drag panning (like a map): the picture follows the cursor, the stage follows the picture ----
   let panner: PanController | null = null
@@ -130,7 +141,14 @@
     )
     const offKeys = attachKeyboard(jog, { invertY: () => settings.invertYKeys, enabled: () => device.connected })
     const offPad = attachGamepad(jog, { stop: () => device.stop(), autofocus }, () => settings.gamepad && device.connected)
-    return () => { offKeys(); offPad(); jog.dispose(); detecting = false; clearTimeout(detectTimer); follow.stop(); liveStack.stop() }
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || viewing) return   // Viewer.svelte owns M/Escape while open
+      if (e.key === 'm' || e.key === 'M') measure.toggle()
+      else if (e.key === 'Escape' && measure.active) measure.cancel()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => { offKeys(); offPad(); window.removeEventListener('keydown', onKey); jog.dispose(); detecting = false; clearTimeout(detectTimer); follow.stop(); liveStack.stop() }
   })
 
   function onClickImage(p: { x: number; y: number; w: number; h: number }) {
@@ -151,7 +169,9 @@
 
 <div class="live">
   <section class="stream">
-    <StreamView {boxes} {panOffset} onpan={onPan} onclickimage={onClickImage} onselectregion={onSelectRegion} onclickbox={followBox} picking={wb.picking} />
+    <StreamView {boxes} {panOffset} onpan={onPan} onclickimage={onClickImage} onselectregion={onSelectRegion} onclickbox={followBox} picking={wb.picking}
+      scaleInfo={settings.showScaleBar ? currentScale() : null} measuring={measure.active} measurePoints={measure.points} measureClosed={measure.mode === 'polygon'}
+      onmeasureclick={onMeasureClick} onmeasuredblclick={onMeasureDblClick} />
     {#if wb.picking}<div class="hint mono" style="top:12px;bottom:auto">click a spot that should be neutral grey or white</div>{/if}
     {#if follow.active || follow.status}<div class="hint mono" style="right:12px;left:auto">{follow.status}{#if follow.active} <button onclick={() => follow.stop()}>stop</button>{/if}</div>{/if}
     {#if ai.status}<div class="hint mono" style="top:12px;bottom:auto">{ai.status}</div>{/if}
@@ -198,6 +218,7 @@
       </details>
     </div>
     <PhotoPanel />
+    <MeasurePanel />
     <CameraControls />
     <LightControl />
     <div class="panel">

@@ -106,7 +106,7 @@
     {/each}
   </div>
 </div>
-{#if viewing}<Viewer blob={viewing.blob} onclose={() => (viewing = null)} />{/if}
+{#if viewing}<Viewer blob={viewing.blob} width={viewing.item.width} onclose={() => (viewing = null)} />{/if}
 
 <style>
   .wrap { padding: 16px; }

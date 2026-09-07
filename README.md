@@ -215,6 +215,29 @@ image. OpenFlexure's own route is the Delta Stage's 8×8 DotStar array (Adafruit
 sample with the outer LEDs lit (arXiv 2112.05804); community alternatives are a patch stop in a
 modularised condenser (forum topic 1249) and a Köhler-style condenser with light stops (topic 2400).
 
+### Measurement and exposure
+
+**Scale bar and measurement tool**: Settings has a stage step size (µm/step, per axis), defaulting to the
+OpenFlexure v7 low-cost actuator's measured resolution — a 28BYJ-48 geared stepper driving a printed-gear
+train and M3 leadscrew, 88 ± 6 nm/step in xy and 50 ± 2 nm/step in z (Stewart, Bowman et al., "The
+OpenFlexure Block Stage", arXiv:1911.09986) — editable for other builds. Combined with the CSM calibration
+this gives µm per image pixel at any resolution (`lib/algo/measure.ts`), shown as a rounded 1/2/5 × 10^n
+scale bar bottom-left of the live view and the gallery viewer (toggle in Settings; hidden with no
+calibration). A second route needs no CSM run at all: measure a segment on a stage micrometer with the
+Distance tool and "Calibrate from this" to type its real length, storing µm/px directly. The measurement
+tool itself (toolbar in the Live page's aside, keyboard <kbd>M</kbd> to toggle, <kbd>Esc</kbd> to leave)
+does click-click distance, a clicked polygon closed with a double-click for area and perimeter (shoelace
+formula), and three clicks for an angle; results list with copy-to-clipboard as CSV. It takes over clicks
+only while active, so the existing pan/centre/select gestures are unaffected, and works identically on the
+live stream and on a gallery image opened in the viewer (which shares the same results list).
+
+**Live histogram and auto-exposure**: the Camera panel samples the live `<img>` into an OffscreenCanvas
+(~205 px wide, four times a second, only while the panel is visible) for a luminance + RGB histogram
+(`lib/algo/histogram.ts`), flagging the fraction of pixels at ≥250 and ≤5 as clipped highlights/shadows
+and showing the mean level. With auto exposure off, **Expose to 60% grey** iterates `ExposureTime` (then
+`AnalogueGain` once exposure hits its limits) over 2-3 rounds to bring the mean near 153/255; with auto
+exposure on it explains that AE is already in control instead of fighting it.
+
 ## Logs and crashes
 
 The service log lives in the systemd journal, which the image makes persistent and size-capped

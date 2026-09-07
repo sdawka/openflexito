@@ -10,11 +10,15 @@
   import { device } from '../lib/store/device.svelte'
   import { settings } from '../lib/store/settings.svelte'
   import { liveStack } from '../lib/services/liveStack.svelte'
+  import { scaleForWidth, niceScaleBarLength, type Pt } from '../lib/algo/measure'
 
   export interface Box { x: number; y: number; w: number; h: number; label?: string; score?: number; kind?: 'detect' | 'follow' | 'select' }
   export interface Pan { dx: number; dy: number; w: number; h: number; done: boolean }
 
-  let { boxes = [], panOffset = null, picking = false, onclickimage, onselectregion, onclickbox, onpan }: {
+  let {
+    boxes = [], panOffset = null, picking = false, onclickimage, onselectregion, onclickbox, onpan,
+    scaleInfo = null, measuring = false, measurePoints = [], measureClosed = false, onmeasureclick, onmeasuredblclick,
+  }: {
     boxes?: Box[]
     panOffset?: [number, number] | null
     picking?: boolean            // eyedropper mode: show a crosshair cursor
@@ -22,6 +26,12 @@
     onselectregion?: (r: { x: number; y: number; w: number; h: number }) => void
     onclickbox?: (b: Box) => void
     onpan?: (p: Pan) => void
+    scaleInfo?: { umPerPx: number; referenceWidth: number } | null    // for the scale bar overlay
+    measuring?: boolean          // measurement mode: clicks add points instead of panning/centring
+    measurePoints?: Pt[]         // fractions, current in-progress measurement (from measureService)
+    measureClosed?: boolean      // draw the closing segment / fill (polygon mode)
+    onmeasureclick?: (p: { x: number; y: number; w: number; h: number }) => void
+    onmeasuredblclick?: () => void
   } = $props()
 
   let img: HTMLImageElement | undefined = $state()
@@ -73,11 +83,15 @@
   /** displayed px per natural px (the translate is measured against the unshifted layout box) */
   const scale = $derived(geo && img?.naturalWidth ? geo.w / img.naturalWidth : 1)
   const shift = $derived(panOffset && geo ? `translate(${panOffset[0] * scale}px, ${panOffset[1] * scale}px)` : '')
+  let measureHover = $state<{ x: number; y: number } | null>(null)
+  const umPerPxHere = $derived(scaleInfo && img?.naturalWidth ? scaleForWidth(scaleInfo.umPerPx, scaleInfo.referenceWidth, img.naturalWidth) : null)
+  const scaleBar = $derived(umPerPxHere && img?.naturalWidth ? niceScaleBarLength(umPerPxHere, img.naturalWidth * 0.3) : null)
 
   function down(e: PointerEvent) {
     if (e.button !== 0) return
     const p = toFrac(e); if (!p) return
     ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+    if (measuring) return   // wait for `up` (a plain click), no drag/pan while measuring
     if (e.shiftKey) { drag = { x0: p.x, y0: p.y, x1: p.x, y1: p.y }; return }
     pan = { cx: e.clientX, cy: e.clientY, moved: false, frac: p }
   }
@@ -87,6 +101,7 @@
     return { dx: (e.clientX - pan.cx) * k, dy: (e.clientY - pan.cy) * k, w: img.naturalWidth, h: img.naturalHeight, done }
   }
   function move(e: PointerEvent) {
+    if (measuring) { measureHover = toFrac(e); return }
     if (drag) { const p = toFrac(e); if (p) drag = { ...drag, x1: p.x, y1: p.y }; return }
     if (pan) {
       if (!pan.moved && Math.hypot(e.clientX - pan.cx, e.clientY - pan.cy) < CLICK_PX) return
@@ -95,6 +110,10 @@
     }
   }
   function up(e: PointerEvent) {
+    if (measuring) {
+      const p = toFrac(e); if (p && img) onmeasureclick?.({ x: p.x, y: p.y, w: img.naturalWidth, h: img.naturalHeight })
+      return
+    }
     if (drag) {
       const r = { x: Math.min(drag.x0, drag.x1), y: Math.min(drag.y0, drag.y1), w: Math.abs(drag.x1 - drag.x0), h: Math.abs(drag.y1 - drag.y0) }
       drag = null
@@ -118,7 +137,7 @@
   const px = (v: number, size: number, off: number) => off + v * size
 </script>
 
-<div class="view" class:panning={pan?.moved} class:picking onpointerdown={down} onpointermove={move} onpointerup={up} onpointercancel={cancel} role="presentation">
+<div class="view" class:panning={pan?.moved} class:picking class:measuring onpointerdown={down} onpointermove={move} onpointerup={up} onpointercancel={cancel} ondblclick={() => measuring && onmeasuredblclick?.()} role="presentation">
   {#if error}
     <div class="err">stream unavailable <button onclick={() => { error = false; nonce++ }}>retry</button></div>
   {/if}
@@ -132,7 +151,24 @@
       {#if drag}
         <rect x={Math.min(drag.x0, drag.x1)} y={Math.min(drag.y0, drag.y1)} width={Math.abs(drag.x1 - drag.x0)} height={Math.abs(drag.y1 - drag.y0)} class="select" vector-effect="non-scaling-stroke" />
       {/if}
+      {#if measurePoints.length}
+        {#if measureClosed && measurePoints.length > 2}
+          <polygon points={measurePoints.map((p) => `${p.x},${p.y}`).join(' ')} class="measure-fill" />
+        {/if}
+        {#each measurePoints as p, i}
+          {#if i > 0}<line x1={measurePoints[i - 1].x} y1={measurePoints[i - 1].y} x2={p.x} y2={p.y} class="measure-line" vector-effect="non-scaling-stroke" />{/if}
+        {/each}
+        {#if measureClosed && measurePoints.length > 2}
+          <line x1={measurePoints[measurePoints.length - 1].x} y1={measurePoints[measurePoints.length - 1].y} x2={measurePoints[0].x} y2={measurePoints[0].y} class="measure-line" vector-effect="non-scaling-stroke" />
+        {/if}
+        {#if measuring && measureHover}
+          <line x1={measurePoints[measurePoints.length - 1].x} y1={measurePoints[measurePoints.length - 1].y} x2={measureHover.x} y2={measureHover.y} class="measure-line ghost" vector-effect="non-scaling-stroke" />
+        {/if}
+      {/if}
     </svg>
+    {#each measurePoints as p}
+      <div class="measure-pt" style="left:{px(p.x, geo.w, geo.ox)}px;top:{px(p.y, geo.h, geo.oy)}px"></div>
+    {/each}
     {#each boxes as b}
       {#if b.label}
         <div class="tag {b.kind ?? 'detect'}" style="left:{px(b.x, geo.w, geo.ox)}px;top:{px(b.y, geo.h, geo.oy)}px">{b.label}{b.score ? ` ${(b.score * 100).toFixed(0)}%` : ''}</div>
@@ -140,12 +176,23 @@
     {/each}
   {/if}
   <div class="crosshair"></div>
+  {#if scaleBar && geo}
+    <div class="scalebar" style="width:{scaleBar.px * scale}px"><span>{scaleBar.label}</span></div>
+  {/if}
 </div>
 
 <style>
   .view { position: relative; width: 100%; height: 100%; background: #000; display: grid; place-items: center; overflow: hidden; cursor: grab; touch-action: none; }
   .view.panning { cursor: grabbing; }
   .view.picking { cursor: crosshair; }
+  .view.measuring { cursor: crosshair; }
+  .measure-line { stroke: var(--accent); stroke-width: 2px; }
+  .measure-line.ghost { stroke-dasharray: 5 4; opacity: .7; }
+  .measure-fill { fill: rgba(79,140,255,.15); stroke: none; }
+  .measure-pt { position: absolute; width: 8px; height: 8px; margin: -4px 0 0 -4px; border-radius: 50%; background: var(--accent); border: 1px solid #fff; pointer-events: none; }
+  .scalebar { position: absolute; left: 12px; bottom: 12px; display: flex; flex-direction: column; align-items: center; gap: 2px; pointer-events: none; }
+  .scalebar::before { content: ''; display: block; width: 100%; height: 3px; background: #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.6); }
+  .scalebar span { font-size: 11px; color: #fff; text-shadow: 0 0 3px #000, 0 0 3px #000; }
   img { max-width: 100%; max-height: 100%; object-fit: contain; user-select: none; pointer-events: none; will-change: transform; grid-area: 1 / 1; }
   img.ghost { opacity: 0; }
   .composite { max-width: 100%; max-height: 100%; object-fit: contain; pointer-events: none; grid-area: 1 / 1; }

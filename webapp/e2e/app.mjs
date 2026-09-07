@@ -262,6 +262,33 @@ await step('device logs panel fetches and downloads', async () => {
   expect(/listening on|encoder|openflexito/.test(await page.locator('pre.logs').innerText()), 'app records missing expected lines')
 })
 
+await step('scale bar toggle in settings round-trips', async () => {
+  await nav('settings')
+  const box = page.locator('label:has-text("show scale bar") input')
+  const was = await box.isChecked()
+  await box.setChecked(!was)
+  expect((await box.isChecked()) === !was, 'scale bar checkbox did not toggle')
+  await box.setChecked(was)
+})
+
+await step('distance measurement records a result', async () => {
+  await nav('live')
+  await page.waitForFunction(() => /\d+ fps/.test(document.querySelector('nav')?.textContent || ''), null, { timeout: 10000 })
+  await page.waitForTimeout(500)   // let the re-mounted <img> load its first MJPEG frame (naturalWidth)
+  await page.click('.panel:has(h3:has-text("Measure")) button:has-text("Distance")')
+  const box = await page.locator('.view').boundingBox()
+  await page.mouse.click(box.x + box.width * 0.4, box.y + box.height * 0.4)
+  await page.mouse.click(box.x + box.width * 0.6, box.y + box.height * 0.6)
+  await page.waitForFunction(() => /µm|px \(no scale\)/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 5000 })
+  await page.keyboard.press('Escape')
+})
+
+await step('histogram samples the live view in the Camera panel', async () => {
+  await nav('live')
+  await page.locator('.panel:has(h3:has-text("Camera"))').scrollIntoViewIfNeeded()
+  await page.waitForFunction(() => /mean \d+\/255/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 10000 })
+})
+
 await step('no page errors during the run', async () => { expect(problems.length === 0, problems.join(' | ')) })
 
 await browser.close()
