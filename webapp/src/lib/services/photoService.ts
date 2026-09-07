@@ -78,6 +78,11 @@ export async function takePhoto(o: PhotoOptions): Promise<GalleryItem> {
   const levels = [...new Set((o.levels ?? [0.4, 0.7, 1, 1.5]).map((f) => Math.min(1, Math.max(0.02, +(base * f).toFixed(3)))))]
   if (levels.length < 2) throw new Error('exposure stack: the LED is already at maximum and cannot be varied enough')
   const frames: Rgba[] = []
+  // Under auto exposure the camera would cancel each LED change before the still froze it, so lock
+  // the current exposure/gain for the stack and hand control back afterwards.
+  const c = device.controls, f = device.frame
+  const lockAe = !!c?.AeEnable && !!f?.exposure && !!f?.gain
+  if (lockAe) await device.setControls({ AeEnable: false, ExposureTime: Math.round(f!.exposure!), AnalogueGain: f!.gain! })
   try {
     for (let i = 0; i < levels.length; i++) {
       say(`LED stack: level ${i + 1}/${levels.length} (${Math.round(levels[i] * 100)} %)`)
@@ -87,6 +92,7 @@ export async function takePhoto(o: PhotoOptions): Promise<GalleryItem> {
     }
   } finally {
     await device.setLight(base).catch(() => {})
+    if (lockAe) await device.setControls({ AeEnable: true }).catch(() => {})
   }
   say('LED stack: fusing…')
   return saveSnapshot(await encode(exposureFuse(frames)), { ...meta, name: `LED exposure stack ×${levels.length} ${new Date().toLocaleString()}` })

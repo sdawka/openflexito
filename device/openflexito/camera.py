@@ -415,6 +415,20 @@ class PiCamera(CameraBase):
             if self._picam is not None:
                 await asyncio.to_thread(self._picam.set_controls, self._libcamera_controls(controls))
 
+    def _still_controls(self) -> dict:
+        """Controls for a mode switch (full-res still, raw). Switching configuration restarts
+        libcamera's AE/AWB from their defaults and the still is taken on the first frames, so under
+        auto modes the picture would ignore the exposure and colour the live view had settled on.
+        Freeze the live values from the latest frame metadata into manual controls instead."""
+        controls = dict(self.controls)
+        with self._meta_lock:
+            last = self._meta_ring[-1] if self._meta_ring else {}
+        if controls.get("AeEnable") and last.get("exposure") and last.get("gain"):
+            controls.update(AeEnable=False, ExposureTime=int(last["exposure"]) - 1, AnalogueGain=float(last["gain"]))
+        if controls.get("AwbEnable") and len(last.get("colour_gains") or ()) == 2:
+            controls.update(AwbEnable=False, ColourGains=[float(g) for g in last["colour_gains"]])
+        return self._libcamera_controls(controls)
+
     def _require_camera(self):
         if self._picam is None:
             raise RuntimeError("camera is not running")
@@ -438,7 +452,7 @@ class PiCamera(CameraBase):
     def _full_still_sync(self) -> bytes:
         picam = self._require_camera()
         still = picam.create_still_configuration(
-            main={"size": tuple(self.cfg.full_size)}, controls=self._libcamera_controls(self.controls))
+            main={"size": tuple(self.cfg.full_size)}, controls=self._still_controls())
         self._stop_encoders()
         try:
             buf = io.BytesIO()
@@ -457,7 +471,7 @@ class PiCamera(CameraBase):
         picam = self._require_camera()
         still = picam.create_still_configuration(
             main={"size": (w, h)}, raw={"format": self.cfg.raw_format, "size": (w, h)},
-            controls=self._libcamera_controls(self.controls))
+            controls=self._still_controls())
         self._stop_encoders()
         try:
             arr = picam.switch_mode_and_capture_array(still, "raw")
