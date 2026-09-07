@@ -86,6 +86,9 @@
             {#if it.width}<span class="chip">{it.width}×{it.height}</span>{/if}
             {#if it.position}<span class="chip" title="stage position x {it.position.x} y {it.position.y}">z {it.position.z}</span>{/if}
             {#if it.scan}<span class="chip">{it.scan.cols}×{it.scan.rows} scan · {it.scan.tiles.length} tiles</span>{/if}
+            {#if it.scan?.focus && it.scan.focus.mode !== 'none'}<span class="chip accent">focus: {it.scan.focus.mode === 'every' ? 'every tile' : `every ${it.scan.focus.step}th, interpolated`}</span>{/if}
+            {#if it.scan?.region?.mode === 'polygon'}<span class="chip">polygon region</span>{/if}
+            {#if it.scan?.region?.order === 'spiral'}<span class="chip">spiral order</span>{/if}
             {#if it.raw}<span class="chip accent">RAW {it.raw.bitDepth}-bit {it.raw.bayer} → 16-bit PNG</span><span class="chip ok">DNG kept</span>{/if}
             {#if it.stack}<span class="chip accent">{it.stack.method === 'pyramid' ? `fine focus stack (pyramid${it.stack.source === 'raw' ? ', 16-bit from RAW' : ''})` : 'quick focus stack'}</span>{/if}
           </div>
@@ -106,7 +109,7 @@
     {/each}
   </div>
 </div>
-{#if viewing}<Viewer blob={viewing.blob} onclose={() => (viewing = null)} />{/if}
+{#if viewing}<Viewer blob={viewing.blob} item={viewing.item} onclose={() => (viewing = null)} />{/if}
 
 <style>
   .wrap { padding: 16px; }

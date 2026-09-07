@@ -215,6 +215,28 @@ image. OpenFlexure's own route is the Delta Stage's 8×8 DotStar array (Adafruit
 sample with the outer LEDs lit (arXiv 2112.05804); community alternatives are a patch stop in a
 modularised condenser (forum topic 1249) and a Köhler-style condenser with light stops (topic 2400).
 
+### Scanning
+
+**Autofocus per tile and a height map**: the Scan page's focus option runs the fast autofocus before
+capturing a tile, either on **every tile**, or on a coarse sub-grid — the four grid corners plus every
+Nth tile — with the tiles in between moved to a **predicted** z instead of measuring one. The surface
+through the measured points (`lib/algo/heightMap.ts`: a robust least-squares plane, or bilinear
+interpolation across the sub-grid, with a leave-one-out outlier check so one bad autofocus reading, e.g.
+dust on the coverslip, cannot warp the rest of the surface) supplies that prediction; the final z move for
+both measured and predicted tiles uses `'z'` backlash compensation, like the live autofocus's own
+approach. Every tile's z (measured or predicted) is kept in the gallery item (`scan.tiles[i].z`,
+`zMeasured`); the Viewer shows an optional colour-mapped height-map mini-map with a legend (in stage
+steps — no µm-per-step calibration exists yet) for any scan that has focus data.
+
+**Programmable scan regions**: beyond a plain rectangle, the Scan page can clip the grid to a **polygon**
+— click points on an overview (the stitched preview of the last scan, or the live view if none exists
+yet) and only the tiles whose centre lands inside are kept (`lib/algo/scanPlan.ts`: point-in-polygon by
+ray casting, in coordinates normalised to the planned grid so it does not depend on the overview image's
+own resolution) — good for round or irregularly-shaped samples. The visiting order can be raster, snake
+(the previous default), or a **spiral** from the centre outward (a classic square-spiral grid walk,
+clipped to whatever the region kept), useful for round samples where the middle matters most. Tile count
+and a rough time estimate update live as the grid, region and focus settings change.
+
 ## Logs and crashes
 
 The service log lives in the systemd journal, which the image makes persistent and size-capped

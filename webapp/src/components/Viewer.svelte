@@ -2,8 +2,10 @@
   /** Zoomable image viewer (OpenSeadragon) for an image Blob; a plain player for video Blobs. */
   import { onMount } from 'svelte'
   import OpenSeadragon from 'openseadragon'
+  import HeightMapOverlay from './HeightMapOverlay.svelte'
+  import type { GalleryItem } from '../lib/store/gallery'
 
-  let { blob, onclose }: { blob: Blob; onclose: () => void } = $props()
+  let { blob, item, onclose }: { blob: Blob; item?: GalleryItem; onclose: () => void } = $props()
   let el: HTMLDivElement | undefined = $state()
   const isVideo = $derived(blob.type.startsWith('video/'))
   let videoUrl = $state('')
@@ -25,6 +27,7 @@
     <video class="video" src={videoUrl} controls autoplay loop></video>
   {:else}
     <div class="osd" bind:this={el}></div>
+    {#if item?.scan}<HeightMapOverlay {item} />{/if}
   {/if}
 </div>
 

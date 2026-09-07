@@ -262,6 +262,57 @@ await step('device logs panel fetches and downloads', async () => {
   expect(/listening on|encoder|openflexito/.test(await page.locator('pre.logs').innerText()), 'app records missing expected lines')
 })
 
+if (moves) await step('scan 2×2 with autofocus every tile builds a height map', async () => {
+  await nav('scan')
+  for (const i of [0, 1]) {
+    const box = page.locator('main input[type=number]').nth(i)
+    await box.click({ clickCount: 3 }); await box.pressSequentially('2'); await page.waitForTimeout(200)
+  }
+  await page.selectOption('select:near(:text("focus"))', 'every')
+  await page.waitForFunction(() => /4 tiles/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 8000 })
+  await page.click('button:has-text("Start scan")')
+  const t0 = Date.now()
+  while (!(await page.locator('img[alt="stitched scan"]').count())) {
+    if (Date.now() - t0 > 240000) throw new Error('scan did not finish; last progress: ' + (await page.locator('main').innerText()).replace(/\s+/g, ' ').slice(-200))
+    await page.waitForTimeout(2000)
+  }
+  await page.selectOption('select:near(:text("focus"))', 'none')   // leave the panel in its default state for later steps
+  await nav('gallery')
+  await page.waitForFunction(() => /focus: every tile/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 8000 })
+  await page.locator('.card:has-text("Scan 2×2") button:has-text("Open")').first().click()
+  await page.waitForSelector('button:has-text("show height map")', { timeout: 5000 })
+  await page.click('button:has-text("show height map")')
+  const cells = await page.locator('.hm-cell').count()
+  expect(cells === 4, `expected 4 height-map cells, got ${cells}`)
+  await page.click('button:has-text("close")')
+})
+
+await step('spiral order and polygon region update the scan plan without moving the stage', async () => {
+  await nav('scan')
+  await page.waitForSelector('text=/\\d+ tiles of/', { timeout: 5000 })
+  const before = await page.locator('main').innerText()
+  const beforeCount = before.match(/(\d+) tiles of/)?.[1]
+  await page.selectOption('select:near(:text("order"))', 'spiral')
+  await page.waitForTimeout(300)
+  const afterSpiral = await page.locator('main').innerText()
+  expect(/tiles of .* est\./.test(afterSpiral), 'tile count / time estimate missing after selecting spiral order: ' + afterSpiral.replace(/\s+/g, ' ').slice(0, 200))
+  await page.selectOption('select:near(:text("region"))', 'polygon')
+  await page.waitForSelector('.poly-canvas', { timeout: 5000 })
+  const box = await page.locator('.poly-canvas').boundingBox()
+  // click three points to draw a small triangular region, clipping the plan below the full grid's tile count
+  for (const [fx, fy] of [[0.5, 0.1], [0.1, 0.9], [0.9, 0.9]]) {
+    await page.mouse.click(box.x + fx * box.width, box.y + fy * box.height)
+  }
+  await page.waitForTimeout(300)
+  const afterPolygon = await page.locator('main').innerText()
+  const afterCount = afterPolygon.match(/(\d+) tiles of/)?.[1]
+  expect(!!afterCount, 'tile count missing after drawing a polygon region: ' + afterPolygon.replace(/\s+/g, ' ').slice(0, 200))
+  expect(Number(afterCount) <= Number(beforeCount), `polygon region did not clip the tile count (${beforeCount} -> ${afterCount})`)
+  // back to a plain rectangle scan for anyone re-running this file interactively
+  await page.selectOption('select:near(:text("region"))', 'rect')
+  await page.selectOption('select:near(:text("order"))', 'snake')
+})
+
 await step('no page errors during the run', async () => { expect(problems.length === 0, problems.join(' | ')) })
 
 await browser.close()
