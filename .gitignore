@@ -10,3 +10,4 @@ image/*.img
 image/*.img.xz
 .DS_Store
 image/secrets.env
+.claude/worktrees/
