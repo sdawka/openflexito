@@ -33,7 +33,7 @@
   onMount(() => { refresh(); return () => Object.values(thumbs).forEach((u) => URL.revokeObjectURL(u)) })
 
   async function open(it: GalleryItem) {
-    const blob = await getBlob(it.id, 'image')
+    const blob = await getBlob(it.id, it.kind === 'video' ? 'video' : 'image')
     if (blob) viewing = { blob, item: it }
   }
   async function remove(it: GalleryItem) {
@@ -82,6 +82,7 @@
         <div class="meta">
           <div class="title"><b>{it.name}</b><span class="when" title={it.when}>{fmtWhen(it.when)}</span></div>
           <div class="chips">
+            {#if it.video}<span class="chip accent">video · {it.video.durationS.toFixed(0)} s · {it.video.source}</span>{/if}
             {#if it.width}<span class="chip">{it.width}×{it.height}</span>{/if}
             {#if it.position}<span class="chip" title="stage position x {it.position.x} y {it.position.y}">z {it.position.z}</span>{/if}
             {#if it.scan}<span class="chip">{it.scan.cols}×{it.scan.rows} scan · {it.scan.tiles.length} tiles</span>{/if}

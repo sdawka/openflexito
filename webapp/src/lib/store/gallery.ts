@@ -1,6 +1,6 @@
 /** Gallery storage in the browser: IndexedDB for metadata and image blobs. */
 
-export type ItemKind = 'snapshot' | 'scan'
+export type ItemKind = 'snapshot' | 'scan' | 'video'
 
 export interface GalleryItem {
   id: string
@@ -15,6 +15,8 @@ export interface GalleryItem {
   blobs: string[]
   /** focus stack: how it was taken and how much of the result each slice supplied */
   stack?: { slices: number; stepZ: number; zs: number[]; contributions: number[]; method?: 'blocks' | 'pyramid'; centreZ?: number; span?: number; shifts?: { dx: number; dy: number }[]; source?: 'jpeg' | 'raw' }
+  /** video: blob 'video' (WebM) recorded in the browser from the live view or the live focus stack */
+  video?: { durationS: number; fps: number; source: string; mime: string }
   /** raw develop: the sensor data behind 'image' ('dng' blob = the untouched mosaic as a DNG) */
   raw?: { bitDepth: number; bayer: string; blackLevel: number; gains: [number, number]; applied?: { lsc: boolean; ccm: boolean; gammaCurve: boolean; demosaic: string } }
   scan?: {
@@ -122,6 +124,19 @@ export async function saveSnapshot(blob: Blob, meta: { position?: GalleryItem['p
   return item
 }
 
+export async function saveVideo(blob: Blob, thumb: Blob | null, meta: { durationS: number; fps: number; source: string; width: number; height: number; position?: GalleryItem['position'] }): Promise<GalleryItem> {
+  const id = newId()
+  const item: GalleryItem = {
+    id, kind: 'video', name: `Video ${meta.source} ${meta.durationS.toFixed(0)} s`, when: new Date().toISOString(),
+    position: meta.position, width: meta.width, height: meta.height, blobs: thumb ? ['video', 'thumb'] : ['video'],
+    video: { durationS: meta.durationS, fps: meta.fps, source: meta.source, mime: blob.type },
+  }
+  await putBlob(id, 'video', blob)
+  if (thumb) await putBlob(id, 'thumb', thumb)
+  await putItem(item)
+  return item
+}
+
 /** Export an item's files. Uses the File System Access API when available, else downloads. */
 export async function exportItem(item: GalleryItem): Promise<void> {
   const files: { name: string; blob: Blob }[] = []
@@ -129,7 +144,7 @@ export async function exportItem(item: GalleryItem): Promise<void> {
   for (const b of item.blobs) {
     const blob = await getBlob(item.id, b)
     if (!blob) continue
-    const ext = blob.type === 'image/png' ? 'png' : blob.type === 'image/x-adobe-dng' ? 'dng' : blob.type === 'application/octet-stream' ? 'bin' : 'jpg'
+    const ext = blob.type === 'image/png' ? 'png' : blob.type === 'image/x-adobe-dng' ? 'dng' : blob.type.startsWith('video/webm') ? 'webm' : blob.type.startsWith('video/') ? 'mp4' : blob.type === 'application/octet-stream' ? 'bin' : 'jpg'
     files.push({ name: `${safe}-${b.replace('/', '-')}.${ext}`, blob })
   }
   files.push({ name: `${safe}.json`, blob: new Blob([JSON.stringify(item, null, 2)], { type: 'application/json' }) })

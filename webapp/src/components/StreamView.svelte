@@ -9,6 +9,7 @@
    *  caught up with) translates the image so it sticks to the cursor. */
   import { device } from '../lib/store/device.svelte'
   import { settings } from '../lib/store/settings.svelte'
+  import { liveStack } from '../lib/services/liveStack.svelte'
 
   export interface Box { x: number; y: number; w: number; h: number; label?: string; score?: number; kind?: 'detect' | 'follow' | 'select' }
   export interface Pan { dx: number; dy: number; w: number; h: number; done: boolean }
@@ -40,6 +41,15 @@
   // connection per visit until the browser's per-host limit stalls every other request and the
   // Pi encodes for nobody. Clearing src on unmount aborts the stream.
   $effect(() => { const el = img; return () => { if (el) el.src = '' } })
+  // the live focus stack and the recorder read frames from this element
+  $effect(() => { liveStack.source = img ?? null; return () => { if (liveStack.source === img) liveStack.source = null } })
+  let compCanvas: HTMLCanvasElement | undefined = $state()
+  $effect(() => {
+    const bmp = liveStack.composite, c = compCanvas
+    if (!bmp || !c) return
+    if (c.width !== bmp.width || c.height !== bmp.height) { c.width = bmp.width; c.height = bmp.height }
+    c.getContext('2d')!.drawImage(bmp, 0, 0)
+  })
 
   /** Rectangle the image content occupies inside the element (object-fit: contain). */
   function geometry(): { ox: number; oy: number; w: number; h: number } | null {
@@ -112,7 +122,8 @@
   {#if error}
     <div class="err">stream unavailable <button onclick={() => { error = false; nonce++ }}>retry</button></div>
   {/if}
-  <img bind:this={img} {src} alt="microscope live view" draggable="false" crossorigin="anonymous" style:transform={shift} onerror={() => (error = true)} />
+  <img bind:this={img} {src} alt="microscope live view" draggable="false" crossorigin="anonymous" style:transform={shift} class:ghost={liveStack.active && !!liveStack.composite} onerror={() => (error = true)} />
+  {#if liveStack.active}<canvas bind:this={compCanvas} class="composite" style:transform={shift}></canvas>{/if}
   {#if geo}
     <svg class="overlay" style="left:{geo.ox}px;top:{geo.oy}px;width:{geo.w}px;height:{geo.h}px" viewBox="0 0 1 1" preserveAspectRatio="none">
       {#each boxes as b}
@@ -135,7 +146,9 @@
   .view { position: relative; width: 100%; height: 100%; background: #000; display: grid; place-items: center; overflow: hidden; cursor: grab; touch-action: none; }
   .view.panning { cursor: grabbing; }
   .view.picking { cursor: crosshair; }
-  img { max-width: 100%; max-height: 100%; object-fit: contain; user-select: none; pointer-events: none; will-change: transform; }
+  img { max-width: 100%; max-height: 100%; object-fit: contain; user-select: none; pointer-events: none; will-change: transform; grid-area: 1 / 1; }
+  img.ghost { opacity: 0; }
+  .composite { max-width: 100%; max-height: 100%; object-fit: contain; pointer-events: none; grid-area: 1 / 1; }
   .overlay { position: absolute; pointer-events: none; }
   .overlay rect { fill: none; stroke-width: 2px; }
   .overlay rect.detect { stroke: var(--warn); }

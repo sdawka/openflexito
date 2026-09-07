@@ -210,6 +210,34 @@ if (moves) await step('fine focus stack centres on the focus plane and fuses sev
   expect(shares.filter((s) => s > 5).length >= 2, `fine stack did not draw on several slices: ${m[1]}`)
 })
 
+await step('live focus stack builds a composite and saves it', async () => {
+  await nav('live')
+  await page.click('button:has-text("Live stack")')
+  await page.waitForFunction(() => /\d+ frames · \d+ % of blocks/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 15000 })
+  await page.waitForTimeout(1500)
+  const visible = await page.locator('.view canvas.composite').evaluate((c) => c.width > 0 && getComputedStyle(c).opacity !== '0')
+  expect(visible, 'composite canvas not shown')
+  await page.click('.panel:has(h3:has-text("Focus")) button:has-text("Save")')
+  await page.waitForFunction(() => /saved "Live stack/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 10000 })
+  await page.click('button:has-text("Stop live stack")')
+})
+
+await step('video recording lands in the gallery and opens in the viewer', async () => {
+  await nav('live')
+  await page.click('button:has-text("Record video")')
+  await page.waitForFunction(() => /Stop · \d+ s/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 5000 })
+  await page.waitForTimeout(2500)
+  await page.click('button:has-text("Stop ·")')
+  await page.waitForFunction(() => /saved "Video live view/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 15000 })
+  await nav('gallery'); await page.waitForTimeout(600)
+  expect(/video · \d+ s · live view/.test(await page.locator('main').innerText()), 'gallery lacks the video chip')
+  await page.locator('.card:has-text("Video live view") button:has-text("Open")').first().click()
+  await page.waitForSelector('video.video', { timeout: 5000 })
+  const dur = await page.locator('video.video').evaluate((v) => new Promise((r) => { if (v.readyState >= 1) r(v.duration); else v.onloadedmetadata = () => r(v.duration) }))
+  expect(dur === Infinity || dur > 1, `video duration ${dur}`)
+  await page.click('button:has-text("close")')
+})
+
 await step('settings persist across reload', async () => {
   await nav('settings')
   const box = page.locator('label:has-text("invert Y for keyboard") input')

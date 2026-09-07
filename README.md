@@ -154,6 +154,15 @@ same with each slice being a developed RAW frame, fused as float and saved as a 
 quantised to 8 bits or JPEG-compressed before the merge (~30 s per slice). The LED exposure stack is the
 "HDR" counterpart (exposure fusion).
 
+**Live focus stack** (Focus panel): small z vibrations move the plane of focus from frame to frame,
+so a running per-block "keep the sharpest" composite of the stream becomes an extended-depth-of-field
+live view without moving the stage (`algo/liveStack.ts`, worker `liveStackWorker.ts`, ~8 fps at stream
+resolution: each frame is aligned to the composite by phase correlation, blocks whose Laplacian energy
+beats the stored value by 5 % replace it with feathered edges, the stored energy decays by 1 % per frame
+so the view follows real changes, and any stage motion resets it). Save stores the composite;
+**Record video** (Photo panel) records what is shown, stream or live stack, with MediaRecorder into a
+WebM in the gallery (`services/recorder.svelte.ts`), played back in the viewer.
+
 White balance is edited the way raw editors do it rather than with red/blue gain sliders: **Pick
 neutral** then click a spot in the live image that should be grey (gains solved from the linearised
 sample, two passes because the colour matrix couples the channels; Lightroom's and darktable's

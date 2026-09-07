@@ -3,6 +3,8 @@
   import { device } from '../lib/store/device.svelte'
   import { saveSnapshot } from '../lib/store/gallery'
   import { takePhoto, type PhotoMode } from '../lib/services/photoService'
+  import { recorder } from '../lib/services/recorder.svelte'
+  import { liveStack } from '../lib/services/liveStack.svelte'
 
   let mode = $state<PhotoMode>('single')
   let slices = $state(5)
@@ -41,6 +43,16 @@
       setTimeout(() => { if (status?.kind === 'ok') status = null }, 4000)
     } catch (e) { status = { kind: 'err', text: (e as Error).message } } finally { busy = false }
   }
+  function toggleRecord() {
+    if (recorder.recording) { void recorder.stop().then((i) => { if (i) status = { kind: 'ok', text: `saved "${i.name}"` } }); return }
+    const useStack = liveStack.active && !!liveStack.composite
+    recorder.start(() => {
+      if (useStack) { const b = liveStack.composite; return b ? { image: b, width: b.width, height: b.height } : null }
+      const img = liveStack.source
+      return img && img.naturalWidth ? { image: img, width: img.naturalWidth, height: img.naturalHeight } : null
+    }, useStack ? 'live stack' : 'live view')
+    if (recorder.status) status = { kind: 'err', text: recorder.status }
+  }
   async function download() {
     const res = await fetch(device.url('/snapshot.jpg') + '?full=1&t=' + Date.now(), { cache: 'no-store' })
     const a = document.createElement('a')
@@ -55,6 +67,13 @@
     <button class="primary big" onclick={photo} disabled={busy || !device.connected}>{busy ? 'Working…' : 'Take photo'}</button>
     <button onclick={quickFrame} disabled={busy} title="save the current stream frame as it is (fast, lower resolution)">Quick frame</button>
     <button onclick={download} disabled={busy} title="download a full-resolution JPEG without saving it to the gallery">↓</button>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button class="rec" class:on={recorder.recording} onclick={toggleRecord} disabled={!device.connected} title="record the live view (or the live focus stack when it is on) as WebM into the gallery">
+      <span class="dot"></span>{recorder.recording ? `Stop · ${recorder.seconds} s` : 'Record video'}
+    </button>
+    {#if recorder.recording}<span class="muted small">recording {liveStack.active && liveStack.composite ? 'the live stack' : 'the live view'}</span>{/if}
+    {#if recorder.status && !recorder.recording}<span class="muted small">{recorder.status}</span>{/if}
   </div>
   <div class="kv" style="margin-top:10px"><span>Mode</span><span class="v muted" style="color:var(--muted)">{current.time}</span></div>
   <select bind:value={mode} disabled={busy} style="width:100%">
@@ -83,6 +102,10 @@
 
 <style>
   button.big { padding: 8px 16px; font-weight: 600; }
+  .rec .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--err); margin-right: 7px; vertical-align: -1px; }
+  .rec.on { border-color: var(--err); background: #3a1f24; }
+  .rec.on .dot { animation: blink 1s steps(2) infinite; }
+  @keyframes blink { to { opacity: .2; } }
   .blurb { margin: 6px 0 0; font-size: 12px; color: var(--muted); line-height: 1.4; }
   .params { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; margin-top: 8px; }
   .params label { margin: 0; display: flex; flex-direction: column; gap: 3px; }

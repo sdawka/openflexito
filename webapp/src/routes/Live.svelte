@@ -8,6 +8,7 @@
   import StreamView, { type Pan } from '../components/StreamView.svelte'
   import { PanController } from '../lib/input/pan'
   import { wb, pickNeutral } from '../lib/services/whiteBalance.svelte'
+  import { liveStack } from '../lib/services/liveStack.svelte'
   import StagePad from '../components/StagePad.svelte'
   import CameraControls from '../components/CameraControls.svelte'
   import PhotoPanel from '../components/PhotoPanel.svelte'
@@ -130,7 +131,7 @@
     )
     const offKeys = attachKeyboard(jog, { invertY: () => settings.invertYKeys, enabled: () => device.connected })
     const offPad = attachGamepad(jog, { stop: () => device.stop(), autofocus }, () => settings.gamepad && device.connected)
-    return () => { offKeys(); offPad(); jog.dispose(); detecting = false; clearTimeout(detectTimer); follow.stop() }
+    return () => { offKeys(); offPad(); jog.dispose(); detecting = false; clearTimeout(detectTimer); follow.stop(); liveStack.stop() }
   })
 
   function onClickImage(p: { x: number; y: number; w: number; h: number }) {
@@ -174,6 +175,24 @@
         </select>
       </div>
       {#if afLog}<div class="muted mono" style="font-size:12px;margin-top:6px">{afLog}</div>{/if}
+      <h4 class="sub">Live focus stack</h4>
+      <div class="row">
+        <button class:primary={liveStack.active} onclick={() => (liveStack.active ? liveStack.stop() : liveStack.start())} disabled={!device.connected}>{liveStack.active ? 'Stop live stack' : 'Live stack'}</button>
+        {#if liveStack.active}
+          <button onclick={() => liveStack.reset()} title="start the composite afresh">Reset</button>
+          <button onclick={() => liveStack.save().then((i) => (afLog = `saved "${i.name}"`)).catch((e) => (afLog = e.message))} disabled={!liveStack.stats} title="save the composite to the gallery">Save</button>
+        {/if}
+      </div>
+      {#if liveStack.active && liveStack.stats}
+        <div class="status-line busy">{liveStack.stats.frames} frames · {Math.round(liveStack.stats.replaced * 100)} % of blocks refreshed by the last frame{liveStack.stats.shift.dx || liveStack.stats.shift.dy ? ` · aligned ${liveStack.stats.shift.dx}, ${liveStack.stats.shift.dy} px` : ''}</div>
+      {/if}
+      <details class="help">
+        <summary>What it does</summary>
+        <p>Small z vibrations move the plane of focus from frame to frame. The live stack keeps, block by block, the sharpest
+        content seen so far (aligned for xy jitter, feathered between blocks, slowly forgetting so it follows real changes), which
+        builds an extended-depth-of-field view without moving the stage. It resets whenever the stage moves. Save stores the
+        composite; Record in the Photo panel records whatever is shown, stream or stack.</p>
+      </details>
     </div>
     <PhotoPanel />
     <CameraControls />
