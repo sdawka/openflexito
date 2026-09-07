@@ -80,8 +80,8 @@
           <div class="muted mono" style="font-size:11px">
             {it.kind}{it.width ? ` · ${it.width}×${it.height}` : ''}{it.position ? ` · z ${it.position.z}` : ''}
             {it.scan ? ` · ${it.scan.tiles.length} tiles` : ''}
-            {#if it.stack}<div title="share of the picture taken from each slice">focus stack · {it.stack.slices} slices, Δz {it.stack.stepZ} · from each: {it.stack.contributions.map((c) => Math.round(c * 100) + '%').join(' ')}</div>{/if}
-            {#if it.raw}<div>RAW {it.raw.bitDepth}-bit {it.raw.bayer} → 16-bit PNG · sensor data kept</div>{/if}
+            {#if it.stack}<div title="share of the picture taken from each slice">{it.stack.method === 'pyramid' ? `fine focus stack (pyramid${it.stack.source === 'raw' ? ', 16-bit from RAW' : ''})` : 'focus stack'} · {it.stack.slices} slices, Δz {it.stack.stepZ}{it.stack.centreZ !== undefined ? `, centred on z ${it.stack.centreZ}` : ''} · from each: {it.stack.contributions.map((c) => Math.round(c * 100) + '%').join(' ')}</div>{/if}
+            {#if it.raw}<div>RAW {it.raw.bitDepth}-bit {it.raw.bayer} → 16-bit PNG{it.raw.applied ? ` (${it.raw.applied.demosaic}${it.raw.applied.lsc ? ', shading' : ''}${it.raw.applied.ccm ? ', colour matrix' : ''}${it.raw.applied.gammaCurve ? ', camera gamma' : ', sRGB'})` : ''} · DNG kept</div>{/if}
           </div>
           <div class="row" style="margin-top:6px">
             <button onclick={() => open(it)}>Open</button>

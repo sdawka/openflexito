@@ -128,9 +128,12 @@ The Photo button takes a full-resolution still (3280×2464, ~1.3 s, ~1.5 MB 8-bi
 the stage does not move for it. Stills freeze the exposure, gain and colour gains the live view is using
 (a configuration switch restarts libcamera's auto algorithms, so without this the still would ignore
 them). **RAW mode** fetches the sensor's 10-bit Bayer frame (`/raw.bin`, 16 MB, ~20 s in total) and
-develops it in a worker (`algo/rawdev.ts`: black level, the live white-balance gains, bilinear demosaic,
-sRGB curve) into a lossless 16-bit PNG (`png16.ts`, ~30 MB); the raw data is stored with the item and
-exported as `.bin`. No lens shading or colour matrix is applied, so it is the sensor's measurement. Two stacked modes run entirely in the browser (`webapp/src/lib/algo/stack.ts`):
+develops it in a worker (`algo/rawdev.ts`) the way the ISP would, but losslessly: black level, the tuning
+file's 16×12 lens-shading tables (bilinear), the live white-balance gains, Malvar-He-Cutler 5×5 demosaic,
+the tuning file's colour matrix and gamma curve, into a 16-bit PNG (`png16.ts`, ~30 MB). The untouched
+mosaic is stored as a **DNG** (`dng.ts`: CFA pattern, black/white level, AsShotNeutral, ColorMatrix1
+derived from the tuning CCM) that RawTherapee, darktable and Lightroom open. Note the shading tables are
+only as good as calibration 1: with the placeholder tables the field stays vignetted. Two stacked modes run entirely in the browser (`webapp/src/lib/algo/stack.ts`):
 a **focus stack** captures N slices `step` z-steps apart (starting below, ending back at the starting z
 with z backlash compensation) and keeps, block by block, the slice with the highest local Laplacian
 energy; an **LED exposure stack** captures the scene at several LED levels (0.4×, 0.7×, 1×, 1.5× of the
@@ -139,6 +142,24 @@ single scale). Both weight maps are smoothed over neighbouring blocks so seams d
 stack item keeps every slice (`slice/<n>`) and records how much of the result came from each; the
 gallery shows it (on the algae sample, 5 slices 40 steps apart gave 34/18/18/17/13 %). During an LED
 stack auto exposure is locked so the camera cannot cancel the LED changes.
+
+The quick stack's block weights are interpolated bilinearly between cells (the first version showed
+square patches) and the slices are aligned to the first by phase correlation before blending. The **fine
+focus stack** (`focusfine`) first runs a fast autofocus sweep to find the focus plane and the width of the
+sharpness peak, spreads N slices (default 9) over 1.5× that width centred on the plane, aligns each slice,
+and fuses them in a Laplacian pyramid in a worker (`algo/pyramidFuse.ts`, `workers/stackWorker.ts`:
+per-coefficient maximum local energy at every scale, averaged residual, slices streamed so only two
+pyramids are in memory). It ends back on the focus plane. **Fine stack from RAW** (`focusfineraw`) does the
+same with each slice being a developed RAW frame, fused as float and saved as a 16-bit PNG, so nothing is
+quantised to 8 bits or JPEG-compressed before the merge (~30 s per slice). The LED exposure stack is the
+"HDR" counterpart (exposure fusion).
+
+White balance is edited the way raw editors do it rather than with red/blue gain sliders: **Pick
+neutral** then click a spot in the live image that should be grey (gains solved from the linearised
+sample, two passes because the colour matrix couples the channels; Lightroom's and darktable's
+eyedropper work the same way), **Whole field neutral** (grey-world, for an empty field), and
+temperature (blue ↔ amber) / tint (green ↔ magenta) sliders mapped onto the gains as
+r = 2^(tint − temp/2), b = 2^(tint + temp/2).
 
 Extra illumination (darkfield, oblique): the Sangaboard v0.5 reports `CC:1 PWM:2`. From the schematic
 (`filipayazi/sangaboard-rp2040`, illumination sheet) and the v7 build docs: the CC channel is a TPS61060

@@ -62,24 +62,46 @@ function normalise(weights: Float32Array[]): void {
   }
 }
 
-/** Weighted average of the sources using per-cell weights (already normalised). */
+/** Weighted average of the sources using per-cell weights (already normalised), interpolated
+ *  bilinearly between cell centres so no block boundaries appear in the output. */
 export function blend(images: Rgba[], weights: Float32Array[], cellsX: number, cell: number): Rgba {
   const { width: w, height: h } = images[0]
+  const cellsY = Math.ceil(h / cell)
   const out = new Uint8ClampedArray(w * h * 4)
   const n = images.length
+  const wt = new Float32Array(n)
   for (let y = 0; y < h; y++) {
-    const cy = Math.floor(y / cell) * cellsX
+    const fy = Math.min(cellsY - 1, Math.max(0, (y + 0.5) / cell - 0.5)), y0 = Math.floor(fy), y1 = Math.min(cellsY - 1, y0 + 1), ty = fy - y0
     for (let x = 0; x < w; x++) {
-      const c = cy + Math.floor(x / cell), p = (y * w + x) * 4
-      let r = 0, g = 0, b = 0
+      const fx = Math.min(cellsX - 1, Math.max(0, (x + 0.5) / cell - 0.5)), x0 = Math.floor(fx), x1 = Math.min(cellsX - 1, x0 + 1), tx = fx - x0
+      const c00 = y0 * cellsX + x0, c01 = y0 * cellsX + x1, c10 = y1 * cellsX + x0, c11 = y1 * cellsX + x1
+      const p = (y * w + x) * 4
+      let r = 0, g = 0, b = 0, sum = 0
       for (let i = 0; i < n; i++) {
-        const wt = weights[i][c], d = images[i].data
-        r += wt * d[p]; g += wt * d[p + 1]; b += wt * d[p + 2]
+        const wi = weights[i]
+        const v = (wi[c00] * (1 - tx) + wi[c01] * tx) * (1 - ty) + (wi[c10] * (1 - tx) + wi[c11] * tx) * ty
+        wt[i] = v; sum += v
+      }
+      for (let i = 0; i < n; i++) {
+        const v = wt[i] / (sum || 1), d = images[i].data
+        r += v * d[p]; g += v * d[p + 1]; b += v * d[p + 2]
       }
       out[p] = r; out[p + 1] = g; out[p + 2] = b; out[p + 3] = 255
     }
   }
   return { data: out, width: w, height: h }
+}
+
+/** Downscaled luminance of an RGBA image (for alignment by phase correlation). */
+export function grayDown(rgba: Uint8ClampedArray, w: number, h: number, maxW = 410): { data: Float32Array; width: number; height: number } {
+  const f = Math.max(1, Math.floor(w / maxW)), gw = Math.floor(w / f), gh = Math.floor(h / f)
+  const data = new Float32Array(gw * gh)
+  for (let y = 0; y < gh; y++) for (let x = 0; x < gw; x++) {
+    let s = 0
+    for (let j = 0; j < f; j++) for (let i = 0; i < f; i++) { const p = ((y * f + j) * w + x * f + i) * 4; s += 0.299 * rgba[p] + 0.587 * rgba[p + 1] + 0.114 * rgba[p + 2] }
+    data[y * gw + x] = s / (f * f)
+  }
+  return { data, width: gw, height: gh }
 }
 
 export interface StackResult { image: Rgba; contributions: number[] /* share of the picture taken from each slice, sums to 1 */ }

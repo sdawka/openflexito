@@ -14,9 +14,9 @@ export interface GalleryItem {
   /** blob keys: 'image' (snapshot or stitched mosaic), 'thumb', 'tile/<n>' */
   blobs: string[]
   /** focus stack: how it was taken and how much of the result each slice supplied */
-  stack?: { slices: number; stepZ: number; zs: number[]; contributions: number[] }
-  /** raw develop: the sensor data behind 'image' (kept as blob 'raw', the device's raw.bin) */
-  raw?: { bitDepth: number; bayer: string; blackLevel: number; gains: [number, number] }
+  stack?: { slices: number; stepZ: number; zs: number[]; contributions: number[]; method?: 'blocks' | 'pyramid'; centreZ?: number; span?: number; shifts?: { dx: number; dy: number }[]; source?: 'jpeg' | 'raw' }
+  /** raw develop: the sensor data behind 'image' ('dng' blob = the untouched mosaic as a DNG) */
+  raw?: { bitDepth: number; bayer: string; blackLevel: number; gains: [number, number]; applied?: { lsc: boolean; ccm: boolean; gammaCurve: boolean; demosaic: string } }
   scan?: {
     cols: number; rows: number; overlap: number
     tiles: { index: number; col: number; row: number; stage: { x: number; y: number }; x: number; y: number; width: number; height: number; blob: string }[]
@@ -129,7 +129,7 @@ export async function exportItem(item: GalleryItem): Promise<void> {
   for (const b of item.blobs) {
     const blob = await getBlob(item.id, b)
     if (!blob) continue
-    const ext = blob.type === 'image/png' ? 'png' : blob.type === 'application/octet-stream' ? 'bin' : 'jpg'
+    const ext = blob.type === 'image/png' ? 'png' : blob.type === 'image/x-adobe-dng' ? 'dng' : blob.type === 'application/octet-stream' ? 'bin' : 'jpg'
     files.push({ name: `${safe}-${b.replace('/', '-')}.${ext}`, blob })
   }
   files.push({ name: `${safe}.json`, blob: new Blob([JSON.stringify(item, null, 2)], { type: 'application/json' }) })

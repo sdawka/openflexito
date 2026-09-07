@@ -7,6 +7,7 @@
   import { attachGamepad } from '../lib/input/gamepad'
   import StreamView, { type Pan } from '../components/StreamView.svelte'
   import { PanController } from '../lib/input/pan'
+  import { wb, pickNeutral } from '../lib/services/whiteBalance.svelte'
   import StagePad from '../components/StagePad.svelte'
   import CameraControls from '../components/CameraControls.svelte'
   import LightControl from '../components/LightControl.svelte'
@@ -132,6 +133,7 @@
   })
 
   function onClickImage(p: { x: number; y: number; w: number; h: number }) {
+    if (wb.picking) { lastClick = null; void pickNeutral({ x: p.x, y: p.y }); return }
     const csm = calibration.csm
     if (!csm) {
       lastClick = `(${(p.x * p.w).toFixed(0)}, ${(p.y * p.h).toFixed(0)}) px — run "Calibrate XY" on the Calibrate page to enable drag-to-move and click-to-centre`
@@ -148,7 +150,8 @@
 
 <div class="live">
   <section class="stream">
-    <StreamView {boxes} {panOffset} onpan={onPan} onclickimage={onClickImage} onselectregion={onSelectRegion} onclickbox={followBox} />
+    <StreamView {boxes} {panOffset} onpan={onPan} onclickimage={onClickImage} onselectregion={onSelectRegion} onclickbox={followBox} picking={wb.picking} />
+    {#if wb.picking}<div class="hint mono" style="top:12px;bottom:auto">click a spot that should be neutral grey or white</div>{/if}
     {#if follow.active || follow.status}<div class="hint mono" style="right:12px;left:auto">{follow.status}{#if follow.active} <button onclick={() => follow.stop()}>stop</button>{/if}</div>{/if}
     {#if ai.status}<div class="hint mono" style="top:12px;bottom:auto">{ai.status}</div>{/if}
     {#if lastClick}<div class="hint mono">{lastClick}</div>{/if}

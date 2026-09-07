@@ -13,9 +13,10 @@
   export interface Box { x: number; y: number; w: number; h: number; label?: string; score?: number; kind?: 'detect' | 'follow' | 'select' }
   export interface Pan { dx: number; dy: number; w: number; h: number; done: boolean }
 
-  let { boxes = [], panOffset = null, onclickimage, onselectregion, onclickbox, onpan }: {
+  let { boxes = [], panOffset = null, picking = false, onclickimage, onselectregion, onclickbox, onpan }: {
     boxes?: Box[]
     panOffset?: [number, number] | null
+    picking?: boolean            // eyedropper mode: show a crosshair cursor
     onclickimage?: (p: { x: number; y: number; w: number; h: number }) => void
     onselectregion?: (r: { x: number; y: number; w: number; h: number }) => void
     onclickbox?: (b: Box) => void
@@ -107,7 +108,7 @@
   const px = (v: number, size: number, off: number) => off + v * size
 </script>
 
-<div class="view" class:panning={pan?.moved} onpointerdown={down} onpointermove={move} onpointerup={up} onpointercancel={cancel} role="presentation">
+<div class="view" class:panning={pan?.moved} class:picking onpointerdown={down} onpointermove={move} onpointerup={up} onpointercancel={cancel} role="presentation">
   {#if error}
     <div class="err">stream unavailable <button onclick={() => { error = false; nonce++ }}>retry</button></div>
   {/if}
@@ -133,6 +134,7 @@
 <style>
   .view { position: relative; width: 100%; height: 100%; background: #000; display: grid; place-items: center; overflow: hidden; cursor: grab; touch-action: none; }
   .view.panning { cursor: grabbing; }
+  .view.picking { cursor: crosshair; }
   img { max-width: 100%; max-height: 100%; object-fit: contain; user-select: none; pointer-events: none; will-change: transform; }
   .overlay { position: absolute; pointer-events: none; }
   .overlay rect { fill: none; stroke-width: 2px; }

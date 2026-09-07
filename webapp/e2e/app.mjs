@@ -77,7 +77,7 @@ await step('RAW photo develops to a 16-bit PNG in the gallery', async () => {
   await page.selectOption('.panel:has(h3:has-text("Camera")) select', 'single')
   await nav('gallery'); await page.waitForTimeout(600)
   const gt = await page.locator('main').innerText()
-  expect(/RAW 10-bit BGGR → 16-bit PNG/.test(gt), 'gallery does not describe the raw item')
+  expect(/RAW 10-bit BGGR → 16-bit PNG \(malvar/.test(gt) && /DNG kept/.test(gt), 'gallery does not describe the raw item: ' + gt.replace(/\s+/g, ' ').slice(0, 200))
   expect(/RAW 10-bit[^\n]*\n[^\n]*3280\s*[×x]\s*2464/.test(gt), 'raw item is not listed at full sensor size')
 })
 
@@ -188,6 +188,26 @@ if (moves) await step('scan 2×2 stitches into the gallery', async () => {
   }
   await nav('gallery')
   await page.waitForFunction(() => /tiles/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 8000 })
+})
+
+if (moves) await step('fine focus stack centres on the focus plane and fuses several slices', async () => {
+  await nav('live')
+  await page.selectOption('.panel:has(h3:has-text("Camera")) select', 'focusfine')
+  const n = page.locator('.panel:has(h3:has-text("Camera")) input[type=number]').nth(0)
+  await n.click({ clickCount: 3 }); await n.pressSequentially('5')
+  await page.click('button:has-text("Photo")')
+  await page.waitForFunction(() => /saved "Fine focus stack/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 180000 })
+    .catch(async () => { throw new Error('fine stack did not finish: ' + (await page.locator('.panel:has(h3:has-text("Camera"))').innerText()).replace(/\s+/g, ' ').slice(-200)) })
+  await page.waitForTimeout(500)
+  const z = (await position()).z
+  expect(Math.abs(z) < 150, `fine stack ended at z=${z}; the fake specimen is in focus at z=0`)
+  await page.selectOption('.panel:has(h3:has-text("Camera")) select', 'single')
+  await nav('gallery'); await page.waitForTimeout(600)
+  const g = await page.locator('main').innerText()
+  const m = g.match(/fine focus stack \(pyramid\)[^\n]*from each: ([\d% ]+)/)
+  expect(!!m, 'gallery does not describe the fine stack: ' + g.replace(/\s+/g, ' ').slice(0, 200))
+  const shares = m[1].trim().split(/\s+/).map((s) => parseInt(s))
+  expect(shares.filter((s) => s > 5).length >= 2, `fine stack did not draw on several slices: ${m[1]}`)
 })
 
 await step('settings persist across reload', async () => {
