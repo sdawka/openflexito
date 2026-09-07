@@ -1,5 +1,7 @@
 /** Gallery storage in the browser: IndexedDB for metadata and image blobs. */
 
+import { currentSample, type SampleRecord } from './sample.svelte'
+
 export type ItemKind = 'snapshot' | 'scan' | 'video'
 
 export interface GalleryItem {
@@ -24,6 +26,8 @@ export interface GalleryItem {
     tiles: { index: number; col: number; row: number; stage: { x: number; y: number }; x: number; y: number; width: number; height: number; blob: string }[]
     positions?: { x: number; y: number }[]
   }
+  /** what was on the stage, copied from `store/sample.svelte.ts` at capture time (if it was filled in). */
+  sample?: SampleRecord
 }
 
 const DB = 'openflexito', VERSION = 2
@@ -114,6 +118,7 @@ export async function saveSnapshot(blob: Blob, meta: { position?: GalleryItem['p
   const item: GalleryItem = {
     id, kind: 'snapshot', name: meta.name ?? `Snapshot ${new Date().toLocaleString()}`, when: new Date().toISOString(),
     position: meta.position, controls: meta.controls, width: bmp.width, height: bmp.height, blobs: ['image', 'thumb', ...extraNames],
+    sample: currentSample(),
     ...(meta.extra ?? {}),
   }
   if ('close' in bmp) bmp.close()
@@ -130,6 +135,7 @@ export async function saveVideo(blob: Blob, thumb: Blob | null, meta: { duration
     id, kind: 'video', name: `Video ${meta.source} ${meta.durationS.toFixed(0)} s`, when: new Date().toISOString(),
     position: meta.position, width: meta.width, height: meta.height, blobs: thumb ? ['video', 'thumb'] : ['video'],
     video: { durationS: meta.durationS, fps: meta.fps, source: meta.source, mime: blob.type },
+    sample: currentSample(),
   }
   await putBlob(id, 'video', blob)
   if (thumb) await putBlob(id, 'thumb', thumb)
@@ -137,8 +143,10 @@ export async function saveVideo(blob: Blob, thumb: Blob | null, meta: { duration
   return item
 }
 
-/** Export an item's files. Uses the File System Access API when available, else downloads. */
-export async function exportItem(item: GalleryItem): Promise<void> {
+/** The files an item exports to: its blobs plus a `<name>.json` sidecar with the full item metadata
+ *  (sample record, position, controls, stack/raw/video fields). Shared by `exportItem` and
+ *  `exportSampleBundle`. */
+async function itemFiles(item: GalleryItem): Promise<{ name: string; blob: Blob }[]> {
   const files: { name: string; blob: Blob }[] = []
   const safe = item.name.replace(/[^\w.-]+/g, '_')
   for (const b of item.blobs) {
@@ -148,6 +156,18 @@ export async function exportItem(item: GalleryItem): Promise<void> {
     files.push({ name: `${safe}-${b.replace('/', '-')}.${ext}`, blob })
   }
   files.push({ name: `${safe}.json`, blob: new Blob([JSON.stringify(item, null, 2)], { type: 'application/json' }) })
+  return files
+}
+
+function downloadFile(f: { name: string; blob: Blob }): void {
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(f.blob); a.download = f.name; a.click()
+  setTimeout(() => URL.revokeObjectURL(a.href), 10_000)
+}
+
+/** Export an item's files. Uses the File System Access API when available, else downloads. */
+export async function exportItem(item: GalleryItem): Promise<void> {
+  const files = await itemFiles(item)
   const picker = (window as any).showDirectoryPicker as (() => Promise<any>) | undefined
   if (picker) {
     const dir = await picker()
@@ -157,9 +177,42 @@ export async function exportItem(item: GalleryItem): Promise<void> {
     }
     return
   }
-  for (const f of files) {
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(f.blob); a.download = f.name; a.click()
-    setTimeout(() => URL.revokeObjectURL(a.href), 10_000)
+  for (const f of files) downloadFile(f)
+}
+
+const csvCell = (v: unknown): string => `"${String(v ?? '').replace(/"/g, '""')}"`
+
+/** Export every one of `items` (typically everything from one sample) as a subfolder per item plus
+ *  an `<sampleName>-index.csv` summary row per item (name, time, kind, size, z, sample fields). Falls
+ *  back to flat downloads (no real folders) without the File System Access API. */
+export async function exportSampleBundle(items: GalleryItem[], sampleName: string): Promise<void> {
+  const safeSample = sampleName.replace(/[^\w.-]+/g, '_') || 'sample'
+  const rows = ['name,when,kind,size,z,sample_name,specimen,stain,slideId,magnification,operator']
+  const sizes = new Map<string, number>()
+  for (const it of items) {
+    let size = 0
+    for (const b of it.blobs) { const blob = await getBlob(it.id, b); if (blob) size += blob.size }
+    sizes.set(it.id, size)
+    rows.push([
+      it.name, it.when, it.kind, size, it.position?.z ?? '',
+      it.sample?.name, it.sample?.specimen, it.sample?.stain, it.sample?.slideId, it.sample?.magnification, it.sample?.operator,
+    ].map(csvCell).join(','))
   }
+  const csv = new Blob([rows.join('\n')], { type: 'text/csv' })
+  const picker = (window as any).showDirectoryPicker as (() => Promise<any>) | undefined
+  if (picker) {
+    const root = await picker()
+    const fh = await root.getFileHandle(`${safeSample}-index.csv`, { create: true })
+    const w = await fh.createWritable(); await w.write(csv); await w.close()
+    for (const it of items) {
+      const sub = await root.getDirectoryHandle(`${it.name.replace(/[^\w.-]+/g, '_') || it.id}-${it.id}`, { create: true })
+      for (const f of await itemFiles(it)) {
+        const fh2 = await sub.getFileHandle(f.name, { create: true })
+        const w2 = await fh2.createWritable(); await w2.write(f.blob); await w2.close()
+      }
+    }
+    return
+  }
+  downloadFile({ name: `${safeSample}-index.csv`, blob: csv })
+  for (const it of items) for (const f of await itemFiles(it)) downloadFile({ name: `${safeSample}-${f.name}`, blob: f.blob })
 }

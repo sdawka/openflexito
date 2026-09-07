@@ -215,6 +215,31 @@ image. OpenFlexure's own route is the Delta Stage's 8×8 DotStar array (Adafruit
 sample with the outer LEDs lit (arXiv 2112.05804); community alternatives are a patch stop in a
 modularised condenser (forum topic 1249) and a Köhler-style condenser with light stops (topic 2400).
 
+### Sample metadata, export and macros
+
+The current sample (name, specimen/organism, stain or preparation, slide id/barcode, magnification,
+notes, operator) is edited from a collapsed **Sample** panel on the Live page (`store/sample.svelte.ts`,
+`components/SamplePanel.svelte`), persisted per browser, and copied onto every photo and video as its
+`sample` field the moment it is captured (`saveSnapshot`/`saveVideo` in `store/gallery.ts`). A **scan**
+button reads a QR/Data Matrix/1D barcode out of the current live frame into the slide id field using the
+browser's `BarcodeDetector` API where it exists (Chrome/Edge; feature-detected, with an explanation where
+it does not). Each gallery item's sample data can also be edited individually from its viewer. The
+Gallery can filter by sample name or any metadata field and, with "group by sample" on, shows one section
+per sample with an **Export all of this sample** button that writes one subfolder per item (image/DNG/
+slices/thumbnail plus its `<name>.json` sidecar of full metadata) and an `index.csv` summarising every
+item (name, time, kind, size, z, sample fields) — the per-item **Export** button already wrote that JSON
+sidecar alongside the image files, so both paths share the same file list (`store/gallery.ts`).
+
+**Macro recording and replay** captures the RPC calls the app makes to the device (`lib/api/rpc.ts`'s
+`onCall` hook) while recording is on — stage moves, jogs, light and camera-control changes — plus
+high-level actions (photo modes, autofocus) recorded as named steps from the Photo and Focus controls
+(`services/macro.svelte.ts`). Macros are saved as JSON in their own IndexedDB database
+(`store/macroDb.ts`, independent of the gallery DB) and can be exported/imported as `.json` files. Replay
+runs a macro with its recorded delays or as fast as possible, with pause/stop, a live step list, a repeat
+count and a wait between repeats; the pure step/timing/override logic lives in `lib/algo/macro.ts`
+(vitest-tested). The collapsed **Macro** panel on the Live page (`components/MacroPanel.svelte`) drives
+all of this: Record/Stop/Save, the saved-macro list with Replay/Export/Delete, and an import file picker.
+
 ## Logs and crashes
 
 The service log lives in the systemd journal, which the image makes persistent and size-capped
