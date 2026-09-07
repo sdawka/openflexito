@@ -111,6 +111,11 @@ the bundled `imx219.json` tuning file comes from that project.
   stream, 30 fps) costs ~35 % of one core; each MJPEG encoder adds ~30 %. Encoders therefore run
   only while a stream or WebSocket client is connected (start latency ~0.2 s); `/snapshot.jpg`
   falls back to a software JPEG when the encoder is idle. Idle service: ~34 % of one core, 185 MB RSS.
+- Motor heat: the Sangaboard firmware (`stage.cpp`) energises two coils per motor on the first step
+  and never releases them; the v3 server never sends `release` either, so the 28BYJ-48 motors sit
+  warm for ever holding a position the geared lead-screw actuators hold on their own. openflexito
+  sends `release` 2 s after a move settles (`stage.release_after`, per-device setting; 0 = hold),
+  re-energising happens automatically on the next step. Status reports `energised`.
 - Backlash handling mirrors v3 `BaseStage`: engagement state starts at 0 (unknown) on every
   service start, a compensated move corrects only the axes that move (`compensate: true`,
   v3 MOVEMENT_AXES) unless `"all"`, `"xy"` or `"z"` is requested (v3 ALL_AXES / XY_ONLY /

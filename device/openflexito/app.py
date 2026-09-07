@@ -53,7 +53,7 @@ class Device:
                 else:
                     board = Sangaboard.open(cfg.stage.port, cfg.stage.baud)
                 self.stage = Stage(board, cfg.state_dir, self.events, cfg.stage.backlash, cfg.stage.inverted,
-                                   cfg.stage.poll_interval)
+                                   cfg.stage.poll_interval, cfg.stage.release_after)
             except (SangaboardError, OSError) as e:
                 self.errors["stage"] = str(e)
                 log.error("stage unavailable: %s", e)
@@ -156,7 +156,8 @@ class Device:
             r.register("stage.move_to", st.move_to, "Absolute move in program frame; omitted axes stay.")
             r.register("stage.jog", st.jog, "Newest-wins relative move without backlash compensation (cancels a running jog).")
             r.register("stage.stop", st.stop, "Abort the current move.")
-            r.register("stage.release", st.release, "De-energise motor coils.")
+            r.register("stage.release", st.release, "De-energise motor coils now.")
+            r.register("stage.set_release_after", st.set_release_after, "Idle seconds before coils are released automatically (0 = hold for ever).")
             r.register("stage.zero", st.zero, "Set the current position as 0 0 0.")
             r.register("stage.restore_position", lambda: st.restore_position(), "Re-apply the last saved position after a board power cycle.")
             r.register("stage.set_backlash", st.set_backlash, "Set backlash steps per axis.")

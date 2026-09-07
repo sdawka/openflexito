@@ -74,6 +74,7 @@ class Stage:
         backlash: dict[str, int] | None = None,
         inverted: dict[str, bool] | None = None,
         poll_interval: float = 0.05,
+        release_after: float = 2.0,
     ):
         self.board = board
         self.events = events
@@ -81,6 +82,9 @@ class Stage:
         self.backlash = dict(backlash or {"x": 200, "y": 200, "z": 200})
         self.inverted = dict(inverted or {"x": True, "y": False, "z": True})
         self.poll_interval = poll_interval
+        self.release_after = release_after
+        self._energised = True          # the firmware energises coils on the first move and never releases
+        self._release_timer: threading.Timer | None = None
         self._engaged = {a: 0.0 for a in AXES}   # 1 = engaged in +backlash direction; 0 = unknown (v3 starts here)
         self._offset = {a: 0 for a in AXES}      # program hw-frame offset for restored positions
         self._hw = {a: 0 for a in AXES}
@@ -131,6 +135,8 @@ class Stage:
             "inverted": dict(self.inverted),
             "engaged": dict(self._engaged),
             "step_time_us": self.board.info.step_time_us,
+            "energised": self._energised,
+            "release_after": self.release_after,
             "firmware": self.board.info.firmware,
             "board": self.board.info.board,
             "port": self.board.info.port,
@@ -144,6 +150,8 @@ class Stage:
             self._offset.update({a: int(data.get("offset", {}).get(a, 0)) for a in AXES})
             self._saved_hw = {a: int(data.get("hw", {}).get(a, 0)) for a in AXES}
             self.backlash.update({a: int(v) for a, v in data.get("backlash", {}).items() if a in AXES})
+            if "release_after" in data:
+                self.release_after = float(data["release_after"])
             self.inverted.update({a: bool(v) for a, v in data.get("inverted", {}).items() if a in AXES})
         except (OSError, ValueError, json.JSONDecodeError):
             self._saved_hw = None
@@ -155,7 +163,7 @@ class Stage:
                 tmp = self.state_file.with_suffix(".tmp")
                 tmp.write_text(json.dumps({
                     "hw": self._hw, "offset": self._offset,
-                    "backlash": self.backlash, "inverted": self.inverted,
+                    "backlash": self.backlash, "inverted": self.inverted, "release_after": self.release_after,
                 }))
                 tmp.replace(self.state_file)
         except OSError as e:
@@ -191,10 +199,38 @@ class Stage:
         except Exception:  # noqa: BLE001  reporting must never break a move on the worker thread
             log.exception("position event failed")
 
+    # ---- coil release ---------------------------------------------------------------------
+
+    def _cancel_release(self) -> None:
+        t, self._release_timer = self._release_timer, None
+        if t is not None:
+            t.cancel()
+
+    def _schedule_release(self) -> None:
+        """Arm a timer that de-energises the coils once the stage has been idle for `release_after`."""
+        self._cancel_release()
+        if self.release_after and self.release_after > 0:
+            t = threading.Timer(self.release_after, self._release_if_idle)
+            t.daemon = True
+            self._release_timer = t
+            t.start()
+
+    def _release_if_idle(self) -> None:
+        if self._moving or self._busy.locked():
+            return
+        try:
+            self.board.release()
+            self._energised = False
+            self._save_state()
+        except SangaboardError as e:
+            log.warning("motor release failed: %s", e)
+
     def _hw_move(self, d: dict[str, int]) -> MoveResult:
         """One raw relative hardware move; blocks until the board reports it has stopped."""
         if all(v == 0 for v in d.values()):
             return MoveResult(dict(self._hw), dict(self._hw), now_ns(), now_ns(), False)
+        self._cancel_release()
+        self._energised = True   # the firmware re-energises on the next step command
         start_hw = dict(self._hw)
         duration = max(abs(v) for v in d.values()) * self.board.info.step_time_us / 1e6
         target = {a: start_hw[a] + d[a] for a in AXES}
@@ -231,6 +267,7 @@ class Stage:
                     self._engaged[a] = min(1.0, max(0.0, self._engaged[a] + (self._hw[a] - start_hw[a]) / bl))
             self._save_state()
             self._emit_position(False, cancelled=cancelled)
+            self._schedule_release()
         return MoveResult(start_hw, dict(self._hw), t0, t1, cancelled)
 
     def _move_rel_sync(self, move: dict[str, int], compensate) -> MoveResult:
@@ -299,8 +336,22 @@ class Stage:
         return {"position": self.position}
 
     async def release(self) -> dict:
-        await self._run(self.board.release)
-        return {"position": self.position}
+        self._cancel_release()
+        def _rel():
+            self.board.release()
+            self._energised = False
+        await self._run(_rel)
+        return {"position": self.position, "energised": False}
+
+    async def set_release_after(self, seconds: float) -> dict:
+        """Seconds of idle time before the coils are de-energised (0 = hold for ever)."""
+        self.release_after = max(0.0, float(seconds))
+        self._save_state()
+        if self.release_after and not self._moving:
+            self._schedule_release()
+        else:
+            self._cancel_release()
+        return {"release_after": self.release_after}
 
     async def zero(self) -> dict:
         def _zero():
@@ -336,6 +387,7 @@ class Stage:
         }
 
     def close(self) -> None:
+        self._cancel_release()
         self._cancel.set()
         self._executor.shutdown(wait=False)
         try:

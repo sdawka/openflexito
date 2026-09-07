@@ -33,6 +33,8 @@ export interface StageStatus {
   inverted: Record<Axis, boolean>
   engaged: Vec3
   step_time_us: number
+  energised?: boolean
+  release_after?: number
   firmware: string
   board: string
   port: string

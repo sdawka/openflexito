@@ -38,6 +38,10 @@ class StageConfig:
     backlash: dict[str, int] = field(default_factory=lambda: {"x": 200, "y": 200, "z": 200})
     inverted: dict[str, bool] = field(default_factory=lambda: {"x": True, "y": False, "z": True})
     poll_interval: float = 0.05
+    # De-energise the coils this many seconds after a move settles (0 = never). The Sangaboard
+    # firmware otherwise holds two coils per motor energised for ever, which keeps the 28BYJ-48
+    # motors hot; the geared lead-screw actuators hold position without current.
+    release_after: float = 2.0
 
 
 @dataclass

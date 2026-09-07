@@ -130,3 +130,21 @@ def test_stale_reply_is_flushed_before_next_query(board, transport):
 def test_set_step_time_updates_duration_estimate(board):
     assert board.set_step_time(2500) == 2500
     assert board.info.step_time_us == 2500
+
+
+async def test_coils_are_released_after_idle(board, events, tmp_path, transport):
+    events.bind(asyncio.get_running_loop())
+    st = Stage(board, tmp_path, events, poll_interval=0.005, release_after=0.05)
+    await st.move_rel(x=10, compensate=False)
+    assert st.status()["energised"] is True
+    assert "release" not in transport.sent
+    await asyncio.sleep(0.15)
+    assert "release" in transport.sent
+    assert st.status()["energised"] is False
+    transport.sent.clear()
+    await st.move_rel(x=10, compensate=False)       # a new move re-energises and re-arms the timer
+    assert st.status()["energised"] is True and st.position["x"] == 20
+    await st.set_release_after(0)
+    await asyncio.sleep(0.15)
+    assert "release" not in transport.sent
+    st.close()

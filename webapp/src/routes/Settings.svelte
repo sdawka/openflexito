@@ -59,6 +59,7 @@
     if (!stage) return
     await device.client.call('stage.set_backlash', stage.backlash)
     await device.client.call('stage.set_inverted', stage.inverted)
+    if (stage.release_after !== undefined) await device.client.call('stage.set_release_after', { seconds: stage.release_after })
   }
   async function applyStream() {
     await device.client.call('camera.set_stream_size', { width: streamW, height: streamH })
@@ -110,6 +111,10 @@
         {/each}
       </div>
       <div class="row" style="margin-top:10px">
+        <div class="row" style="margin-top:8px">
+          <label style="margin:0">release motor coils after <input class="mono" type="number" min="0" step="0.5" style="width:70px" bind:value={stage.release_after} /> s idle
+            <span class="muted">(0 = hold for ever, motors stay hot; the actuators hold position without current)</span></label>
+        </div>
         <button class="primary" onclick={applyStage}>Apply to device</button>
         <span class="muted mono" style="font-size:12px">step time {stage.step_time_us} µs</span>
       </div>
