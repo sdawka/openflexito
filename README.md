@@ -93,15 +93,49 @@ the bundled `imx219.json` tuning file comes from that project.
   profile (it requires root-owned 0600 files) and broke sudo's path checks.
 - First-boot install waits for NTP sync (`timedatectl`) before `apt`, otherwise the Pi's clock is
   still at the image date and apt rejects every release file as "not valid yet".
-- CPU on the Pi 3B+: picamera2 alone (1640×1232 + 410×308 YUV420, no raw stream, 30 fps) costs
-  ~35 % of one core; each MJPEG encoder adds ~30 %. Encoders therefore run only while a stream or
-  WebSocket client is connected (start latency ~0.2 s); `/snapshot.jpg` falls back to a software
-  JPEG when the encoder is idle. Idle service: ~34 % of one core, 185 MB RSS.
+- Stream mode (measured on the algae sample, same light): the binned 1640×1232 sensor mode at
+  30 fps / 25 Mbit/s gave 0.45 bit/px JPEGs (113 kB frames), 1.7 grey levels of frame-to-frame
+  noise per pixel and 95 % of a core with one viewer. OpenFlexure v3 previews at 820×616 from the
+  full 3280×2464 readout with a 100 Mbit/s cap; the same here gives ~18 fps, 100 kB frames
+  (1.6 bit/px), 0.87 levels of temporal noise and 32 % of a core. That is now the default
+  (`sensor_size = [3280, 2464]`, `stream_size = [820, 616]`); 1640×1232 stays selectable in
+  Settings. The perceived "movement" of the old stream was noise flicker: phase correlation between
+  consecutive frames shows 0 px of motion. The Pi's hardware MJPEG encoder (bcm2835-codec) pins
+  frames near 100 kB whatever you ask for: 25 vs 100 Mbit/s gives 102 vs 110 kB at 1640×1232, and
+  `V4L2_CID_JPEG_COMPRESSION_QUALITY` returns EINVAL. Bits per pixel are therefore set by the
+  stream resolution alone, which is the whole trade-off: 820×616 = 4× the JPEG quality per pixel
+  and a third of the CPU, 1640×1232 = twice the resolution but visibly blockier. A Haiku
+  side-by-side of centre crops preferred the 1640 frame for edge detail and the 820 frame for
+  grain, so the choice is exposed in Settings rather than decided here.
+- CPU on the Pi 3B+ (old 1640×1232 mode): picamera2 alone (main + 410×308 lores YUV420, no raw
+  stream, 30 fps) costs ~35 % of one core; each MJPEG encoder adds ~30 %. Encoders therefore run
+  only while a stream or WebSocket client is connected (start latency ~0.2 s); `/snapshot.jpg`
+  falls back to a software JPEG when the encoder is idle. Idle service: ~34 % of one core, 185 MB RSS.
+- Backlash handling mirrors v3 `BaseStage`: engagement state starts at 0 (unknown) on every
+  service start, a compensated move corrects only the axes that move (`compensate: true`,
+  v3 MOVEMENT_AXES) unless `"all"`, `"xy"` or `"z"` is requested (v3 ALL_AXES / XY_ONLY /
+  Z_ONLY; scans use `"xy"`, autofocus `"z"`). The serial client flushes unread input before every
+  command like pysangaboard, so a late reply after a timeout cannot shift every later answer.
 - Frame metadata: picamera2 encoders emit timestamps relative to their first frame; the offset is
   added back so `X-Timestamp`/`event.frame.ts` equal `SensorTimestamp` (CLOCK_BOOTTIME ns). Stream
   lag from sensor to JPEG output is ~60 ms.
 - `/raw.bin` (3280×2464 SBGGR10 unpacked to 16 MB) takes ~14 s over WiFi; the tuning reload via a
   fresh `CameraManager` takes 1.5 s.
+
+## Photos and stacks
+
+The Photo button takes a full-resolution still (3280×2464, ~1.3 s, ~1.5 MB JPEG) into the gallery;
+the stage does not move for it. Two stacked modes run entirely in the browser (`webapp/src/lib/algo/stack.ts`):
+a **focus stack** captures N slices `step` z-steps apart (starting below, ending back at the starting z
+with z backlash compensation) and keeps, block by block, the slice with the highest local Laplacian
+energy; an **LED exposure stack** captures the scene at several LED levels (0.4×, 0.7×, 1×, 1.5× of the
+current brightness, clipped to the range) and fuses them with well-exposedness weights (Mertens-style,
+single scale). Both weight maps are smoothed over neighbouring blocks so seams do not show.
+
+Extra illumination: the Sangaboard v0.5 reports `CC:1 PWM:2`, i.e. one constant-current driver (the main
+LED) and two spare PWM outputs on the board. A side or oblique LED wired to a PWM output is driven with
+`light.set {pwm: [v0, v1]}` and gets its own slider under Illumination; nothing on the Pi's GPIO is
+needed (the HAT covers the header anyway).
 
 ## Logs and crashes
 
@@ -120,13 +154,14 @@ power off) are request files in `/var/lib/openflexito/requests/` handled by the 
 Verified on hardware (Pi 3B+, Sangaboard v0.5.5, Pi Camera v2) from the built image:
 - image: `build-mac.sh` → flash → first boot configures WiFi/user/SSH and reboots → second boot
   installs (~5 min) → third boot streams headless at `http://microscope.local/`.
-- device: stream 1640×1232 at 30 fps with monotonic sensor timestamps, `/snapshot.jpg[?full=1]`,
+- device: stream 820×616 at ~18 fps (or 1640×1232 at 30 fps) with monotonic sensor timestamps, `/snapshot.jpg[?full=1]`,
   `/raw.bin` header and payload, `camera.set_tuning` round trip, relative moves with consistent
   position readback, `light.set`, WebSocket events and RPC, ACT LED solid/heartbeat states.
 
-Verified in a real browser (Playwright driving Chrome, `webapp/e2e/app.mjs`): against the fake device all 11
+Verified in a real browser (Playwright driving Chrome, `webapp/e2e/app.mjs`): against the fake device all 13
 steps pass (tab navigation, jog, snapshot → gallery, camera controls, colour calibration, stage↔camera mapping,
-autofocus, 2×2 scan → stitched mosaic in the gallery, settings persistence, no page errors). Against the Pi with an
+click-hold-drag panning, autofocus, 2×2 scan → stitched mosaic in the gallery, settings persistence, device logs,
+no page errors). Against the Pi with an
 empty field of view: navigation, jog, snapshot, controls and the colour calibration pass (the field is now
 flat and neutral); mapping, autofocus and scan correctly refuse to run without a sample in view.
 Bugs this found and fixed: a Svelte effect loop that froze the whole app after the first page, MJPEG `<img>`

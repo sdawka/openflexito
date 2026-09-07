@@ -5,7 +5,8 @@
   import { JogController } from '../lib/input/jog'
   import { attachKeyboard } from '../lib/input/keyboard'
   import { attachGamepad } from '../lib/input/gamepad'
-  import StreamView from '../components/StreamView.svelte'
+  import StreamView, { type Pan } from '../components/StreamView.svelte'
+  import { PanController } from '../lib/input/pan'
   import StagePad from '../components/StagePad.svelte'
   import CameraControls from '../components/CameraControls.svelte'
   import LightControl from '../components/LightControl.svelte'
@@ -18,6 +19,40 @@
   import { getBlob } from '../lib/store/gallery'
   import Viewer from '../components/Viewer.svelte'
   import type { Box } from '../components/StreamView.svelte'
+
+  // ---- click-hold-drag panning (like a map): the picture follows the cursor, the stage follows the picture ----
+  let panner: PanController | null = null
+  let panOffset = $state<[number, number] | null>(null)
+  let panScale = 1   // calibration-frame px per natural px of the current stream
+  function onPan(p: Pan) {
+    const csm = calibration.csm
+    if (!csm) {
+      lastClick = 'drag-to-move needs the stage ↔ camera calibration: run "Calibrate XY" on the Calibrate page'
+      return
+    }
+    if (!panner || panner.matrixRef !== csm.matrix) {
+      panner = new PanController({
+        matrix: csm.matrix,
+        move: (d) => device.moveRel(d, false),
+        onchange: refreshPanOffset,
+      })
+      panner.matrixRef = csm.matrix
+    }
+    panScale = csm.imageWidth / p.w
+    if (!panner.active && !p.done) panner.begin()
+    // dragging the picture right means the scene must move right by that many pixels
+    panner.update([p.dx * panScale, p.dy * panScale])
+    if (p.done) panner.end()
+    refreshPanOffset()
+    lastClick = null
+  }
+  /** Translate the picture by what the stage still owes the cursor; nothing once the pan is idle
+   *  (the integer-step rounding leaves a sub-pixel remainder that must not stick). */
+  function refreshPanOffset() {
+    if (!panner || !(panner.active || panner.busy)) { panOffset = null; return }
+    const [dx, dy] = panner.pendingPx()
+    panOffset = Math.hypot(dx, dy) < panScale ? null : [dx / panScale, dy / panScale]
+  }
 
   // ---- intelligence: detection, following, region search ----
   let detecting = $state(false)
@@ -99,7 +134,7 @@
   function onClickImage(p: { x: number; y: number; w: number; h: number }) {
     const csm = calibration.csm
     if (!csm) {
-      lastClick = `(${(p.x * p.w).toFixed(0)}, ${(p.y * p.h).toFixed(0)}) px — run "Calibrate XY" on the Calibrate page to enable click-to-move`
+      lastClick = `(${(p.x * p.w).toFixed(0)}, ${(p.y * p.h).toFixed(0)}) px — run "Calibrate XY" on the Calibrate page to enable drag-to-move and click-to-centre`
       return
     }
     // displacement of the clicked point from the centre, in the calibration's reference frame size
@@ -113,7 +148,7 @@
 
 <div class="live">
   <section class="stream">
-    <StreamView {boxes} onclickimage={onClickImage} onselectregion={onSelectRegion} onclickbox={followBox} />
+    <StreamView {boxes} {panOffset} onpan={onPan} onclickimage={onClickImage} onselectregion={onSelectRegion} onclickbox={followBox} />
     {#if follow.active || follow.status}<div class="hint mono" style="right:12px;left:auto">{follow.status}{#if follow.active} <button onclick={() => follow.stop()}>stop</button>{/if}</div>{/if}
     {#if ai.status}<div class="hint mono" style="top:12px;bottom:auto">{ai.status}</div>{/if}
     {#if lastClick}<div class="hint mono">{lastClick}</div>{/if}
@@ -159,6 +194,7 @@
     <LightControl />
     <CameraControls />
     <div class="panel muted" style="font-size:12px">
+      Mouse: click-hold-drag the image to pan the stage (like a map), click to centre a point, shift-drag to select a region.
       Keys: WASD / arrows move XY, PgUp/PgDn or Q/E move Z, hold for continuous jog.
       Gamepad: left stick XY, right stick or triggers Z, B stops.
     </div>

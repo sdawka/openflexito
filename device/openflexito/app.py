@@ -109,8 +109,8 @@ class Device:
                 self.led_state = new
                 self.leds.set_state(new)
                 self.events.publish("status", {"led": new, "network": self.net, "errors": self.errors})
-            try:
-                await asyncio.wait_for(self._status_dirty.wait(), timeout=3.0)
+            try:  # nmcli costs ~0.3 s of a Pi 3 core per poll; changes wake the loop early via _status_dirty
+                await asyncio.wait_for(self._status_dirty.wait(), timeout=10.0)
             except asyncio.TimeoutError:
                 pass
             self._status_dirty.clear()
@@ -176,8 +176,13 @@ class Device:
                 self._save_light()
                 return self._light_dict()
             self._light = self._load_light()
+            try:
+                self._light_channels = st.board.led_channels()  # e.g. {"cc": 1, "pwm": 2}: the PWM outputs can drive extra LEDs
+            except SangaboardError as e:
+                log.warning("led_channels? failed: %s", e)
+                self._light_channels = {"cc": 1, "pwm": 0}
             r.register("light.set", light_set)
-            r.register("light.get", self._light_dict, "Last set illumination values.")
+            r.register("light.get", self._light_dict, "Last set illumination values plus the board's channel counts.")
 
         if cam is not None:
             r.register("camera.status", cam.status, "Sensor, stream size, controls, client count.")
@@ -191,7 +196,9 @@ class Device:
             r.register("camera.metadata", cam.capture_metadata, "Latest libcamera request metadata.")
 
     def _light_dict(self) -> dict:
-        return {"cc": self._light["cc"], "pwm": [self._light["pwm"][k] for k in sorted(self._light["pwm"])]}
+        ch = getattr(self, "_light_channels", {"cc": 1, "pwm": 0})
+        pwm = [self._light["pwm"].get(i, 0.0) for i in range(max(int(ch.get("pwm", 0)), len(self._light["pwm"])))]
+        return {"cc": self._light["cc"], "pwm": pwm, "channels": ch}
 
     # The board keeps the LED state across a service restart but cannot report it, so remember it.
     def _light_file(self) -> Path:

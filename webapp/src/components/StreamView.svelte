@@ -1,22 +1,34 @@
 <script lang="ts">
   /** Live MJPEG view with an overlay for detections, the followed region and drag-selection.
-   *  Coordinates handed out are fractions of the image (0..1, origin top-left). */
+   *  Coordinates handed out are fractions of the image (0..1, origin top-left).
+   *
+   *  Pointer gestures (like a map): click-hold-drag pans the stage so the picture follows the
+   *  cursor (`onpan`, total displacement in natural image pixels, `done` on release); a plain
+   *  click (no drag) centres that point (`onclickimage`); shift-drag selects a region
+   *  (`onselectregion`). While a pan is in progress `panOffset` (natural px the stage has not yet
+   *  caught up with) translates the image so it sticks to the cursor. */
   import { device } from '../lib/store/device.svelte'
   import { settings } from '../lib/store/settings.svelte'
 
   export interface Box { x: number; y: number; w: number; h: number; label?: string; score?: number; kind?: 'detect' | 'follow' | 'select' }
+  export interface Pan { dx: number; dy: number; w: number; h: number; done: boolean }
 
-  let { boxes = [], onclickimage, onselectregion, onclickbox }: {
+  let { boxes = [], panOffset = null, onclickimage, onselectregion, onclickbox, onpan }: {
     boxes?: Box[]
+    panOffset?: [number, number] | null
     onclickimage?: (p: { x: number; y: number; w: number; h: number }) => void
     onselectregion?: (r: { x: number; y: number; w: number; h: number }) => void
     onclickbox?: (b: Box) => void
+    onpan?: (p: Pan) => void
   } = $props()
 
   let img: HTMLImageElement | undefined = $state()
   let error = $state(false)
   let nonce = $state(0)
   let drag = $state<{ x0: number; y0: number; x1: number; y1: number } | null>(null)
+  // pan gesture: client-pixel start point and whether the pointer moved past the click threshold
+  let pan = $state<{ cx: number; cy: number; moved: boolean; frac: { x: number; y: number } } | null>(null)
+  const CLICK_PX = 4
   const src = $derived(device.url(settings.showLores ? '/stream-lores.mjpg' : '/stream.mjpg') + '?n=' + nonce)
 
   // Re-arm the <img> whenever the device (re)connects. Only `device.connected` is a dependency:
@@ -47,12 +59,30 @@
     const t = setInterval(() => { geo = geometry() }, 250)
     return () => clearInterval(t)
   })
+  /** displayed px per natural px (the translate is measured against the unshifted layout box) */
+  const scale = $derived(geo && img?.naturalWidth ? geo.w / img.naturalWidth : 1)
+  const shift = $derived(panOffset && geo ? `translate(${panOffset[0] * scale}px, ${panOffset[1] * scale}px)` : '')
 
   function down(e: PointerEvent) {
+    if (e.button !== 0) return
     const p = toFrac(e); if (!p) return
-    if (e.shiftKey) { drag = { x0: p.x, y0: p.y, x1: p.x, y1: p.y }; (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId) }
+    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+    if (e.shiftKey) { drag = { x0: p.x, y0: p.y, x1: p.x, y1: p.y }; return }
+    pan = { cx: e.clientX, cy: e.clientY, moved: false, frac: p }
   }
-  function move(e: PointerEvent) { if (drag) { const p = toFrac(e); if (p) drag = { ...drag, x1: p.x, y1: p.y } } }
+  function panEvent(e: PointerEvent, done: boolean): Pan | null {
+    if (!pan || !img || !geo) return null
+    const k = img.naturalWidth / geo.w
+    return { dx: (e.clientX - pan.cx) * k, dy: (e.clientY - pan.cy) * k, w: img.naturalWidth, h: img.naturalHeight, done }
+  }
+  function move(e: PointerEvent) {
+    if (drag) { const p = toFrac(e); if (p) drag = { ...drag, x1: p.x, y1: p.y }; return }
+    if (pan) {
+      if (!pan.moved && Math.hypot(e.clientX - pan.cx, e.clientY - pan.cy) < CLICK_PX) return
+      pan.moved = true
+      const ev = panEvent(e, false); if (ev) onpan?.(ev)
+    }
+  }
   function up(e: PointerEvent) {
     if (drag) {
       const r = { x: Math.min(drag.x0, drag.x1), y: Math.min(drag.y0, drag.y1), w: Math.abs(drag.x1 - drag.x0), h: Math.abs(drag.y1 - drag.y0) }
@@ -60,19 +90,28 @@
       if (r.w > 0.02 && r.h > 0.02) onselectregion?.(r)
       return
     }
-    const p = toFrac(e); if (!p || !img) return
+    if (!pan) return
+    const g = pan; pan = null
+    if (g.moved) { const ev = panEvent(e, true); if (ev) onpan?.(ev); return }
+    if (!img) return
+    const p = g.frac
     const hit = boxes.find((b) => b.kind === 'detect' && p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h)
     if (hit && onclickbox) { onclickbox(hit); return }
     onclickimage?.({ x: p.x, y: p.y, w: img.naturalWidth, h: img.naturalHeight })
   }
+  function cancel(e: PointerEvent) {
+    drag = null
+    if (pan?.moved) { const ev = panEvent(e, true); if (ev) onpan?.(ev) }
+    pan = null
+  }
   const px = (v: number, size: number, off: number) => off + v * size
 </script>
 
-<div class="view" onpointerdown={down} onpointermove={move} onpointerup={up} role="presentation">
+<div class="view" class:panning={pan?.moved} onpointerdown={down} onpointermove={move} onpointerup={up} onpointercancel={cancel} role="presentation">
   {#if error}
     <div class="err">stream unavailable <button onclick={() => { error = false; nonce++ }}>retry</button></div>
   {/if}
-  <img bind:this={img} {src} alt="microscope live view" draggable="false" crossorigin="anonymous" onerror={() => (error = true)} />
+  <img bind:this={img} {src} alt="microscope live view" draggable="false" crossorigin="anonymous" style:transform={shift} onerror={() => (error = true)} />
   {#if geo}
     <svg class="overlay" style="left:{geo.ox}px;top:{geo.oy}px;width:{geo.w}px;height:{geo.h}px" viewBox="0 0 1 1" preserveAspectRatio="none">
       {#each boxes as b}
@@ -92,8 +131,9 @@
 </div>
 
 <style>
-  .view { position: relative; width: 100%; height: 100%; background: #000; display: grid; place-items: center; overflow: hidden; cursor: crosshair; touch-action: none; }
-  img { max-width: 100%; max-height: 100%; object-fit: contain; user-select: none; pointer-events: none; }
+  .view { position: relative; width: 100%; height: 100%; background: #000; display: grid; place-items: center; overflow: hidden; cursor: grab; touch-action: none; }
+  .view.panning { cursor: grabbing; }
+  img { max-width: 100%; max-height: 100%; object-fit: contain; user-select: none; pointer-events: none; will-change: transform; }
   .overlay { position: absolute; pointer-events: none; }
   .overlay rect { fill: none; stroke-width: 2px; }
   .overlay rect.detect { stroke: var(--warn); }

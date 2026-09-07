@@ -51,7 +51,7 @@
       for (let i = 0; i < tiles.length && !cancel; i++) {
         const tag = `tile ${i + 1}/${tiles.length}`
         progress = `${tag}: moving`
-        await device.moveRel(moves[i], true)
+        await device.moveRel(moves[i], 'xy')  // v3 scans use XY_ONLY backlash compensation
         progress = `${tag}: settling`
         await new Promise((r) => setTimeout(r, settleMs))
         if (autofocusEach) {
@@ -71,7 +71,7 @@
         done = i + 1
       }
       progress = 'returning to start'
-      await device.moveTo(origin, true)
+      await device.moveTo(origin, 'xy')
       if (cancel || !blobs.length) { progress = 'cancelled'; return }
       progress = 'stitching…'
       const res = await stitchInWorker({ tiles: blobs, maxDim: 8192, analysisWidth: 256, refine }, (m) => (progress = m))

@@ -46,4 +46,7 @@ class EventBus:
         """Publish from any thread (camera encoder, stage worker)."""
         if self._loop is None:
             return
-        self._loop.call_soon_threadsafe(self.publish, name, params)
+        try:
+            self._loop.call_soon_threadsafe(self.publish, name, params)
+        except RuntimeError:  # loop closed: we are shutting down, drop the event
+            pass

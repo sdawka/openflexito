@@ -57,6 +57,13 @@
   }
 
   const ledDefault = () => run('LED to default', async () => { await device.setLight(0.32) })
+  // LED brightness slider: the exposure step measures the light that is actually there, so the LED
+  // must be set *before* running it and left alone afterwards (changing it later means redoing step 1).
+  let ledTimer: ReturnType<typeof setTimeout> | undefined
+  function ledSlider(v: number) {
+    clearTimeout(ledTimer)
+    ledTimer = setTimeout(() => device.setLight(v).catch((e) => say(`LED: ${(e as Error).message}`)), 120)
+  }
 
   async function doFlat() {
     say('writing flat lens-shading tables so the raw frame is measured without correction…')
@@ -162,12 +169,23 @@
     <h3>1 · Illumination, exposure and colour</h3>
     <div class="two">
       <div>
-        <p class="muted"><b>Before you start:</b> remove the slide, or move to a blank area of it, so the whole field of view is
-          empty and evenly lit. The live preview on the right should be a featureless, roughly uniform disc.</p>
+        <div class="callout">
+          <b>Do this with the sample removed.</b> Take the slide out (or move to a completely blank area of it) so the
+          whole field of view is empty and evenly lit: these steps measure the illumination itself. The live preview on
+          the right must be a featureless, roughly uniform disc. If you can see cells or dust, the result will be wrong
+          and the image will come out tinted (a green field is the usual sign).
+        </div>
         <ol class="steps">
           <li class:ok={ledOn}>
-            <div class="what"><b>Turn the LED on</b> <span class="muted">— currently {ledOn ? `${Math.round(device.light.cc * 100)} %` : 'off'}</span></div>
-            <div class="row"><button onclick={ledDefault} disabled={!!busy || !device.connected}>LED to default (32 %)</button></div>
+            <div class="what"><b>Set the LED brightness</b> <span class="muted">— currently {ledOn ? `${Math.round(device.light.cc * 100)} %` : 'off'}.
+              Pick the brightness you will use for imaging; the exposure is then chosen to match it. Brighter LED = shorter
+              exposure and less noise, until the field saturates (the exposure step reports "not converged"). Changing the LED
+              later means redoing steps 2–4.</span></div>
+            <div class="row">
+              <input type="range" min="0" max="1" step="0.01" value={device.light.cc} disabled={!device.connected}
+                     oninput={(e) => ledSlider(+e.currentTarget.value)} style="flex:1" aria-label="LED brightness" />
+              <button onclick={ledDefault} disabled={!!busy || !device.connected}>Default (32 %)</button>
+            </div>
           </li>
           <li class:ok={flatDone}>
             <div class="what"><b>Reset shading tables to flat</b> <span class="muted">— so the raw frame is measured without any correction, and auto exposure / white balance are switched off</span></div>
@@ -192,7 +210,7 @@
           <button onclick={quickAuto} disabled={!!busy || !device.connected} title="Uncalibrated quick look: let the camera choose exposure and white balance">Auto exposure &amp; white balance</button>
           <button class="danger" onclick={resetTuning} disabled={!!busy || !device.connected}>Reset to factory tuning</button>
         </div>
-        <p class="muted small">Takes 1–2 minutes: each raw capture is 16 MB and travels over WiFi. Keep the field of view empty until it finishes.</p>
+        <p class="muted small">Takes 1–2 minutes: each raw capture is 16 MB and travels over WiFi. Keep the field of view empty and the LED untouched until it finishes.</p>
       </div>
       <div class="preview">
         {#if device.connected}<img bind:this={previewImg} src={device.url('/stream-lores.mjpg') + '?cal=1'} alt="live preview" />{/if}
@@ -234,6 +252,8 @@
 </div>
 
 <style>
+  .callout { border: 1px solid var(--warn); border-left-width: 4px; background: rgba(255, 190, 60, .08); padding: 10px 12px; border-radius: 6px; margin: 0 0 12px; font-size: 13px; line-height: 1.45; }
+
   .wrap { padding: 16px; display: flex; flex-direction: column; gap: 12px; max-width: 1100px; }
   .small { font-size: 12px; }
   .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }

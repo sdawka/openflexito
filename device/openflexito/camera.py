@@ -60,7 +60,10 @@ class FrameHub:
     def publish_threadsafe(self, jpeg: bytes, meta: dict) -> None:
         if self._loop is None:
             return
-        self._loop.call_soon_threadsafe(self._publish, jpeg, meta)
+        try:
+            self._loop.call_soon_threadsafe(self._publish, jpeg, meta)
+        except RuntimeError:  # loop closed during shutdown; the encoder thread outlives it briefly
+            pass
 
     def _publish(self, jpeg: bytes, meta: dict) -> None:
         self.seq += 1
@@ -263,14 +266,20 @@ class PiCamera(CameraBase):
         return out
 
     def _on_request(self, request) -> None:
-        md = request.get_metadata()
-        with self._meta_lock:
-            self._meta_ring.append({
-            "ts": md.get("SensorTimestamp"), "exposure": md.get("ExposureTime"), "gain": md.get("AnalogueGain"),
-            "digital_gain": md.get("DigitalGain"), "colour_gains": list(md.get("ColourGains", ()) or ()),
-            "focus_fom": md.get("FocusFoM"), "lux": md.get("Lux"), "frame_duration": md.get("FrameDuration"),
-            "t": now_ns(),
-        })
+        # Runs on picamera2's event thread for every completed request: an exception here would
+        # take that thread down and stop the camera silently, so it must never escape.
+        try:
+            md = request.get_metadata()
+            entry = {
+                "ts": md.get("SensorTimestamp"), "exposure": md.get("ExposureTime"), "gain": md.get("AnalogueGain"),
+                "digital_gain": md.get("DigitalGain"), "colour_gains": list(md.get("ColourGains", ()) or ()),
+                "focus_fom": md.get("FocusFoM"), "lux": md.get("Lux"), "frame_duration": md.get("FrameDuration"),
+                "t": now_ns(),
+            }
+            with self._meta_lock:
+                self._meta_ring.append(entry)
+        except Exception:  # noqa: BLE001
+            log.exception("request metadata callback failed")
 
     def _meta_for(self, timestamp_us) -> dict:
         # Called on the encoder output thread while _on_request appends on the camera thread:
@@ -309,7 +318,10 @@ class PiCamera(CameraBase):
         encoder while anyone is connected, plus lores only while it has stream clients (each
         encoder costs a poll thread and per-frame buffer copies on the Pi 3)."""
         for name in sorted(self._wanted_encoders()):
-            self._start_encoder(name)
+            try:
+                self._start_encoder(name)
+            except Exception:  # noqa: BLE001  one encoder failing must not stop the other
+                log.exception("%s encoder failed to start", name)
 
     def _sync_encoders_sync(self) -> None:
         wanted = self._wanted_encoders()
@@ -397,8 +409,16 @@ class PiCamera(CameraBase):
         self._start_sync()
 
     async def _apply_controls(self, controls: dict) -> None:
-        if self._picam is not None:
-            self._picam.set_controls(self._libcamera_controls(controls))
+        # Under the same lock as _reinit/_raw/_full_still so we never poke a camera that is being
+        # closed and reopened (set_controls on a closed Picamera2 raises).
+        async with self._lock:
+            if self._picam is not None:
+                await asyncio.to_thread(self._picam.set_controls, self._libcamera_controls(controls))
+
+    def _require_camera(self):
+        if self._picam is None:
+            raise RuntimeError("camera is not running")
+        return self._picam
 
     async def snapshot(self, full: bool = False) -> bytes:
         if not full:
@@ -412,16 +432,17 @@ class PiCamera(CameraBase):
 
     def _jpeg_sync(self) -> bytes:
         buf = io.BytesIO()
-        self._picam.capture_file(buf, "main", format="jpeg")
+        self._require_camera().capture_file(buf, "main", format="jpeg")
         return buf.getvalue()
 
     def _full_still_sync(self) -> bytes:
-        still = self._picam.create_still_configuration(
+        picam = self._require_camera()
+        still = picam.create_still_configuration(
             main={"size": tuple(self.cfg.full_size)}, controls=self._libcamera_controls(self.controls))
         self._stop_encoders()
         try:
             buf = io.BytesIO()
-            self._picam.switch_mode_and_capture_file(still, buf, format="jpeg")
+            picam.switch_mode_and_capture_file(still, buf, format="jpeg")
             return buf.getvalue()
         finally:
             self._start_encoders()
@@ -433,12 +454,13 @@ class PiCamera(CameraBase):
     def _raw_sync(self) -> bytes:
         import numpy as np
         w, h = self.cfg.full_size
-        still = self._picam.create_still_configuration(
+        picam = self._require_camera()
+        still = picam.create_still_configuration(
             main={"size": (w, h)}, raw={"format": self.cfg.raw_format, "size": (w, h)},
             controls=self._libcamera_controls(self.controls))
         self._stop_encoders()
         try:
-            arr = self._picam.switch_mode_and_capture_array(still, "raw")
+            arr = picam.switch_mode_and_capture_array(still, "raw")
         finally:
             self._start_encoders()
         raw16 = arr.view(np.uint16)[:h, :w] if arr.dtype == np.uint8 else arr[:h, :w]

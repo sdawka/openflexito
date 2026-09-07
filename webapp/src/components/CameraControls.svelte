@@ -1,9 +1,20 @@
 <script lang="ts">
   import { device } from '../lib/store/device.svelte'
   import { saveSnapshot } from '../lib/store/gallery'
+  import { takePhoto, type PhotoMode } from '../lib/services/photoService'
   let saved = $state('')
+  let mode = $state<PhotoMode>('single')
+  let slices = $state(5)
+  let stepZ = $state(50)
+  let progress = $state('')
 
   const c = $derived(device.controls)
+  // Under auto exposure / auto white balance the sliders are disabled but follow what the camera
+  // is actually doing, taken from the per-frame metadata, so the values can be read off live.
+  const live = $derived(device.frame)
+  const exposure = $derived(c?.AeEnable && live?.exposure ? live.exposure : c?.ExposureTime ?? 0)
+  const gain = $derived(c?.AeEnable && live?.gain ? live.gain : c?.AnalogueGain ?? 1)
+  const gains = $derived<[number, number]>(c?.AwbEnable && live?.colour_gains?.length === 2 ? [live.colour_gains[0], live.colour_gains[1]] : c?.ColourGains ?? [1, 1])
   let busy = $state(false)
   let timer: ReturnType<typeof setTimeout> | undefined
 
@@ -14,6 +25,15 @@
       try { await device.setControls(patch) } finally { busy = false }
     }, 120)
   }
+  // Switching an auto mode off freezes what the camera is doing right now (from the frame
+  // metadata) instead of jumping back to the last stored manual values, which is what made the
+  // field turn green when AWB was toggled off with colour gains still at 1,1.
+  function toggleAe(on: boolean) {
+    set(on || !live?.exposure ? { AeEnable: on } : { AeEnable: false, ExposureTime: Math.round(live.exposure), AnalogueGain: +(live.gain ?? 1).toFixed(3) })
+  }
+  function toggleAwb(on: boolean) {
+    set(on || live?.colour_gains?.length !== 2 ? { AwbEnable: on } : { AwbEnable: false, ColourGains: [+live.colour_gains[0].toFixed(3), +live.colour_gains[1].toFixed(3)] })
+  }
   // exposure slider is logarithmic: 50 µs .. 500 ms
   const expToSlider = (us: number) => Math.log10(Math.max(50, us))
   const sliderToExp = (v: number) => Math.round(10 ** v)
@@ -22,10 +42,20 @@
     const url = device.url('/snapshot.jpg') + (full ? '?full=1&' : '?') + 't=' + Date.now()
     return (await fetch(url, { cache: 'no-store' })).blob()
   }
-  async function toGallery(full = false) {
+  /** The photo button: a full-resolution still (the stage is not moving), optionally focus- or LED-stacked. */
+  async function photo() {
+    busy = true; progress = ''
+    try {
+      const item = await takePhoto({ mode, slices, stepZ, onProgress: (m) => (progress = m) })
+      saved = `saved "${item.name}"`; progress = ''
+      setTimeout(() => (saved = ''), 4000)
+    } catch (e) { progress = (e as Error).message } finally { busy = false }
+  }
+  /** Quick: the current stream frame, no mode switch. */
+  async function toGallery() {
     busy = true
     try {
-      const item = await saveSnapshot(await grab(full), { position: { ...device.position }, controls: device.controls ?? undefined })
+      const item = await saveSnapshot(await grab(false), { position: { ...device.position }, controls: device.controls ?? undefined })
       saved = `saved "${item.name}"`
       setTimeout(() => (saved = ''), 3000)
     } finally { busy = false }
@@ -44,34 +74,46 @@
   <h3>Camera</h3>
   {#if c}
     <div class="row" style="justify-content:space-between">
-      <label style="margin:0"><input type="checkbox" checked={c.AeEnable} onchange={(e) => set({ AeEnable: e.currentTarget.checked })} /> auto exposure</label>
-      <label style="margin:0"><input type="checkbox" checked={c.AwbEnable} onchange={(e) => set({ AwbEnable: e.currentTarget.checked })} /> auto white balance</label>
+      <label style="margin:0"><input type="checkbox" checked={c.AeEnable} onchange={(e) => toggleAe(e.currentTarget.checked)} /> auto exposure</label>
+      <label style="margin:0"><input type="checkbox" checked={c.AwbEnable} onchange={(e) => toggleAwb(e.currentTarget.checked)} /> auto white balance</label>
     </div>
-    <div class="label">Exposure <span class="mono">{(c.ExposureTime / 1000).toFixed(2)} ms</span></div>
-    <input type="range" min={Math.log10(50)} max={Math.log10(500000)} step="0.01" disabled={c.AeEnable}
-           value={expToSlider(c.ExposureTime)} oninput={(e) => set({ ExposureTime: sliderToExp(+e.currentTarget.value) })} />
-    <div class="label">Analogue gain <span class="mono">{c.AnalogueGain.toFixed(2)}×</span></div>
-    <input type="range" min="1" max="10.67" step="0.01" disabled={c.AeEnable}
-           value={c.AnalogueGain} oninput={(e) => set({ AnalogueGain: +e.currentTarget.value })} />
+    <div class="label">Exposure <span class="mono">{(exposure / 1000).toFixed(2)} ms{#if c.AeEnable} <span class="muted">auto</span>{/if}</span></div>
+    <input type="range" min={Math.log10(50)} max={Math.log10(500000)} step="0.01" disabled={c.AeEnable} title={c.AeEnable ? 'set by auto exposure (live value)' : ''}
+           value={expToSlider(exposure)} oninput={(e) => set({ ExposureTime: sliderToExp(+e.currentTarget.value) })} />
+    <div class="label">Analogue gain <span class="mono">{gain.toFixed(2)}×{#if c.AeEnable} <span class="muted">auto</span>{/if}</span></div>
+    <input type="range" min="1" max="10.67" step="0.01" disabled={c.AeEnable} title={c.AeEnable ? 'set by auto exposure (live value)' : ''}
+           value={gain} oninput={(e) => set({ AnalogueGain: +e.currentTarget.value })} />
     <div class="row">
       <div style="flex:1">
-        <div class="label">Red gain <span class="mono">{c.ColourGains[0].toFixed(2)}</span></div>
-        <input type="range" min="0.5" max="4" step="0.01" disabled={c.AwbEnable} value={c.ColourGains[0]}
-               oninput={(e) => set({ ColourGains: [+e.currentTarget.value, c.ColourGains[1]] })} />
+        <div class="label">Red gain <span class="mono">{gains[0].toFixed(2)}{#if c.AwbEnable} <span class="muted">auto</span>{/if}</span></div>
+        <input type="range" min="0.5" max="4" step="0.01" disabled={c.AwbEnable} value={gains[0]}
+               oninput={(e) => set({ ColourGains: [+e.currentTarget.value, gains[1]] })} />
       </div>
       <div style="flex:1">
-        <div class="label">Blue gain <span class="mono">{c.ColourGains[1].toFixed(2)}</span></div>
-        <input type="range" min="0.5" max="4" step="0.01" disabled={c.AwbEnable} value={c.ColourGains[1]}
-               oninput={(e) => set({ ColourGains: [c.ColourGains[0], +e.currentTarget.value] })} />
+        <div class="label">Blue gain <span class="mono">{gains[1].toFixed(2)}{#if c.AwbEnable} <span class="muted">auto</span>{/if}</span></div>
+        <input type="range" min="0.5" max="4" step="0.01" disabled={c.AwbEnable} value={gains[1]}
+               oninput={(e) => set({ ColourGains: [gains[0], +e.currentTarget.value] })} />
       </div>
     </div>
-    <div class="row" style="margin-top:10px">
-      <button class="primary" onclick={() => toGallery(false)} disabled={busy} title="save the current frame to the gallery">Snapshot</button>
-      <button onclick={() => toGallery(true)} disabled={busy} title="full sensor resolution still, to the gallery">Full-res</button>
-      <button onclick={() => snapshot(false)} disabled={busy} title="download the current frame">↓</button>
-      {#if saved}<span class="muted" style="font-size:12px">{saved}</span>{/if}
+    <div class="label" style="margin-top:10px">Photo <span class="muted">full sensor resolution, to the gallery</span></div>
+    <div class="row">
+      <select bind:value={mode} disabled={busy} title="single still, or a stack merged in the browser">
+        <option value="single">single</option>
+        <option value="focus">focus stack</option>
+        <option value="exposure">LED exposure stack</option>
+      </select>
+      {#if mode === 'focus'}
+        <input type="number" min="2" max="15" bind:value={slices} disabled={busy} style="width:4.5em" title="slices" /> ×
+        <input type="number" min="1" max="2000" bind:value={stepZ} disabled={busy} style="width:5.5em" title="z steps between slices" />
+      {/if}
+    </div>
+    <div class="row" style="margin-top:6px">
+      <button class="primary" onclick={photo} disabled={busy || !device.connected}>Photo</button>
+      <button onclick={toGallery} disabled={busy} title="save the current stream frame as it is (fast, lower resolution)">Quick frame</button>
+      <button onclick={() => snapshot(true)} disabled={busy} title="download a full-resolution still">↓</button>
       {#if device.frame}<span class="muted mono">{(device.frame.size / 1024).toFixed(0)} kB/frame</span>{/if}
     </div>
+    {#if progress || saved}<div class="muted mono" style="font-size:12px;margin-top:6px">{progress || saved}</div>{/if}
   {:else}
     <span class="muted">camera not available</span>
   {/if}

@@ -133,11 +133,15 @@
 
   <div class="panel">
     <h3>Stream</h3>
+    <p class="muted" style="font-size:12px;margin:0 0 8px">The Pi's hardware JPEG encoder produces ~100 kB frames whatever the
+      resolution, so a smaller stream means more quality per pixel. <b>820 × 616</b> (the OpenFlexure default) is the cleanest:
+      4× the JPEG quality per pixel, half the flicker and a third of the CPU of 1640 × 1232, which in turn resolves twice the
+      detail but looks blockier. Every size covers the full field of view. Redo "Calibrate XY" after changing it.</p>
     <div class="row">
       <select bind:value={streamW} onchange={(e) => { streamH = { 1640: 1232, 820: 616, 1280: 960, 640: 480 }[+e.currentTarget.value] ?? streamH }}>
-        <option value={1640}>1640 × 1232 (full FoV)</option>
+        <option value={820}>820 × 616 (cleanest, recommended)</option>
         <option value={1280}>1280 × 960</option>
-        <option value={820}>820 × 616</option>
+        <option value={1640}>1640 × 1232 (most detail, blockier)</option>
         <option value={640}>640 × 480</option>
       </select>
       <button onclick={applyStream}>Apply (restarts camera)</button>

@@ -14,10 +14,14 @@ DEFAULT_CONFIG_PATH = Path(os.environ.get("OPENFLEXITO_CONFIG", "/etc/openflexit
 class CameraConfig:
     enabled: bool = True
     fake: bool = False
-    sensor_size: tuple[int, int] = (1640, 1232)   # IMX219 2x2 binned: full field of view
-    stream_size: tuple[int, int] = (1640, 1232)
+    # Full 3280x2464 readout downscaled by the ISP to an 820x616 preview, as OpenFlexure v3 does:
+    # the 4x4 averaging halves per-pixel flicker versus the binned 1640x1232 mode and the small
+    # frame leaves room for a high JPEG quality (100 Mbit/s cap ~ 100 KB frames at ~18 fps) while
+    # cutting the Pi 3's CPU load by two thirds. 1640x1232 remains selectable in Settings.
+    sensor_size: tuple[int, int] = (3280, 2464)
+    stream_size: tuple[int, int] = (820, 616)
     lores_size: tuple[int, int] = (410, 308)
-    bitrate: int = 25_000_000
+    bitrate: int = 100_000_000
     lores_bitrate: int = 4_000_000
     full_size: tuple[int, int] = (3280, 2464)
     raw_format: str = "SBGGR10"

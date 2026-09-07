@@ -53,7 +53,8 @@ class SerialTransport:
         return raw.decode("ascii", errors="replace").rstrip("\r\n")
 
     def flush_input(self) -> None:
-        self._ser.reset_input_buffer()
+        if self._ser.in_waiting:
+            self._ser.reset_input_buffer()
 
     def close(self) -> None:
         self._ser.close()
@@ -125,6 +126,10 @@ class Sangaboard:
 
     def query(self, cmd: str) -> str:
         with self._lock:
+            # Drop anything unread (e.g. a reply that arrived after we gave up waiting for it):
+            # otherwise every later command would be answered by the previous one's reply.
+            # pysangaboard does the same before each query.
+            self._t.flush_input()
             self._t.write_line(cmd)
             reply = self._t.read_line()
             if reply is None:
@@ -135,6 +140,7 @@ class Sangaboard:
 
     def query_multiline(self, cmd: str) -> list[str]:
         with self._lock:
+            self._t.flush_input()
             self._t.write_line(cmd)
             lines: list[str] = []
             while True:
@@ -174,7 +180,8 @@ class Sangaboard:
         self.query("zero")
 
     def set_step_time(self, us: int) -> int:
-        return _int_in(self.query(f"dt {int(us)}"), default=us)
+        self.info.step_time_us = _int_in(self.query(f"dt {int(us)}"), default=us)
+        return self.info.step_time_us
 
     def set_ramp_time(self, us: int) -> int:
         return _int_in(self.query(f"ramp_time {int(us)}"), default=us)

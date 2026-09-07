@@ -15,8 +15,12 @@ export type SharpnessMetric = 'jpeg' | 'fom'
 
 export interface Sample { z: number; s: number; t?: number }
 
+export type ZCompensation = false | 'z'
+
 export interface FastAutofocusIO {
-  moveZ(dz: number): Promise<MoveResult>      // raw move (no backlash compensation)
+  /** Relative z move. `compensate: 'z'` asks the device for v3-style Z_ONLY backlash correction
+   *  (approach the target from the + side); false (default) is a raw move used for the sweep. */
+  moveZ(dz: number, compensate?: ZCompensation): Promise<MoveResult>
   currentZ(): number
   frames(): readonly FrameMeta[]                // ring buffer of recent frames (device clock ns)
   onProgress?(msg: string): void
@@ -103,12 +107,13 @@ export function countTurningPoints(values: number[], threshold = 0.5): number {
 
 export interface FastAutofocusResult { peakZ: number; samples: Sample[]; refined: QuadraticPeak | null; startZ: number }
 
-/** Sweep +dz from dz/2 below the current position, find the peak, return to the start and approach
- *  the peak from the same side (so backlash affects the sweep and the final move equally). */
+/** v3 fast_autofocus: move dz/2 down (backlash-corrected on z), sweep +dz recording sharpness,
+ *  then move to the peak with z backlash correction. The correction makes the final approach come
+ *  from the same (+) side as the sweep, so backlash affects both equally without a full return. */
 export async function fastAutofocus(io: FastAutofocusIO, dz = 2000, metric: SharpnessMetric = 'jpeg'): Promise<FastAutofocusResult> {
   const startZ = io.currentZ()
   io.onProgress?.(`moving to sweep start (${-dz / 2})`)
-  await io.moveZ(-Math.floor(dz / 2))
+  await io.moveZ(-Math.floor(dz / 2), 'z')
   const z0 = io.currentZ()
   io.onProgress?.(`sweeping ${dz} steps`)
   const move = await io.moveZ(dz)
@@ -131,8 +136,7 @@ export async function fastAutofocus(io: FastAutofocusIO, dz = 2000, metric: Shar
   const refined = quadraticPeak(win)
   const peakZ = Math.round(refined?.confident && Math.abs(refined.z - best.z) < dz / 10 ? refined.z : best.z)
   io.onProgress?.(`peak at z=${peakZ} (metric ${best.s})`)
-  await io.moveZ(-dz)               // back to sweep start
-  await io.moveZ(peakZ - io.currentZ())
+  await io.moveZ(peakZ - io.currentZ(), 'z')   // v3: move_absolute(z=peak, Z_ONLY)
   return { peakZ, samples, refined, startZ }
 }
 

@@ -57,14 +57,29 @@ if (moves) await step('jog buttons move the stage by the step size', async () =>
   await page.waitForFunction((x0) => { const m = document.querySelector('nav')?.textContent?.match(/x\s+(-?\d+)/); return m && +m[1] === x0 }, p0.x, { timeout: 8000 })
 })
 
-await step('snapshot lands in the gallery', async () => {
+await step('photo (full resolution) lands in the gallery', async () => {
   await nav('gallery'); await page.waitForTimeout(500)
   const before = await page.locator('.card').count()
   await nav('live')
-  await page.click('button:has-text("Snapshot")')
-  await page.waitForTimeout(1500)
+  await page.click('button:has-text("Photo")')
+  await page.waitForFunction(() => /saved "Photo/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 30000 })
   await nav('gallery')
   await page.waitForFunction((n) => document.querySelectorAll('.card').length > n, before, { timeout: 8000 })
+  expect(/3280\s*[×x]\s*2464/.test(await page.locator('main').innerText()), 'gallery does not list a 3280×2464 photo')
+})
+
+if (moves) await step('focus stack photo returns to the starting z', async () => {
+  await nav('live')
+  const z0 = (await position()).z
+  await page.selectOption('.panel:has(h3:has-text("Camera")) select', 'focus')
+  const n = page.locator('.panel:has(h3:has-text("Camera")) input[type=number]').nth(0)
+  await n.click({ clickCount: 3 }); await n.pressSequentially('3')
+  await page.click('button:has-text("Photo")')
+  await page.waitForFunction(() => /saved "Focus stack/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 90000 })
+    .catch(async () => { throw new Error('focus stack did not finish: ' + (await page.locator('.panel:has(h3:has-text("Camera"))').innerText()).replace(/\s+/g, ' ').slice(-160)) })
+  await page.waitForTimeout(500)
+  expect(Math.abs((await position()).z - z0) <= 1, `z ended at ${(await position()).z}, started at ${z0}`)
+  await page.selectOption('.panel:has(h3:has-text("Camera")) select', 'single')
 })
 
 await step('camera controls: manual exposure slider and auto toggles', async () => {
@@ -95,6 +110,32 @@ if (moves) await step('calibration 2: stage ↔ camera mapping', async () => {
   const row = await page.locator('table.result tbody tr').first().innerText()
   const pxPerStep = parseFloat(row.split('\t')[1])
   expect(pxPerStep > 0.005 && pxPerStep < 5, `implausible pixels/step ${pxPerStep}`)
+})
+
+if (moves) await step('click-hold-drag pans the stage like a map', async () => {
+  await nav('live'); await page.waitForTimeout(600)
+  const p0 = await position()
+  const box = await page.locator('.view img').boundingBox()
+  const natural = await page.locator('.view img').evaluate((el) => el.naturalWidth)
+  const scale = box.width / natural                       // displayed px per image px
+  const dragPx = 200
+  const cx = box.x + box.width / 2, cy = box.y + box.height / 2
+  await page.mouse.move(cx, cy); await page.mouse.down()
+  for (let i = 1; i <= 10; i++) { await page.mouse.move(cx + (dragPx / 10) * i, cy, { steps: 2 }); await page.waitForTimeout(40) }
+  await page.mouse.up()
+  // wait for the stage to settle: position text unchanged for 1.2 s
+  let last = JSON.stringify(await position()), t0 = Date.now()
+  for (;;) {
+    await page.waitForTimeout(400)
+    const cur = JSON.stringify(await position())
+    if (cur === last) { await page.waitForTimeout(800); if (JSON.stringify(await position()) === cur) break }
+    last = cur
+    if (Date.now() - t0 > 20000) throw new Error('stage did not settle after the drag')
+  }
+  const p1 = await position()
+  const moved = Math.hypot(p1.x - p0.x, p1.y - p0.y), expected = dragPx / scale  // fake specimen: 1 px per step
+  expect(moved > expected * 0.7 && moved < expected * 1.3, `stage moved ${moved.toFixed(0)} steps for a ${dragPx} px drag, expected ~${expected.toFixed(0)}`)
+  expect(!(await page.locator('.view img').evaluate((el) => el.style.transform)), 'image still translated after the pan settled')
 })
 
 if (moves) await step('autofocus returns to focus', async () => {

@@ -13,7 +13,7 @@ export function cancelAutofocus(): void { cancelFlag = true }
 export async function runAutofocus(opts: AutofocusOptions): Promise<{ peakZ: number; samples: { z: number; s: number }[] }> {
   cancelFlag = false
   const io = {
-    moveZ: (dz: number) => device.moveRel({ z: dz }, false),
+    moveZ: (dz: number, compensate: false | 'z' = false) => device.moveRel({ z: dz }, compensate),
     currentZ: () => device.position.z,
     frames: () => device.frames,
     onProgress: opts.onProgress,

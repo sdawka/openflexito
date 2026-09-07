@@ -103,6 +103,9 @@ async def websocket(request: web.Request) -> web.WebSocketResponse:
                 await ws.send_str(json.dumps(msg))
         except (asyncio.CancelledError, ConnectionResetError):
             pass
+        except Exception:  # noqa: BLE001  a dead pump would leave a silent client; log and close
+            log.exception("websocket event pump failed")
+            await ws.close()
 
     pump_task = asyncio.ensure_future(pump())
     try:

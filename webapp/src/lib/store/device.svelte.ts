@@ -8,6 +8,8 @@ import { settings } from './settings.svelte'
 
 const FRAME_HISTORY = 600   // ~20 s at 30 fps, enough for an autofocus sweep
 
+export type Compensation = boolean | 'all' | 'xy' | 'z'
+
 class DeviceStore {
   client = new RpcClient(settings.deviceUrl)
   connected = $state(false)
@@ -17,7 +19,7 @@ class DeviceStore {
   lastMove = $state<PositionEvent | null>(null)
   frame = $state<FrameMeta | null>(null)
   fps = $state(0)
-  light = $state<{ cc: number; pwm: number[] }>({ cc: 0, pwm: [] })
+  light = $state<{ cc: number; pwm: number[]; channels?: { cc: number; pwm: number } }>({ cc: 0, pwm: [] })
   controls = $state<CameraControls | null>(null)
   error = $state<string | null>(null)
 
@@ -28,7 +30,11 @@ class DeviceStore {
   private fpsWindow: number[] = []
 
   constructor() {
-    const c = this.client
+    this.bind(this.client)
+  }
+
+  /** Attach this store's handlers to a client (also used when the device URL changes). */
+  private bind(c: RpcClient): void {
     c.on('$open', () => { this.connected = true; this.error = null })
     c.on('$close', () => { this.connected = false })
     c.on('event.hello', (s: DeviceStatus) => this.applyStatus(s))
@@ -51,7 +57,7 @@ class DeviceStore {
       while (this.fpsWindow.length && now - this.fpsWindow[0] > 2000) this.fpsWindow.shift()
       this.fps = this.fpsWindow.length / 2
     })
-    c.on('event.light', (l: { cc: number; pwm: number[] }) => { this.light = l })
+    c.on('event.light', (l: { cc: number; pwm: number[]; channels?: { cc: number; pwm: number } }) => { this.light = l })
   }
 
   connect(): void {
@@ -61,10 +67,9 @@ class DeviceStore {
 
   reconnect(): void {
     this.client.close()
+    this.connected = false
     this.client = new RpcClient(settings.deviceUrl)
-    // re-bind handlers by re-running the constructor logic
-    const fresh = new DeviceStore()
-    this.client = fresh.client
+    this.bind(this.client)   // (previously the handlers were bound to a throwaway store, so the UI never updated after a URL change)
     this.connect()
   }
 
@@ -88,11 +93,13 @@ class DeviceStore {
     this.applyStatus(await this.client.call<DeviceStatus>('system.status'))
   }
 
-  moveRel(d: Partial<Vec3>, compensate = true): Promise<MoveResult> {
+  /** compensate: true = backlash-correct the moving axes (v3 MOVEMENT_AXES); 'all' | 'xy' | 'z' =
+   *  correct those axes regardless (v3 ALL_AXES / XY_ONLY / Z_ONLY); false = raw move. */
+  moveRel(d: Partial<Vec3>, compensate: Compensation = true): Promise<MoveResult> {
     return this.guard(this.client.call<MoveResult>('stage.move_rel', { ...d, compensate }))
   }
 
-  moveTo(p: Partial<Vec3>, compensate = true): Promise<MoveResult> {
+  moveTo(p: Partial<Vec3>, compensate: Compensation = true): Promise<MoveResult> {
     return this.guard(this.client.call<MoveResult>('stage.move_to', { ...p, compensate }))
   }
 

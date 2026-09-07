@@ -2,9 +2,14 @@
 
 The Sangaboard is authoritative for the hardware position (`p?`), but it forgets it when
 powered off. We mirror it to disk together with an offset so the last known position can be
-restored. Backlash handling follows the OpenFlexure v3 model: a per-axis engagement state in
-[0, 1] tracks which side of the gear backlash we are on; any move that would leave an axis
-not engaged in the preferred direction overshoots by `backlash` steps and returns.
+restored. Backlash handling follows the OpenFlexure v3 model (`things/stage/__init__.py`,
+BaseStage): a per-axis engagement state in [0, 1] tracks which side of the gear backlash we are
+on (0 = unknown/disengaged at start-up, as in v3); a compensated move whose final state on a
+checked axis would be < 1 is split into (move - backlash) followed by +backlash on those axes.
+Which axes are checked mirrors v3's BacklashCompensation: by default only the axes that move
+(MOVEMENT_AXES); callers may ask for "all", "xy" or "z" (v3's scans use XY_ONLY, autofocus
+Z_ONLY). Everything below the program/hardware frame conversion works in the hardware frame,
+so the preferred direction is +hardware on each axis.
 """
 
 from __future__ import annotations
@@ -29,6 +34,26 @@ AXES = ("x", "y", "z")
 
 class StageBusy(Exception):
     pass
+
+
+COMPENSATION_MODES = ("moving", "all", "xy", "z")
+
+
+def compensation_axes(mode, move: dict[str, int]) -> tuple[str, ...]:
+    """Axes to backlash-check for a move (v3 BacklashCompensation semantics).
+    True/"moving" -> axes with a non-zero move; "all" -> every axis; "xy"/"z" -> those axes;
+    False/None -> none (raw move)."""
+    if mode is False or mode is None:
+        return ()
+    if mode is True or mode == "moving":
+        return tuple(a for a in AXES if move.get(a, 0) != 0)
+    if mode == "all":
+        return AXES
+    if mode == "xy":
+        return ("x", "y")
+    if mode == "z":
+        return ("z",)
+    raise ValueError(f"compensate must be a bool or one of {COMPENSATION_MODES}, not {mode!r}")
 
 
 @dataclass
@@ -56,13 +81,14 @@ class Stage:
         self.backlash = dict(backlash or {"x": 200, "y": 200, "z": 200})
         self.inverted = dict(inverted or {"x": True, "y": False, "z": True})
         self.poll_interval = poll_interval
-        self._engaged = {a: 1.0 for a in AXES}   # 1 = engaged in +backlash direction
+        self._engaged = {a: 0.0 for a in AXES}   # 1 = engaged in +backlash direction; 0 = unknown (v3 starts here)
         self._offset = {a: 0 for a in AXES}      # program hw-frame offset for restored positions
         self._hw = {a: 0 for a in AXES}
         self._moving = False
         self._live: tuple[dict, dict, int, float] | None = None
         self._cancel = threading.Event()
         self._busy = threading.Lock()
+        self._state_lock = threading.Lock()  # _save_state runs on the worker and the loop thread
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stage")
         self._jog_pending: dict | None = None
         self._jog_lock = threading.Lock()
@@ -124,13 +150,14 @@ class Stage:
 
     def _save_state(self) -> None:
         try:
-            self.state_file.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.state_file.with_suffix(".tmp")
-            tmp.write_text(json.dumps({
-                "hw": self._hw, "offset": self._offset,
-                "backlash": self.backlash, "inverted": self.inverted,
-            }))
-            tmp.replace(self.state_file)
+            with self._state_lock:
+                self.state_file.parent.mkdir(parents=True, exist_ok=True)
+                tmp = self.state_file.with_suffix(".tmp")
+                tmp.write_text(json.dumps({
+                    "hw": self._hw, "offset": self._offset,
+                    "backlash": self.backlash, "inverted": self.inverted,
+                }))
+                tmp.replace(self.state_file)
         except OSError as e:
             log.warning("could not save stage state: %s", e)
 
@@ -157,9 +184,12 @@ class Stage:
         return self._hw
 
     def _emit_position(self, moving: bool, **extra) -> None:
-        self.events.publish_threadsafe("position", {
-            "t": now_ns(), "position": self.position, "hw": dict(self._hw), "moving": moving, **extra,
-        })
+        try:
+            self.events.publish_threadsafe("position", {
+                "t": now_ns(), "position": self.position, "hw": dict(self._hw), "moving": moving, **extra,
+            })
+        except Exception:  # noqa: BLE001  reporting must never break a move on the worker thread
+            log.exception("position event failed")
 
     def _hw_move(self, d: dict[str, int]) -> MoveResult:
         """One raw relative hardware move; blocks until the board reports it has stopped."""
@@ -167,14 +197,17 @@ class Stage:
             return MoveResult(dict(self._hw), dict(self._hw), now_ns(), now_ns(), False)
         start_hw = dict(self._hw)
         duration = max(abs(v) for v in d.values()) * self.board.info.step_time_us / 1e6
-        self._moving = True
-        t0 = now_ns()
-        self.board.move_rel(d["x"], d["y"], d["z"])
         target = {a: start_hw[a] + d[a] for a in AXES}
-        self._live = (start_hw, target, t0, duration)
-        self._emit_position(True, target_hw=target, duration=duration)
         cancelled = False
+        t0 = now_ns()
+        # Everything after this point runs inside try/finally: if the serial link fails mid-move
+        # the moving flag, live estimate and saved position must still be put right, otherwise
+        # the device reports "moving" forever and the fake camera renders a stale position.
+        self._moving = True
         try:
+            self._live = (start_hw, target, t0, duration)
+            self.board.move_rel(d["x"], d["y"], d["z"])
+            self._emit_position(True, target_hw=target, duration=duration)
             if duration > 0.2 and self._cancel.wait(max(0.0, duration - 0.1)):
                 cancelled = True
             while not cancelled and self.board.moving():
@@ -185,8 +218,13 @@ class Stage:
                 time.sleep(0.05)
         finally:
             self._moving = False
-            self._refresh_hw()
+            self._live = None
+            try:
+                self._refresh_hw()
+            except SangaboardError as e:
+                log.error("position readback failed after move: %s", e)
             t1 = now_ns()
+            # v3 update_position: state += delta / backlash, clamped to [0, 1]
             for a in AXES:
                 bl = self.backlash.get(a, 0)
                 if bl:
@@ -195,15 +233,18 @@ class Stage:
             self._emit_position(False, cancelled=cancelled)
         return MoveResult(start_hw, dict(self._hw), t0, t1, cancelled)
 
-    def _move_rel_sync(self, move: dict[str, int], compensate: bool) -> MoveResult:
+    def _move_rel_sync(self, move: dict[str, int], compensate) -> MoveResult:
+        axes = compensation_axes(compensate, move)  # validate before touching the hardware
         if not self._busy.acquire(blocking=False):
             raise StageBusy("stage is already moving")
         try:
             self._cancel.clear()
-            if not compensate:
+            if not axes:
                 return self._hw_move(move)
+            # v3 _move_with_backlash_correction: predict the (unclamped) state after the move on
+            # the checked axes; any axis ending below 1 gets a +backlash correction move.
             correction = {a: 0 for a in AXES}
-            for a in AXES:
+            for a in axes:
                 bl = self.backlash.get(a, 0)
                 final = 1.0 if bl == 0 else self._engaged[a] + move[a] / bl
                 if final < 1.0:
@@ -228,12 +269,15 @@ class Stage:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._executor, fn, *args)
 
-    async def move_rel(self, x: int = 0, y: int = 0, z: int = 0, compensate: bool = True) -> dict:
+    async def move_rel(self, x: int = 0, y: int = 0, z: int = 0, compensate: bool | str = True) -> dict:
+        """Relative move in program-frame steps. compensate: true = backlash-correct the axes that
+        move (v3 MOVEMENT_AXES), "all" | "xy" | "z" = correct those axes even if they do not move
+        (v3 ALL_AXES / XY_ONLY / Z_ONLY), false = raw move."""
         res = await self._run(self._move_rel_sync, self._program_to_hw_delta(x, y, z), compensate)
         return self._result_dict(res)
 
     async def move_to(self, x: int | None = None, y: int | None = None, z: int | None = None,
-                      compensate: bool = True) -> dict:
+                      compensate: bool | str = True) -> dict:
         cur = self.position
         target = {"x": cur["x"] if x is None else int(x),
                   "y": cur["y"] if y is None else int(y),
