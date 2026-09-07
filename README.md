@@ -159,6 +159,15 @@ same with each slice being a developed RAW frame, fused as float and saved as a 
 quantised to 8 bits or JPEG-compressed before the merge (~30 s per slice). The LED exposure stack is the
 "HDR" counterpart (exposure fusion).
 
+Preview noise: measured directly from picamera2 at mid-grey (820×616 from the full readout, gain 1),
+libcamera's `NoiseReductionMode` Fast and HighQuality are identical on the vc4 ISP (temporal noise
+1.07 grey levels per pixel; Off gives 1.99), so the Pi already denoises as much as it can and the
+remaining noise is shot noise (fixed by how full the pixel wells are, independent of how the LED and
+exposure share the photon budget) plus MJPEG compression. Neither the LED (firmware PWM at 64 kHz;
+row banding under 0.25 levels at 20–100 %) nor frame flicker (whole-frame mean stable to 0.1 level over
+66 stream frames) produces bands or waves. The browser-side **Smooth** mode (Focus panel: Off / Smooth
+/ Stack) averages the last ~4 frames while the stage is still and halves the visible noise.
+
 **Live focus stack** (Focus panel): small z vibrations move the plane of focus from frame to frame,
 so a running per-block "keep the sharpest" composite of the stream becomes an extended-depth-of-field
 live view without moving the stage (`algo/liveStack.ts`, worker `liveStackWorker.ts`, ~8 fps at stream

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { LiveStacker } from '../liveStack'
+import { LiveStacker, LiveAverager } from '../liveStack'
 import { totalSharpness, type Rgba } from '../stack'
 
 const W = 128, H = 96
@@ -47,5 +47,17 @@ describe('LiveStacker', () => {
   it('reset clears everything', () => {
     const st = new LiveStacker(W, H); st.update(scene().data); st.reset()
     expect(st.frames).toBe(0); expect(st.composite[3]).toBe(0)
+  })
+})
+
+describe('LiveAverager', () => {
+  it('halves independent noise after a few frames', () => {
+    const av = new LiveAverager(W, H)
+    let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647
+    const noisy = () => { const d = new Uint8ClampedArray(W * H * 4); for (let i = 0; i < d.length; i += 4) { const v = 128 + (rnd() - 0.5) * 40; d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255 } return d }
+    const one = noisy(); let s1 = 0; for (let i = 0; i < one.length; i += 4) s1 += (one[i] - 128) ** 2
+    for (let k = 0; k < 12; k++) av.update(noisy())
+    let s2 = 0; for (let i = 0; i < av.composite.length; i += 4) s2 += (av.composite[i] - 128) ** 2
+    expect(Math.sqrt(s2 / s1)).toBeLessThan(0.55)
   })
 })

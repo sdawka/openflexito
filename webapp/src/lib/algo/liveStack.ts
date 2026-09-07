@@ -94,3 +94,28 @@ export class LiveStacker {
     return { frames: this.frames, replaced: replaced / mask.length, shift: { dx, dy }, coverage: filled / mask.length }
   }
 }
+
+
+/** Temporal averaging of the live stream (exponential moving average): halves the visible noise
+ *  after ~4 frames while the stage is still. Same interface as LiveStacker so the worker can host either. */
+export class LiveAverager {
+  composite: Uint8ClampedArray
+  private acc: Float32Array
+  frames = 0
+  /** weight of the newest frame; 0.25 ≈ averaging over the last ~4 frames */
+  alpha = 0.25
+  constructor(public width: number, public height: number) {
+    this.composite = new Uint8ClampedArray(width * height * 4)
+    this.acc = new Float32Array(width * height * 4)
+  }
+  reset(): void { this.acc.fill(0); this.composite.fill(0); this.frames = 0 }
+  update(frame: Uint8ClampedArray): LiveStackStats {
+    const a = this.frames === 0 ? 1 : this.alpha, acc = this.acc, out = this.composite
+    for (let i = 0; i < acc.length; i += 4) {
+      acc[i] += (frame[i] - acc[i]) * a; acc[i + 1] += (frame[i + 1] - acc[i + 1]) * a; acc[i + 2] += (frame[i + 2] - acc[i + 2]) * a
+      out[i] = acc[i]; out[i + 1] = acc[i + 1]; out[i + 2] = acc[i + 2]; out[i + 3] = 255
+    }
+    this.frames++
+    return { frames: this.frames, replaced: a, shift: { dx: 0, dy: 0 }, coverage: 1 }
+  }
+}

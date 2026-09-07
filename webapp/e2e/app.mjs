@@ -212,14 +212,16 @@ if (moves) await step('fine focus stack centres on the focus plane and fuses sev
 
 await step('live focus stack builds a composite and saves it', async () => {
   await nav('live')
-  await page.click('button:has-text("Live stack")')
+  await page.click('.panel:has(h3:has-text("Focus")) .seg button:has-text("Smooth")')
+  await page.waitForFunction(() => /\d+ frames averaged/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 15000 })
+  await page.click('.panel:has(h3:has-text("Focus")) .seg button:has-text("Stack")')
   await page.waitForFunction(() => /\d+ frames · \d+ % of blocks/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 15000 })
   await page.waitForTimeout(1500)
   const visible = await page.locator('.view canvas.composite').evaluate((c) => c.width > 0 && getComputedStyle(c).opacity !== '0')
   expect(visible, 'composite canvas not shown')
   await page.click('.panel:has(h3:has-text("Focus")) button:has-text("Save")')
   await page.waitForFunction(() => /saved "Live stack/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 10000 })
-  await page.click('button:has-text("Stop live stack")')
+  await page.click('.panel:has(h3:has-text("Focus")) .seg button:has-text("Off")')
 })
 
 await step('video recording lands in the gallery and opens in the viewer', async () => {

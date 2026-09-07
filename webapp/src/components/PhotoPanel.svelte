@@ -50,7 +50,7 @@
       if (useStack) { const b = liveStack.composite; return b ? { image: b, width: b.width, height: b.height } : null }
       const img = liveStack.source
       return img && img.naturalWidth ? { image: img, width: img.naturalWidth, height: img.naturalHeight } : null
-    }, useStack ? 'live stack' : 'live view')
+    }, useStack ? (liveStack.mode === 'average' ? 'smoothed view' : 'live stack') : 'live view')
     if (recorder.status) status = { kind: 'err', text: recorder.status }
   }
   async function download() {
@@ -72,7 +72,7 @@
     <button class="rec" class:on={recorder.recording} onclick={toggleRecord} disabled={!device.connected} title="record the live view (or the live focus stack when it is on) as WebM into the gallery">
       <span class="dot"></span>{recorder.recording ? `Stop · ${recorder.seconds} s` : 'Record video'}
     </button>
-    {#if recorder.recording}<span class="muted small">recording {liveStack.active && liveStack.composite ? 'the live stack' : 'the live view'}</span>{/if}
+    {#if recorder.recording}<span class="muted small">recording {liveStack.active && liveStack.composite ? (liveStack.mode === 'average' ? 'the smoothed view' : 'the live stack') : 'the live view'}</span>{/if}
     {#if recorder.status && !recorder.recording}<span class="muted small">{recorder.status}</span>{/if}
   </div>
   <div class="kv" style="margin-top:10px"><span>Mode</span><span class="v muted" style="color:var(--muted)">{current.time}</span></div>

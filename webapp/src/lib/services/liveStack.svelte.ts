@@ -7,6 +7,7 @@ import type { LiveStackStats } from '../algo/liveStack'
 
 class LiveStack {
   active = $state(false)
+  mode = $state<'stack' | 'average'>('stack')
   stats = $state<LiveStackStats | null>(null)
   composite = $state<ImageBitmap | null>(null)
   fps = 8
@@ -20,8 +21,10 @@ class LiveStack {
   private lastPos = ''
   private lastComposite: { data: Uint8ClampedArray; width: number; height: number } | null = null
 
-  start(): void {
-    if (this.active) return
+  start(mode: 'stack' | 'average' = 'stack'): void {
+    if (this.active && this.mode === mode) return
+    if (this.active) this.stop()
+    this.mode = mode
     this.active = true
     this.worker = new Worker(new URL('../workers/liveStackWorker.ts', import.meta.url), { type: 'module' })
     this.worker.onmessage = async (ev) => {
@@ -60,7 +63,7 @@ class LiveStack {
     if (!this.size || this.size.w !== w || this.size.h !== h) {
       this.size = { w, h }
       this.canvas = new OffscreenCanvas(w, h)
-      this.worker.postMessage({ type: 'init', width: w, height: h } as LiveStackMessage)
+      this.worker.postMessage({ type: 'init', width: w, height: h, mode: this.mode } as LiveStackMessage)
     }
     const ctx = this.canvas!.getContext('2d', { willReadFrequently: true })!
     try { ctx.drawImage(img, 0, 0) } catch { return }
@@ -76,7 +79,7 @@ class LiveStack {
     const canvas = new OffscreenCanvas(c.width, c.height)
     canvas.getContext('2d')!.putImageData(new ImageData(c.data as Uint8ClampedArray<ArrayBuffer>, c.width, c.height), 0, 0)
     const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.95 })
-    return saveSnapshot(blob, { position: { ...device.position }, controls: device.controls ?? undefined, name: `Live stack (${this.stats?.frames ?? 0} frames)` })
+    return saveSnapshot(blob, { position: { ...device.position }, controls: device.controls ?? undefined, name: this.mode === 'average' ? `Smoothed frame (${this.stats?.frames ?? 0} frames)` : `Live stack (${this.stats?.frames ?? 0} frames)` })
   }
 }
 

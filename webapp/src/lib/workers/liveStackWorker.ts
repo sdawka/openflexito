@@ -1,16 +1,16 @@
 /** Runs the temporal focus stacker off the main thread. */
-import { LiveStacker } from '../algo/liveStack'
+import { LiveStacker, LiveAverager } from '../algo/liveStack'
 
 export type LiveStackMessage =
-  | { type: 'init'; width: number; height: number; cell?: number }
+  | { type: 'init'; width: number; height: number; cell?: number; mode?: 'stack' | 'average' }
   | { type: 'frame'; data: Uint8ClampedArray }
   | { type: 'reset' }
 
-let st: LiveStacker | null = null
+let st: LiveStacker | LiveAverager | null = null
 self.onmessage = (ev: MessageEvent<LiveStackMessage>) => {
   const m = ev.data
   try {
-    if (m.type === 'init') { st = new LiveStacker(m.width, m.height, m.cell ?? 16); return }
+    if (m.type === 'init') { st = m.mode === 'average' ? new LiveAverager(m.width, m.height) : new LiveStacker(m.width, m.height, m.cell ?? 16); return }
     if (!st) return
     if (m.type === 'reset') { st.reset(); return }
     const stats = st.update(m.data)
