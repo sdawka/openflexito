@@ -13,6 +13,10 @@ export interface GalleryItem {
   height?: number
   /** blob keys: 'image' (snapshot or stitched mosaic), 'thumb', 'tile/<n>' */
   blobs: string[]
+  /** focus stack: how it was taken and how much of the result each slice supplied */
+  stack?: { slices: number; stepZ: number; zs: number[]; contributions: number[] }
+  /** raw develop: the sensor data behind 'image' (kept as blob 'raw', the device's raw.bin) */
+  raw?: { bitDepth: number; bayer: string; blackLevel: number; gains: [number, number] }
   scan?: {
     cols: number; rows: number; overlap: number
     tiles: { index: number; col: number; row: number; stage: { x: number; y: number }; x: number; y: number; width: number; height: number; blob: string }[]
@@ -99,16 +103,21 @@ export async function makeThumb(blob: Blob, size = 256): Promise<Blob> {
   return c.convertToBlob({ type: 'image/jpeg', quality: 0.8 })
 }
 
-export async function saveSnapshot(blob: Blob, meta: { position?: GalleryItem['position']; controls?: object; name?: string }): Promise<GalleryItem> {
+export async function saveSnapshot(blob: Blob, meta: { position?: GalleryItem['position']; controls?: object; name?: string;
+  /** extra item fields (stack, raw) and extra blobs (slices, raw data) stored alongside the image */
+  extra?: Partial<Pick<GalleryItem, 'stack' | 'raw'>>; extraBlobs?: Record<string, Blob>; thumbFrom?: Blob; size?: { width: number; height: number } }): Promise<GalleryItem> {
   const id = newId()
-  const bmp = await createImageBitmap(blob)
+  const bmp = meta.size ?? await createImageBitmap(meta.thumbFrom ?? blob)
+  const extraNames = Object.keys(meta.extraBlobs ?? {})
   const item: GalleryItem = {
     id, kind: 'snapshot', name: meta.name ?? `Snapshot ${new Date().toLocaleString()}`, when: new Date().toISOString(),
-    position: meta.position, controls: meta.controls, width: bmp.width, height: bmp.height, blobs: ['image', 'thumb'],
+    position: meta.position, controls: meta.controls, width: bmp.width, height: bmp.height, blobs: ['image', 'thumb', ...extraNames],
+    ...(meta.extra ?? {}),
   }
-  bmp.close()
+  if ('close' in bmp) bmp.close()
   await putBlob(id, 'image', blob)
-  await putBlob(id, 'thumb', await makeThumb(blob))
+  await putBlob(id, 'thumb', await makeThumb(meta.thumbFrom ?? blob))
+  for (const [name, b] of Object.entries(meta.extraBlobs ?? {})) await putBlob(id, name, b)
   await putItem(item)
   return item
 }
@@ -120,7 +129,7 @@ export async function exportItem(item: GalleryItem): Promise<void> {
   for (const b of item.blobs) {
     const blob = await getBlob(item.id, b)
     if (!blob) continue
-    const ext = blob.type === 'image/png' ? 'png' : 'jpg'
+    const ext = blob.type === 'image/png' ? 'png' : blob.type === 'application/octet-stream' ? 'bin' : 'jpg'
     files.push({ name: `${safe}-${b.replace('/', '-')}.${ext}`, blob })
   }
   files.push({ name: `${safe}.json`, blob: new Blob([JSON.stringify(item, null, 2)], { type: 'application/json' }) })

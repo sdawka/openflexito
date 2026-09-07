@@ -80,6 +80,8 @@
           <div class="muted mono" style="font-size:11px">
             {it.kind}{it.width ? ` · ${it.width}×${it.height}` : ''}{it.position ? ` · z ${it.position.z}` : ''}
             {it.scan ? ` · ${it.scan.tiles.length} tiles` : ''}
+            {#if it.stack}<div title="share of the picture taken from each slice">focus stack · {it.stack.slices} slices, Δz {it.stack.stepZ} · from each: {it.stack.contributions.map((c) => Math.round(c * 100) + '%').join(' ')}</div>{/if}
+            {#if it.raw}<div>RAW {it.raw.bitDepth}-bit {it.raw.bayer} → 16-bit PNG · sensor data kept</div>{/if}
           </div>
           <div class="row" style="margin-top:6px">
             <button onclick={() => open(it)}>Open</button>

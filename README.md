@@ -124,13 +124,21 @@ the bundled `imx219.json` tuning file comes from that project.
 
 ## Photos and stacks
 
-The Photo button takes a full-resolution still (3280×2464, ~1.3 s, ~1.5 MB JPEG) into the gallery;
-the stage does not move for it. Two stacked modes run entirely in the browser (`webapp/src/lib/algo/stack.ts`):
+The Photo button takes a full-resolution still (3280×2464, ~1.3 s, ~1.5 MB 8-bit JPEG) into the gallery;
+the stage does not move for it. Stills freeze the exposure, gain and colour gains the live view is using
+(a configuration switch restarts libcamera's auto algorithms, so without this the still would ignore
+them). **RAW mode** fetches the sensor's 10-bit Bayer frame (`/raw.bin`, 16 MB, ~20 s in total) and
+develops it in a worker (`algo/rawdev.ts`: black level, the live white-balance gains, bilinear demosaic,
+sRGB curve) into a lossless 16-bit PNG (`png16.ts`, ~30 MB); the raw data is stored with the item and
+exported as `.bin`. No lens shading or colour matrix is applied, so it is the sensor's measurement. Two stacked modes run entirely in the browser (`webapp/src/lib/algo/stack.ts`):
 a **focus stack** captures N slices `step` z-steps apart (starting below, ending back at the starting z
 with z backlash compensation) and keeps, block by block, the slice with the highest local Laplacian
 energy; an **LED exposure stack** captures the scene at several LED levels (0.4×, 0.7×, 1×, 1.5× of the
 current brightness, clipped to the range) and fuses them with well-exposedness weights (Mertens-style,
-single scale). Both weight maps are smoothed over neighbouring blocks so seams do not show.
+single scale). Both weight maps are smoothed over neighbouring blocks so seams do not show. A focus
+stack item keeps every slice (`slice/<n>`) and records how much of the result came from each; the
+gallery shows it (on the algae sample, 5 slices 40 steps apart gave 34/18/18/17/13 %). During an LED
+stack auto exposure is locked so the camera cannot cancel the LED changes.
 
 Extra illumination (darkfield, oblique): the Sangaboard v0.5 reports `CC:1 PWM:2`. From the schematic
 (`filipayazi/sangaboard-rp2040`, illumination sheet) and the v7 build docs: the CC channel is a TPS61060

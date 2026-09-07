@@ -28,7 +28,9 @@ describe('focusStack', () => {
   it('recovers the sharp half from each source', () => {
     const sharp = checker(1)
     const a = blurHalf(sharp, true), b = blurHalf(sharp, false)
-    const out = focusStack([a, b])
+    const { image: out, contributions } = focusStack([a, b])
+    expect(contributions[0]).toBeGreaterThan(0.3); expect(contributions[1]).toBeGreaterThan(0.3)   // each half comes from one source
+    expect(contributions[0] + contributions[1]).toBeCloseTo(1, 5)
     const ref = totalSharpness(sharp), sa = totalSharpness(a), so = totalSharpness(out)
     expect(sa).toBeLessThan(ref * 0.7)          // each source really is half blurred
     expect(so).toBeGreaterThan(ref * 0.85)      // the stack is close to the all-sharp reference
@@ -36,7 +38,7 @@ describe('focusStack', () => {
   })
   it('returns the single image unchanged', () => {
     const a = checker(1)
-    expect(focusStack([a])).toBe(a)
+    expect(focusStack([a]).image).toBe(a)
   })
 })
 

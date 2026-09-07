@@ -98,7 +98,8 @@
     <div class="label" style="margin-top:10px">Photo <span class="muted">full sensor resolution, to the gallery</span></div>
     <div class="row">
       <select bind:value={mode} disabled={busy} title="single still, or a stack merged in the browser">
-        <option value="single">single</option>
+        <option value="single">single (JPEG)</option>
+        <option value="raw">RAW 10-bit → 16-bit PNG (slow)</option>
         <option value="focus">focus stack</option>
         <option value="exposure">LED exposure stack</option>
       </select>
@@ -113,6 +114,8 @@
       <button onclick={() => snapshot(true)} disabled={busy} title="download a full-resolution still">↓</button>
       {#if device.frame}<span class="muted mono">{(device.frame.size / 1024).toFixed(0)} kB/frame</span>{/if}
     </div>
+    {#if mode === 'focus'}<div class="muted" style="font-size:11px;margin-top:4px">Slices are taken from {Math.floor((slices - 1) / 2) * stepZ} steps below to above the current focus; use a z step close to the depth of field (try 20–50 at 40×, 100–300 at 10×). The result lists how much came from each slice; the slices are kept in the gallery item.</div>{/if}
+    {#if mode === 'raw'}<div class="muted" style="font-size:11px;margin-top:4px">The sensor's 10-bit Bayer frame (16 MB) is developed in the browser (black level, white balance, demosaic, sRGB) into a lossless 16-bit PNG; the raw data is stored too. No lens shading or colour matrix is applied.</div>{/if}
     {#if progress || saved}<div class="muted mono" style="font-size:12px;margin-top:6px">{progress || saved}</div>{/if}
   {:else}
     <span class="muted">camera not available</span>

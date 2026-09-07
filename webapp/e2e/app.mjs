@@ -68,6 +68,19 @@ await step('photo (full resolution) lands in the gallery', async () => {
   expect(/3280\s*[×x]\s*2464/.test(await page.locator('main').innerText()), 'gallery does not list a 3280×2464 photo')
 })
 
+await step('RAW photo develops to a 16-bit PNG in the gallery', async () => {
+  await nav('live')
+  await page.selectOption('.panel:has(h3:has-text("Camera")) select', 'raw')
+  await page.click('button:has-text("Photo")')
+  await page.waitForFunction(() => /saved "RAW 10-bit/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 120000 })
+    .catch(async () => { throw new Error('raw photo did not finish: ' + (await page.locator('.panel:has(h3:has-text("Camera"))').innerText()).replace(/\s+/g, ' ').slice(-160)) })
+  await page.selectOption('.panel:has(h3:has-text("Camera")) select', 'single')
+  await nav('gallery'); await page.waitForTimeout(600)
+  const gt = await page.locator('main').innerText()
+  expect(/RAW 10-bit BGGR → 16-bit PNG/.test(gt), 'gallery does not describe the raw item')
+  expect(/RAW 10-bit[^\n]*\n[^\n]*3280\s*[×x]\s*2464/.test(gt), 'raw item is not listed at full sensor size')
+})
+
 if (moves) await step('focus stack photo returns to the starting z', async () => {
   await nav('live')
   const z0 = (await position()).z
@@ -79,7 +92,14 @@ if (moves) await step('focus stack photo returns to the starting z', async () =>
     .catch(async () => { throw new Error('focus stack did not finish: ' + (await page.locator('.panel:has(h3:has-text("Camera"))').innerText()).replace(/\s+/g, ' ').slice(-160)) })
   await page.waitForTimeout(500)
   expect(Math.abs((await position()).z - z0) <= 1, `z ended at ${(await position()).z}, started at ${z0}`)
+  const info = await page.locator('.panel:has(h3:has-text("Camera"))').innerText()
   await page.selectOption('.panel:has(h3:has-text("Camera")) select', 'single')
+  await nav('gallery'); await page.waitForTimeout(600)
+  const g = await page.locator('main').innerText()
+  const m = g.match(/from each: ([\d% ]+)/)
+  expect(!!m, 'gallery does not list per-slice contributions: ' + g.replace(/\s+/g, ' ').slice(0, 160))
+  const shares = m[1].trim().split(/\s+/).map((s) => parseInt(s))
+  expect(shares.length === 3 && shares.filter((s) => s > 5).length >= 2, `stack did not draw on several slices: ${m[1]} (${info.replace(/\s+/g, ' ').slice(-80)})`)
 })
 
 await step('camera controls: manual exposure slider and auto toggles', async () => {

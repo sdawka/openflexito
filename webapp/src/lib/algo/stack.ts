@@ -82,9 +82,11 @@ export function blend(images: Rgba[], weights: Float32Array[], cellsX: number, c
   return { data: out, width: w, height: h }
 }
 
+export interface StackResult { image: Rgba; contributions: number[] /* share of the picture taken from each slice, sums to 1 */ }
+
 /** Focus stack: at each block prefer the source with the highest local sharpness (weights ∝ energy^4). */
-export function focusStack(images: Rgba[], cell = 8): Rgba {
-  if (images.length === 1) return images[0]
+export function focusStack(images: Rgba[], cell = 8): StackResult {
+  if (images.length === 1) return { image: images[0], contributions: [1] }
   const maps = images.map((im) => cellMaps(im, cell))
   const { cellsX, cellsY } = maps[0]
   const weights = maps.map((m) => {
@@ -96,7 +98,9 @@ export function focusStack(images: Rgba[], cell = 8): Rgba {
   normalise(weights)
   for (const w of weights) smooth(w, cellsX, cellsY, 2)
   normalise(weights)
-  return blend(images, weights, cellsX, cell)
+  const n = weights[0].length
+  const contributions = weights.map((w) => { let s = 0; for (let c = 0; c < n; c++) s += w[c]; return s / n })
+  return { image: blend(images, weights, cellsX, cell), contributions }
 }
 
 /** Exposure fusion of the same scene under different illumination: prefer well-exposed blocks
