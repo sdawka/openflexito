@@ -110,14 +110,14 @@ export async function takePhoto(o: PhotoOptions): Promise<GalleryItem> {
   const meta = { position: { ...device.position }, controls: device.controls ?? undefined }
   if (o.mode === 'single') {
     say('capturing full resolution…')
-    return saveSnapshot(await captureFull(), { ...meta, name: `Photo ${new Date().toLocaleString()}` })
+    return saveSnapshot(await captureFull(), { ...meta, name: 'Photo' })
   }
   if (o.mode === 'raw') {
     const { result, gains } = await developRaw(say)
     say('RAW: saving…')
     const preview = await encodeRgba8(result.preview)
     return saveSnapshot(result.png, {
-      ...meta, name: `RAW ${result.bitDepth}-bit ${new Date().toLocaleString()}`, thumbFrom: preview, size: { width: result.width, height: result.height },
+      ...meta, name: `RAW ${result.bitDepth}-bit`, thumbFrom: preview, size: { width: result.width, height: result.height },
       extra: { raw: { bitDepth: result.bitDepth, bayer: result.bayer, blackLevel: result.blackLevel, gains, applied: result.applied } },
       extraBlobs: { dng: result.dng, preview },
     })
@@ -156,7 +156,7 @@ export async function takePhoto(o: PhotoOptions): Promise<GalleryItem> {
     const extraBlobs: Record<string, Blob> = {}
     sliceBlobs.forEach((b, i) => { extraBlobs[`slice/${i}`] = b })
     return saveSnapshot(await encode(image), {
-      ...meta, name: `Focus stack ${slices}×${step} ${new Date().toLocaleString()}`,
+      ...meta, name: `Focus stack ${slices}×${step}`,
       extra: { stack: { slices, stepZ: step, zs, contributions, method: 'blocks' } }, extraBlobs,
     })
   }
@@ -183,7 +183,7 @@ export async function takePhoto(o: PhotoOptions): Promise<GalleryItem> {
     if (lockAe) await device.setControls({ AeEnable: true }).catch(() => {})
   }
   say('LED stack: fusing…')
-  return saveSnapshot(await encode(exposureFuse(frames)), { ...meta, name: `LED exposure stack ×${levels.length} ${new Date().toLocaleString()}` })
+  return saveSnapshot(await encode(exposureFuse(frames)), { ...meta, name: `LED exposure stack ×${levels.length}` })
 }
 
 /** Fine focus stack: find the focus plane with an autofocus sweep, size the stack from the width of
@@ -259,13 +259,13 @@ async function fineStack(o: PhotoOptions, say: (m: string) => void, meta: { posi
     const png = await encodePng16(r.data, r.width, r.height)
     const preview = await encodeRgba8(toRgba8({ data: r.data, width: r.width, height: r.height }, 4))
     return saveSnapshot(png, {
-      ...meta, position: { ...meta.position, z: centreZ }, name: `Fine focus stack RAW ${slices}×${step} ${new Date().toLocaleString()}`, thumbFrom: preview, size: { width: r.width, height: r.height },
+      ...meta, position: { ...meta.position, z: centreZ }, name: `Fine focus stack RAW ${slices}×${step}`, thumbFrom: preview, size: { width: r.width, height: r.height },
       extra: { stack, raw: { bitDepth: 10, bayer: 'BGGR', blackLevel: 64, gains, applied: { lsc: !!params?.lsc, ccm: !!params?.ccm, gammaCurve: !!params?.gammaCurve, demosaic: 'malvar' } } }, extraBlobs: { ...extraBlobs, preview },
     })
   }
   const image = await encodeRgba8({ data: r.data, width: r.width, height: r.height }, 0.95)
   return saveSnapshot(image, {
-    ...meta, position: { ...meta.position, z: centreZ }, name: `Fine focus stack ${slices}×${step} ${new Date().toLocaleString()}`,
+    ...meta, position: { ...meta.position, z: centreZ }, name: `Fine focus stack ${slices}×${step}`,
     extra: { stack }, extraBlobs,
   })
 }

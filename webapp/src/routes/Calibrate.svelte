@@ -178,9 +178,8 @@
         <ol class="steps">
           <li class:ok={ledOn}>
             <div class="what"><b>Set the LED brightness</b> <span class="muted">— currently {ledOn ? `${Math.round(device.light.cc * 100)} %` : 'off'}.
-              Pick the brightness you will use for imaging; the exposure is then chosen to match it. Brighter LED = shorter
-              exposure and less noise, until the field saturates (the exposure step reports "not converged"). Changing the LED
-              later means redoing steps 2–4.</span></div>
+              Choose the brightness you will image at; the exposure is matched to it. Brighter = shorter exposure and less
+              noise, until the field saturates. Changing it later means redoing steps 2–4.</span></div>
             <div class="row">
               <input type="range" min="0" max="1" step="0.01" value={device.light.cc} disabled={!device.connected}
                      oninput={(e) => ledSlider(+e.currentTarget.value)} style="flex:1" aria-label="LED brightness" />

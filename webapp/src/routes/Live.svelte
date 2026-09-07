@@ -10,6 +10,7 @@
   import { wb, pickNeutral } from '../lib/services/whiteBalance.svelte'
   import StagePad from '../components/StagePad.svelte'
   import CameraControls from '../components/CameraControls.svelte'
+  import PhotoPanel from '../components/PhotoPanel.svelte'
   import LightControl from '../components/LightControl.svelte'
   import { calibration } from '../lib/store/calibration.svelte'
   import { pixelsToStage } from '../lib/algo/csm'
@@ -158,6 +159,7 @@
     {#if device.error}<div class="hint err">{device.error} <button onclick={() => (device.error = null)}>×</button></div>{/if}
   </section>
   <aside>
+    <StagePad />
     <div class="panel">
       <h3>Focus</h3>
       <div class="row">
@@ -173,14 +175,20 @@
       </div>
       {#if afLog}<div class="muted mono" style="font-size:12px;margin-top:6px">{afLog}</div>{/if}
     </div>
+    <PhotoPanel />
+    <CameraControls />
+    <LightControl />
     <div class="panel">
       <h3>Intelligence</h3>
       <div class="row">
         <button class:primary={detecting} onclick={toggleDetect} disabled={!device.connected}>{detecting ? 'Stop detection' : 'Detect objects'}</button>
         {#if follow.active}<button class="danger" onclick={() => follow.stop()}>Stop following</button>{/if}
       </div>
-      <p class="muted" style="font-size:12px;margin:8px 0 0">Click a detected box to follow it with the stage. Shift-drag a region to find similar images in the gallery.
-        {#if !calibration.csm}<b>Following needs the camera-stage calibration.</b>{/if}</p>
+      <details class="help">
+        <summary>How to use</summary>
+        <p>Click a detected box to follow it with the stage. <kbd>⇧</kbd>-drag a region to find similar images in the gallery.
+        {#if !calibration.csm}<b>Following needs the stage ↔ camera calibration.</b>{/if}</p>
+      </details>
       {#if searching}<div class="muted" style="font-size:12px">searching…</div>{/if}
       {#if hits.length}
         <div class="hits">
@@ -193,20 +201,20 @@
         </div>
       {/if}
     </div>
-    <StagePad />
-    <LightControl />
-    <CameraControls />
-    <div class="panel muted" style="font-size:12px">
-      Mouse: click-hold-drag the image to pan the stage (like a map), click to centre a point, shift-drag to select a region.
-      Keys: WASD / arrows move XY, PgUp/PgDn or Q/E move Z, hold for continuous jog.
-      Gamepad: left stick XY, right stick or triggers Z, B stops.
+    <div class="panel">
+      <details class="help">
+        <summary>Mouse, keys and gamepad</summary>
+        <p><b>Mouse</b>: click-hold-drag the image to pan the stage like a map · click to centre a point · <kbd>⇧</kbd>-drag to select a region for image search.</p>
+        <p><b>Keys</b>: <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or arrows move XY · <kbd>Q</kbd>/<kbd>E</kbd> or <kbd>PgUp</kbd>/<kbd>PgDn</kbd> move Z · hold for continuous motion.</p>
+        <p><b>Gamepad</b>: left stick XY · right stick or triggers Z · <kbd>B</kbd> stops.</p>
+      </details>
     </div>
   </aside>
 </div>
 {#if viewing}<Viewer blob={viewing} onclose={() => (viewing = null)} />{/if}
 
 <style>
-  .live { display: grid; grid-template-columns: 1fr 320px; height: 100%; }
+  .live { display: grid; grid-template-columns: 1fr 360px; height: 100%; }
   .stream { position: relative; min-width: 0; }
   aside { display: flex; flex-direction: column; gap: 10px; padding: 10px; overflow: auto; border-left: 1px solid var(--border); }
   .hint { position: absolute; bottom: 12px; left: 12px; background: rgba(0,0,0,.6); padding: 6px 10px; border-radius: 6px; font-size: 12px; }

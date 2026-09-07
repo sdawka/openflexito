@@ -41,6 +41,10 @@
     await deleteItem(it); await refresh()
   }
   async function doExport(it: GalleryItem) { busy = true; try { await exportItem(it) } finally { busy = false } }
+  const fmtWhen = (iso: string) => {
+    const d = new Date(iso), today = new Date().toDateString() === d.toDateString()
+    return today ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  }
 </script>
 
 <div class="wrap">
@@ -67,7 +71,7 @@
     </div>
   {/if}
   {#if !items.length}
-    <div class="panel muted">No items yet. Save snapshots from the Live page or run a scan.</div>
+    <div class="panel muted">No items yet. Take a photo from the Live page or run a scan.</div>
   {/if}
   <div class="grid">
     {#each items as it (it.id)}
@@ -76,16 +80,24 @@
           {#if thumbs[it.id]}<img src={thumbs[it.id]} alt={it.name} />{:else}<span class="muted">no preview</span>{/if}
         </button>
         <div class="meta">
-          <div><b>{it.name}</b></div>
-          <div class="muted mono" style="font-size:11px">
-            {it.kind}{it.width ? ` · ${it.width}×${it.height}` : ''}{it.position ? ` · z ${it.position.z}` : ''}
-            {it.scan ? ` · ${it.scan.tiles.length} tiles` : ''}
-            {#if it.stack}<div title="share of the picture taken from each slice">{it.stack.method === 'pyramid' ? `fine focus stack (pyramid${it.stack.source === 'raw' ? ', 16-bit from RAW' : ''})` : 'focus stack'} · {it.stack.slices} slices, Δz {it.stack.stepZ}{it.stack.centreZ !== undefined ? `, centred on z ${it.stack.centreZ}` : ''} · from each: {it.stack.contributions.map((c) => Math.round(c * 100) + '%').join(' ')}</div>{/if}
-            {#if it.raw}<div>RAW {it.raw.bitDepth}-bit {it.raw.bayer} → 16-bit PNG{it.raw.applied ? ` (${it.raw.applied.demosaic}${it.raw.applied.lsc ? ', shading' : ''}${it.raw.applied.ccm ? ', colour matrix' : ''}${it.raw.applied.gammaCurve ? ', camera gamma' : ', sRGB'})` : ''} · DNG kept</div>{/if}
+          <div class="title"><b>{it.name}</b><span class="when" title={it.when}>{fmtWhen(it.when)}</span></div>
+          <div class="chips">
+            {#if it.width}<span class="chip">{it.width}×{it.height}</span>{/if}
+            {#if it.position}<span class="chip" title="stage position x {it.position.x} y {it.position.y}">z {it.position.z}</span>{/if}
+            {#if it.scan}<span class="chip">{it.scan.cols}×{it.scan.rows} scan · {it.scan.tiles.length} tiles</span>{/if}
+            {#if it.raw}<span class="chip accent">RAW {it.raw.bitDepth}-bit {it.raw.bayer} → 16-bit PNG</span><span class="chip ok">DNG kept</span>{/if}
+            {#if it.stack}<span class="chip accent">{it.stack.method === 'pyramid' ? `fine focus stack (pyramid${it.stack.source === 'raw' ? ', 16-bit from RAW' : ''})` : 'quick focus stack'}</span>{/if}
           </div>
-          <div class="row" style="margin-top:6px">
+          {#if it.stack}
+            <div class="sharebar" title="share of the picture taken from each slice, bottom to top">
+              {#each it.stack.contributions as c, i}<span style="width:{c * 100}%;background:hsl({200 + (i / Math.max(1, it.stack.contributions.length - 1)) * 120} 70% 60%)"></span>{/each}
+            </div>
+            <div class="muted small">{it.stack.slices} slices · Δz {it.stack.stepZ}{it.stack.centreZ !== undefined ? ` · centred on z ${it.stack.centreZ}` : ''} · from each: {it.stack.contributions.map((c) => Math.round(c * 100) + '%').join(' ')}</div>
+          {/if}
+          {#if it.raw?.applied}<div class="muted small">developed: {it.raw.applied.demosaic}{it.raw.applied.lsc ? ', shading' : ''}{it.raw.applied.ccm ? ', colour matrix' : ''}{it.raw.applied.gammaCurve ? ', camera gamma' : ', sRGB'}</div>{/if}
+          <div class="row actions">
             <button onclick={() => open(it)}>Open</button>
-            <button onclick={() => doExport(it)} disabled={busy}>Export</button>
+            <button onclick={() => doExport(it)} disabled={busy} title="export image, slices, DNG and metadata to a folder">Export</button>
             <button class="danger" onclick={() => remove(it)}>Delete</button>
           </div>
         </div>
@@ -101,5 +113,10 @@
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
   .thumb { width: 100%; aspect-ratio: 4/3; background: #000; border: 0; border-radius: 0; padding: 0; display: grid; place-items: center; }
   .thumb img { width: 100%; height: 100%; object-fit: cover; }
-  .meta { padding: 10px; }
+  .meta { padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+  .title { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .title b { font-size: 13px; }
+  .when { color: var(--muted); font-size: 11px; white-space: nowrap; }
+  .small { font-size: 11px; }
+  .actions { margin-top: 4px; }
 </style>

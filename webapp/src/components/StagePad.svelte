@@ -38,10 +38,11 @@
     </div>
   </div>
   <div class="row" style="margin-top:10px">
-    <input class="mono" type="number" style="width:80px" bind:value={goto.x} placeholder="x" />
-    <input class="mono" type="number" style="width:80px" bind:value={goto.y} placeholder="y" />
-    <input class="mono" type="number" style="width:80px" bind:value={goto.z} placeholder="z" />
-    <button onclick={() => device.moveTo(goto).catch(() => {})}>Go to</button>
+    <input class="mono" type="number" style="width:70px" bind:value={goto.x} placeholder="x" title="x" />
+    <input class="mono" type="number" style="width:70px" bind:value={goto.y} placeholder="y" title="y" />
+    <input class="mono" type="number" style="width:70px" bind:value={goto.z} placeholder="z" title="z" />
+    <button onclick={() => device.moveTo(goto).catch(() => {})} title="absolute move to x y z (steps)">Go to</button>
+    <button onclick={() => (goto = { ...device.position })} title="copy the current position into the fields">Here</button>
   </div>
   <div class="row" style="margin-top:10px">
     <button onclick={() => device.zero()} title="set current position as origin">Zero</button>
