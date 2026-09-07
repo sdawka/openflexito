@@ -6,3 +6,7 @@ camera_auto_detect=1
 disable_camera_led=1
 dtparam=act_led_trigger=none
 dtparam=audio=off
+# Power button: momentary switch between pin 5 (GPIO3) and pin 6 (GND). Shorting GPIO3 wakes a halted
+# Pi in hardware; this overlay makes the same press a clean shutdown while running (systemd power key).
+# GPIO3 is not connected on the Sangaboard v0.5, see README "Pi GPIO under the Sangaboard".
+dtoverlay=gpio-shutdown
