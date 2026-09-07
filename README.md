@@ -215,6 +215,32 @@ image. OpenFlexure's own route is the Delta Stage's 8×8 DotStar array (Adafruit
 sample with the outer LEDs lit (arXiv 2112.05804); community alternatives are a patch stop in a
 modularised condenser (forum topic 1249) and a Köhler-style condenser with light stops (topic 2400).
 
+### Time-lapse and tracking
+
+The **Time-lapse** panel (Live sidebar, under Photo) captures frames at a fixed interval (1 s to
+hours), for a given duration or frame count, from either the stream or a full-resolution still,
+optionally autofocusing every N frames and turning the LED off between frames (`light.set`, the level
+it found on start is restored when it stops) to limit heating and photobleaching. Each frame is
+registered to the first by phase correlation (`algo/fftTrack.displacement`); the pure accounting in
+`algo/drift.ts` accumulates the drift and, once it exceeds a threshold and the camera-stage calibration
+exists, `services/timelapse.svelte.ts` issues a raw stage move (`compensate: false`) to bring the
+sample back into frame and re-templates. Every frame's measured shift is stored with it, so the
+gallery item (kind `timelapse`, frames as blobs `f0000…`) can be played back drift-free: the built-in
+viewer (`components/TimelapseViewer.svelte`) plays, pauses and scrubs the sequence with the shifts
+subtracted, and can export it as a WebM (drawing frames to a canvas and recording with MediaRecorder,
+the same approach as `services/recorder.svelte.ts`) alongside the existing folder export.
+
+**Organism tracking** (`algo/tracking.ts`) detects blobs in a frame by thresholding on the frame's
+mean ± k·σ (dark objects on a bright field by default) and flood-filling connected components into a
+centroid and area each, then links them frame to frame by nearest neighbour with a maximum-displacement
+gate and a few missed frames of memory (Trackpy-style), computing per-track path length, net
+displacement, mean speed (px/s, and µm/s given a µm/px value) and straightness. The Tracking panel
+(Live sidebar) runs this on the live stream, sampling the live `<img>` at ~5 fps via an OffscreenCanvas
+(`services/tracking.svelte.ts`), optionally using the AI object detector's boxes instead of the blob
+finder; trajectories are overlaid on the stream view (`StreamView`'s additive `paths` prop) and a table
+of tracks can be exported as CSV (per-frame positions and per-track statistics). The same tracker can
+run over a saved time-lapse's frames from its viewer ("Track organisms").
+
 ## Logs and crashes
 
 The service log lives in the systemd journal, which the image makes persistent and size-capped

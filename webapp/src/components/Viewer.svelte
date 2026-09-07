@@ -1,13 +1,18 @@
 <script lang="ts">
-  /** Zoomable image viewer (OpenSeadragon) for an image Blob; a plain player for video Blobs. */
+  /** Zoomable image viewer (OpenSeadragon) for an image Blob, a plain player for video Blobs, or the
+   *  time-lapse player (`TimelapseViewer`) when `item` is a time-lapse gallery item. */
   import { onMount } from 'svelte'
   import OpenSeadragon from 'openseadragon'
+  import type { GalleryItem } from '../lib/store/gallery'
+  import TimelapseViewer from './TimelapseViewer.svelte'
 
-  let { blob, onclose }: { blob: Blob; onclose: () => void } = $props()
+  let { blob = null, item, onclose }: { blob?: Blob | null; item?: GalleryItem; onclose: () => void } = $props()
   let el: HTMLDivElement | undefined = $state()
-  const isVideo = $derived(blob.type.startsWith('video/'))
+  const isTimelapse = $derived(item?.kind === 'timelapse')
+  const isVideo = $derived(!!blob && blob.type.startsWith('video/'))
   let videoUrl = $state('')
   onMount(() => {
+    if (isTimelapse || !blob) return
     const url = URL.createObjectURL(blob)
     if (isVideo) { videoUrl = url; return () => URL.revokeObjectURL(url) }
     const viewer = OpenSeadragon({
@@ -20,7 +25,9 @@
 
 <div class="overlay">
   <button class="close" onclick={onclose}>✕ close</button>
-  {#if isVideo}
+  {#if isTimelapse && item}
+    <TimelapseViewer {item} />
+  {:else if isVideo}
     <!-- svelte-ignore a11y_media_has_caption -->
     <video class="video" src={videoUrl} controls autoplay loop></video>
   {:else}

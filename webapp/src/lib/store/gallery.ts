@@ -1,6 +1,8 @@
 /** Gallery storage in the browser: IndexedDB for metadata and image blobs. */
 
-export type ItemKind = 'snapshot' | 'scan' | 'video'
+export type ItemKind = 'snapshot' | 'scan' | 'video' | 'timelapse'
+
+export interface TimelapseFrameMeta { t: string; z: number; shift: { dx: number; dy: number } }
 
 export interface GalleryItem {
   id: string
@@ -17,6 +19,10 @@ export interface GalleryItem {
   stack?: { slices: number; stepZ: number; zs: number[]; contributions: number[]; method?: 'blocks' | 'pyramid'; centreZ?: number; span?: number; shifts?: { dx: number; dy: number }[]; source?: 'jpeg' | 'raw' }
   /** video: blob 'video' (WebM) recorded in the browser from the live view or the live focus stack */
   video?: { durationS: number; fps: number; source: string; mime: string }
+  /** time-lapse: blobs 'f0000', 'f0001', ... one JPEG per frame, plus 'thumb' from the first frame.
+   *  `frames[i].shift` is that frame's measured drift (px) from the first frame (see `algo/drift.ts`);
+   *  subtracting it plays the sequence back drift-free. */
+  timelapse?: { intervalMs: number; source: 'stream' | 'full'; driftCorrected: boolean; frames: TimelapseFrameMeta[] }
   /** raw develop: the sensor data behind 'image' ('dng' blob = the untouched mosaic as a DNG) */
   raw?: { bitDepth: number; bayer: string; blackLevel: number; gains: [number, number]; applied?: { lsc: boolean; ccm: boolean; gammaCurve: boolean; demosaic: string } }
   scan?: {
@@ -133,6 +139,24 @@ export async function saveVideo(blob: Blob, thumb: Blob | null, meta: { duration
   }
   await putBlob(id, 'video', blob)
   if (thumb) await putBlob(id, 'thumb', thumb)
+  await putItem(item)
+  return item
+}
+
+export async function saveTimelapse(frames: Blob[], frameMeta: TimelapseFrameMeta[], info: { intervalMs: number; source: 'stream' | 'full'; driftCorrected: boolean }): Promise<GalleryItem> {
+  if (!frames.length) throw new Error('no frames to save')
+  const id = newId()
+  const bmp = await createImageBitmap(frames[0])
+  const width = bmp.width, height = bmp.height
+  bmp.close()
+  const blobNames = frames.map((_, i) => `f${String(i).padStart(4, '0')}`)
+  const item: GalleryItem = {
+    id, kind: 'timelapse', name: `Time-lapse ${frames.length} frames`, when: new Date().toISOString(),
+    width, height, blobs: [...blobNames, 'thumb'],
+    timelapse: { intervalMs: info.intervalMs, source: info.source, driftCorrected: info.driftCorrected, frames: frameMeta },
+  }
+  for (let i = 0; i < frames.length; i++) await putBlob(id, blobNames[i], frames[i])
+  await putBlob(id, 'thumb', await makeThumb(frames[0]))
   await putItem(item)
   return item
 }

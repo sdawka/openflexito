@@ -262,6 +262,34 @@ await step('device logs panel fetches and downloads', async () => {
   expect(/listening on|encoder|openflexito/.test(await page.locator('pre.logs').innerText()), 'app records missing expected lines')
 })
 
+await step('time-lapse captures 3 frames and opens in the viewer', async () => {
+  await nav('live')
+  const panel = page.locator('.panel:has(h3:has-text("Time-lapse"))')
+  const intervalInput = panel.locator('.row').first().locator('input[type=number]')
+  await intervalInput.click({ clickCount: 3 }); await intervalInput.pressSequentially('1')
+  await panel.locator('.seg button:has-text("Frames")').click()
+  const frameInput = panel.locator('.row:has(.seg) input[type=number]')
+  await frameInput.click({ clickCount: 3 }); await frameInput.pressSequentially('3')
+  await panel.locator('button:has-text("Start time-lapse")').click()
+  await page.waitForFunction(() => /saved "Time-lapse/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 30000 })
+    .catch(async () => { throw new Error('time-lapse did not finish: ' + (await panel.innerText()).replace(/\s+/g, ' ').slice(-200)) })
+  await panel.locator('button:has-text("Open in viewer")').click()
+  await page.waitForSelector('.overlay canvas', { timeout: 5000 })
+  const playing = await page.locator('.overlay button:has-text("Play")').count()
+  expect(playing === 1, 'time-lapse viewer controls not shown')
+  await page.click('.overlay button.close')
+})
+
+await step('organism tracking finds tracks on the live stream and exports a CSV', async () => {
+  await nav('live')
+  const panel = '.panel:has(h3:has-text("Tracking"))'
+  await page.click(`${panel} button:has-text("Start tracking")`)
+  await page.waitForTimeout(2000)
+  await page.click(`${panel} button:has-text("Stop tracking")`)
+  await page.click(`${panel} button:has-text("Export CSV")`)
+  await page.waitForTimeout(300)
+})
+
 await step('no page errors during the run', async () => { expect(problems.length === 0, problems.join(' | ')) })
 
 await browser.close()

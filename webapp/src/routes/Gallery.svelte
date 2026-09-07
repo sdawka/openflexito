@@ -21,7 +21,7 @@
 
   let items = $state<GalleryItem[]>([])
   let thumbs = $state<Record<string, string>>({})
-  let viewing = $state<{ blob: Blob; item: GalleryItem } | null>(null)
+  let viewing = $state<{ blob: Blob | null; item: GalleryItem } | null>(null)
   let busy = $state(false)
 
   async function refresh() {
@@ -33,6 +33,7 @@
   onMount(() => { refresh(); return () => Object.values(thumbs).forEach((u) => URL.revokeObjectURL(u)) })
 
   async function open(it: GalleryItem) {
+    if (it.kind === 'timelapse') { viewing = { blob: null, item: it }; return }
     const blob = await getBlob(it.id, it.kind === 'video' ? 'video' : 'image')
     if (blob) viewing = { blob, item: it }
   }
@@ -86,6 +87,7 @@
             {#if it.width}<span class="chip">{it.width}×{it.height}</span>{/if}
             {#if it.position}<span class="chip" title="stage position x {it.position.x} y {it.position.y}">z {it.position.z}</span>{/if}
             {#if it.scan}<span class="chip">{it.scan.cols}×{it.scan.rows} scan · {it.scan.tiles.length} tiles</span>{/if}
+            {#if it.timelapse}<span class="chip accent">time-lapse · {it.timelapse.frames.length} frames · {(it.timelapse.intervalMs / 1000).toFixed(0)} s{it.timelapse.driftCorrected ? ' · drift-corrected' : ''}</span>{/if}
             {#if it.raw}<span class="chip accent">RAW {it.raw.bitDepth}-bit {it.raw.bayer} → 16-bit PNG</span><span class="chip ok">DNG kept</span>{/if}
             {#if it.stack}<span class="chip accent">{it.stack.method === 'pyramid' ? `fine focus stack (pyramid${it.stack.source === 'raw' ? ', 16-bit from RAW' : ''})` : 'quick focus stack'}</span>{/if}
           </div>
@@ -106,7 +108,7 @@
     {/each}
   </div>
 </div>
-{#if viewing}<Viewer blob={viewing.blob} onclose={() => (viewing = null)} />{/if}
+{#if viewing}<Viewer blob={viewing.blob} item={viewing.item} onclose={() => (viewing = null)} />{/if}
 
 <style>
   .wrap { padding: 16px; }

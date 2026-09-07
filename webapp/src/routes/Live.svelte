@@ -13,6 +13,9 @@
   import StagePad from '../components/StagePad.svelte'
   import CameraControls from '../components/CameraControls.svelte'
   import PhotoPanel from '../components/PhotoPanel.svelte'
+  import TimelapsePanel from '../components/TimelapsePanel.svelte'
+  import TrackingPanel from '../components/TrackingPanel.svelte'
+  import { tracking } from '../lib/services/tracking.svelte'
   import LightControl from '../components/LightControl.svelte'
   import { calibration } from '../lib/store/calibration.svelte'
   import { pixelsToStage } from '../lib/algo/csm'
@@ -84,6 +87,9 @@
     ...detections.map((d) => ({ x: d.box.xmin, y: d.box.ymin, w: d.box.xmax - d.box.xmin, h: d.box.ymax - d.box.ymin, label: d.label, score: d.score, kind: 'detect' as const })),
     ...(follow.active && follow.region ? [{ ...follow.region, label: 'following', kind: 'follow' as const }] : []),
   ])
+  const trackPaths = $derived(tracking.active && tracking.frameWidth
+    ? tracking.tracks.filter((t) => t.points.length > 1).map((t) => ({ points: t.points.map((p) => ({ x: p.x / tracking.frameWidth, y: p.y / tracking.frameHeight })) }))
+    : [])
   function followBox(b: Box) { follow.start({ x: b.x, y: b.y, w: b.w, h: b.h }) }
   async function onSelectRegion(r: { x: number; y: number; w: number; h: number }) {
     // Shift-drag: search the gallery for similar regions (alt: hold ctrl/cmd to follow instead)
@@ -130,7 +136,7 @@
     )
     const offKeys = attachKeyboard(jog, { invertY: () => settings.invertYKeys, enabled: () => device.connected })
     const offPad = attachGamepad(jog, { stop: () => device.stop(), autofocus }, () => settings.gamepad && device.connected)
-    return () => { offKeys(); offPad(); jog.dispose(); detecting = false; clearTimeout(detectTimer); follow.stop(); liveStack.stop() }
+    return () => { offKeys(); offPad(); jog.dispose(); detecting = false; clearTimeout(detectTimer); follow.stop(); liveStack.stop(); tracking.stop() }
   })
 
   function onClickImage(p: { x: number; y: number; w: number; h: number }) {
@@ -151,7 +157,7 @@
 
 <div class="live">
   <section class="stream">
-    <StreamView {boxes} {panOffset} onpan={onPan} onclickimage={onClickImage} onselectregion={onSelectRegion} onclickbox={followBox} picking={wb.picking} />
+    <StreamView {boxes} paths={trackPaths} {panOffset} onpan={onPan} onclickimage={onClickImage} onselectregion={onSelectRegion} onclickbox={followBox} picking={wb.picking} />
     {#if wb.picking}<div class="hint mono" style="top:12px;bottom:auto">click a spot that should be neutral grey or white</div>{/if}
     {#if follow.active || follow.status}<div class="hint mono" style="right:12px;left:auto">{follow.status}{#if follow.active} <button onclick={() => follow.stop()}>stop</button>{/if}</div>{/if}
     {#if ai.status}<div class="hint mono" style="top:12px;bottom:auto">{ai.status}</div>{/if}
@@ -198,8 +204,10 @@
       </details>
     </div>
     <PhotoPanel />
+    <TimelapsePanel />
     <CameraControls />
     <LightControl />
+    <TrackingPanel />
     <div class="panel">
       <h3>Intelligence</h3>
       <div class="row">

@@ -6,7 +6,7 @@ import { saveVideo, type GalleryItem } from '../store/gallery'
 
 export type FrameSource = () => { image: CanvasImageSource; width: number; height: number } | null
 
-class Recorder {
+export class Recorder {
   recording = $state(false)
   seconds = $state(0)
   status = $state('')
