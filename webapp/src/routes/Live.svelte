@@ -37,6 +37,9 @@
     measure.addPoint({ x: p.x, y: p.y }, p.w, p.h, umPerPxAt(p.w))
   }
   function onMeasureDblClick() { measure.closePolygon(umPerPxAt(measureImgW)) }
+  import SamplePanel from '../components/SamplePanel.svelte'
+  import MacroPanel from '../components/MacroPanel.svelte'
+  import { macroService } from '../lib/services/macro.svelte'
 
   // ---- click-hold-drag panning (like a map): the picture follows the cursor, the stage follows the picture ----
   let panner: PanController | null = null
@@ -132,6 +135,7 @@
     try {
       const r = await runAutofocus({ mode: afMode, dz: afRange, metric: 'jpeg', onProgress: (m) => (afLog = m) })
       afLog = `focused at z=${r.peakZ} (${r.samples.length} samples)`
+      macroService.recordAction('autofocus', { mode: afMode, dz: afRange }, `autofocus (${afMode})`)
     } catch (e) {
       afLog = (e as Error).message
     } finally {
@@ -185,6 +189,7 @@
     {#if device.error}<div class="hint err">{device.error} <button onclick={() => (device.error = null)}>×</button></div>{/if}
   </section>
   <aside>
+    <SamplePanel />
     <StagePad />
     <div class="panel">
       <h3>Focus</h3>
@@ -252,6 +257,7 @@
         </div>
       {/if}
     </div>
+    <MacroPanel />
     <div class="panel">
       <details class="help">
         <summary>Mouse, keys and gamepad</summary>

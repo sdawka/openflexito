@@ -4,17 +4,20 @@
    *  Also hosts the scale bar and measurement tool for gallery images: `width` (the item's natural
    *  pixel width, from the gallery record) lets `lib/store/scaleCal.svelte.ts` derive µm/px for
    *  whatever zoom level OSD is currently showing. Measurement here shares the same tool state as the
-   *  live view (`lib/services/measureService.svelte.ts`) so both feed one results list / CSV export. */
+   *  live view (`lib/services/measureService.svelte.ts`) so both feed one results list / CSV export.
+   *  Optionally shows the item's sample metadata with an inline editor (Gallery passes `item` and
+   *  `onSampleChange`; other callers, e.g. Live's search-hit preview, omit them). */
   import { onMount } from 'svelte'
   import OpenSeadragon from 'openseadragon'
   import type { GalleryItem } from '../lib/store/gallery'
+  import type { SampleRecord } from '../lib/store/sample.svelte'
   import TimelapseViewer from './TimelapseViewer.svelte'
   import { measure } from '../lib/services/measureService.svelte'
   import { currentScale, umPerPxAt } from '../lib/store/scaleCal.svelte'
   import { scaleForWidth, niceScaleBarLength, type Pt } from '../lib/algo/measure'
   import MeasurePanel from './MeasurePanel.svelte'
 
-  let { blob = null, width, item, onclose }: { blob?: Blob | null; width?: number; item?: GalleryItem; onclose: () => void } = $props()
+  let { blob = null, width, item, onclose, onSampleChange }: { blob?: Blob | null; width?: number; item?: GalleryItem; onclose: () => void; onSampleChange?: (s: SampleRecord) => void } = $props()
   let el: HTMLDivElement | undefined = $state()
   let viewer: OpenSeadragon.Viewer | undefined
   const isTimelapse = $derived(item?.kind === 'timelapse')
@@ -30,6 +33,11 @@
     imgPxPerScreenPx = screenPxPerImagePx > 0 ? 1 / screenPxPerImagePx : 1
   }
 
+  const emptySample = (): SampleRecord => ({ name: '', specimen: '', stain: '', slideId: '', magnification: '', operator: '', notes: '' })
+  let editing = $state(false)
+  let draft = $state<SampleRecord>(emptySample())
+  $effect(() => { draft = item?.sample ? { ...item.sample } : emptySample() })
+  function save() { onSampleChange?.({ ...draft }); editing = false }
   onMount(() => {
     if (isTimelapse || !blob) return
     const url = URL.createObjectURL(blob)
@@ -99,6 +107,9 @@
 
 <div class="overlay">
   <button class="close" onclick={onclose}>✕ close</button>
+  {#if item && onSampleChange}
+    <button class="sample-toggle" onclick={() => (editing = !editing)}>{editing ? '✕' : '🏷'} sample{item.sample?.name ? `: ${item.sample.name}` : ''}</button>
+  {/if}
   {#if isTimelapse && item}
     <TimelapseViewer {item} />
   {:else if isVideo}
@@ -126,6 +137,18 @@
     </div>
     <div class="measure-dock"><MeasurePanel compact /></div>
   {/if}
+  {#if editing && item && onSampleChange}
+    <div class="sample-edit panel">
+      <label>Name <input bind:value={draft.name} /></label>
+      <label>Specimen <input bind:value={draft.specimen} /></label>
+      <label>Stain / prep <input bind:value={draft.stain} /></label>
+      <label>Slide id <input bind:value={draft.slideId} /></label>
+      <label>Magnification <input bind:value={draft.magnification} /></label>
+      <label>Operator <input bind:value={draft.operator} /></label>
+      <label>Notes <textarea rows="2" bind:value={draft.notes}></textarea></label>
+      <div class="row"><button class="primary" onclick={save}>Save</button><button onclick={() => (editing = false)}>Cancel</button></div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -142,4 +165,7 @@
   .scalebar::before { content: ''; display: block; width: 100%; height: 3px; background: #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.6); }
   .scalebar span { font-size: 11px; color: #fff; text-shadow: 0 0 3px #000, 0 0 3px #000; }
   .measure-dock { position: absolute; right: 12px; top: 52px; width: 260px; z-index: 51; max-height: calc(100vh - 80px); overflow: auto; }
+  .sample-toggle { position: absolute; top: 12px; left: 12px; z-index: 51; }
+  .sample-edit { position: absolute; top: 52px; left: 12px; z-index: 51; width: 260px; display: flex; flex-direction: column; gap: 6px; }
+  .sample-edit label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
 </style>

@@ -6,6 +6,7 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
   import { takePhoto, type PhotoMode } from '../lib/services/photoService'
   import { recorder } from '../lib/services/recorder.svelte'
   import { liveStack } from '../lib/services/liveStack.svelte'
+  import { macroService } from '../lib/services/macro.svelte'
 
   let mode = $state<PhotoMode>('single')
   let slices = $state(5)
@@ -32,6 +33,7 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
     try {
       const item = await takePhoto({ mode, slices: isFine ? fineSlices : slices, stepZ, range: fineRange, onProgress: (m) => (status = { kind: 'busy', text: m }) })
       status = { kind: 'ok', text: `saved "${item.name}" to the gallery` }
+      macroService.recordAction('photo', { mode, slices: isFine ? fineSlices : slices, stepZ, range: fineRange }, `photo (${mode})`)
       setTimeout(() => { if (status?.kind === 'ok') status = null }, 6000)
     } catch (e) { status = { kind: 'err', text: (e as Error).message } } finally { busy = false }
   }

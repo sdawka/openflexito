@@ -18,6 +18,8 @@ export class RpcClient {
   private retryMs = 500
   private closed = false
   connected = false
+  /** Set by services/macro.svelte.ts while recording: notified with (method, params) on every call(). */
+  private callHook: ((method: string, params: unknown) => void) | null = null
 
   constructor(public baseUrl: string) {}
 
@@ -79,10 +81,16 @@ export class RpcClient {
     else p.resolve(m.result)
   }
 
+  /** Subscribe to every outgoing call (for macro recording); pass null to unsubscribe. */
+  onCall(fn: ((method: string, params: unknown) => void) | null): void {
+    this.callHook = fn
+  }
+
   call<T = any>(method: string, params?: Record<string, unknown> | unknown[]): Promise<T> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       return Promise.reject(new Error('not connected'))
     }
+    try { this.callHook?.(method, params) } catch (e) { console.error('call hook failed', e) }
     const id = this.nextId++
     const msg = { jsonrpc: '2.0', id, method, params }
     return new Promise<T>((resolve, reject) => {
