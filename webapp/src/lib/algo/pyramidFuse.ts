@@ -145,6 +145,10 @@ export class PyramidFuser {
     return { data: out, width: w, height: h, contributions: r.contributions }
   }
 
+  /** Per-pixel winning slice index at the finest level (which added slice supplied this pixel).
+   *  Depth-from-focus: paired with each slice's z this gives a coarse per-pixel depth map. */
+  depthIndex(): Uint8Array { return this.bestIndex }
+
   /** 16-bit interleaved RGB result (for 16-bit inputs). */
   result16(): { data: Uint16Array; width: number; height: number; contributions: number[] } {
     const r = this.resultPlanes(), { width: w, height: h } = this

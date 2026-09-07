@@ -12,6 +12,7 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
   let stepZ = $state(50)
   let fineSlices = $state(9)
   let fineRange = $state(1000)
+  let superresFrames = $state(9)
   let busy = $state(false)
   let status = $state<{ kind: 'busy' | 'ok' | 'err'; text: string } | null>(null)
 
@@ -22,15 +23,17 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
     { id: 'focusfine', label: 'Fine stack', blurb: 'Autofocus finds the focus plane and the depth of the sharpness peak; slices spread over it are aligned and fused in a Laplacian pyramid. Ends on the focus plane.', time: '~3 s per slice' },
     { id: 'focusfineraw', label: 'Fine stack from RAW', blurb: 'The fine stack with every slice developed from RAW and fused at 16 bits into a lossless PNG.', time: '~30 s per slice' },
     { id: 'exposure', label: 'LED exposure stack', blurb: 'The scene at several LED levels, fused so highlights and shadows both keep detail (exposure fusion). Auto exposure is locked meanwhile.', time: '~10 s' },
+    { id: 'superres', label: 'Super-resolution', blurb: 'A 3×3 (or similar) pattern of full-resolution stills, shifted by half a pixel between shots (needs the stage↔camera calibration), registered by phase correlation and drizzled onto a 2× grid.', time: '~3 s per frame + fusing' },
   ]
   const current = $derived(modes.find((m) => m.id === mode)!)
   const isFine = $derived(mode === 'focusfine' || mode === 'focusfineraw')
+  const isSuperres = $derived(mode === 'superres')
   const stackSpan = $derived(Math.floor((slices - 1) / 2) * stepZ)
 
   async function photo() {
     busy = true; status = { kind: 'busy', text: 'starting…' }
     try {
-      const item = await takePhoto({ mode, slices: isFine ? fineSlices : slices, stepZ, range: fineRange, onProgress: (m) => (status = { kind: 'busy', text: m }) })
+      const item = await takePhoto({ mode, slices: isFine ? fineSlices : slices, stepZ, range: fineRange, frames: superresFrames, onProgress: (m) => (status = { kind: 'busy', text: m }) })
       status = { kind: 'ok', text: `saved "${item.name}" to the gallery` }
       setTimeout(() => { if (status?.kind === 'ok') status = null }, 6000)
     } catch (e) { status = { kind: 'err', text: (e as Error).message } } finally { busy = false }
@@ -94,6 +97,11 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
           <option value={500}>±250</option><option value={1000}>±500</option><option value={2000}>±1000</option>
         </select>
       </label>
+    </div>
+  {:else if isSuperres}
+    <div class="params">
+      <label>Frames <input type="number" min="4" max="25" step="1" bind:value={superresFrames} disabled={busy} /></label>
+      <span class="muted small">square pattern, rounded to the nearest side length</span>
     </div>
   {/if}
   {#if status}<div class="status-line {status.kind}">{status.text}</div>{/if}

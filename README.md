@@ -215,6 +215,32 @@ image. OpenFlexure's own route is the Delta Stage's 8×8 DotStar array (Adafruit
 sample with the outer LEDs lit (arXiv 2112.05804); community alternatives are a patch stop in a
 modularised condenser (forum topic 1249) and a Köhler-style condenser with light stops (topic 2400).
 
+### Super-resolution and depth
+
+**Super-resolution mode** (`superres`) takes a square pattern of full-resolution stills (default 3×3)
+with the stage nudged between shots by however many steps the stage↔camera calibration says gives
+~0.5 px of shift at full resolution (raw moves, no backlash compensation, like the other sweeps; it
+refuses with a clear message if that calibration hasn't been run). Every frame is registered to the
+first by phase correlation with a parabolic sub-pixel refinement added to `algo/fftTrack.ts` (the
+*measured* shift is used, since backlash and residual stage error mean the commanded offsets are only
+approximate), then a worker (`workers/superresWorker.ts`) drizzles them onto a 2× grid
+(`algo/drizzle.ts`: each frame's pixel is a small square "drop" splatted at its measured sub-pixel
+position, output cells averaging whatever drops land on them) and streams progress back. A frame
+larger than 4096 px on its long side is centre-cropped first so the drizzled 2× result stays within
+canvas limits; the gallery item's `superres` field records the frame count, measured shifts, output
+scale and whether a crop was applied, and the image is named like the other modes (e.g.
+"Super-resolution 9 frames ×2").
+
+The **fine focus stack** also produces a **depth map**: `PyramidFuser` already tracks, per pixel, which
+slice's Laplacian energy won at the finest pyramid level (`depthIndex()`), which combined with each
+slice's z gives a coarse depth-from-focus map (`algo/depthMap.ts`: majority-vote smoothing to remove
+per-pixel ties, then a colour ramp and a pseudo-3D relief shading — the image's brightness modulated by
+the depth gradient, like hill-shading a digital elevation model). `focusfine` and `focusfineraw` items
+gain `depth` and `relief` preview blobs, a raw `depth.bin` (the smoothed per-pixel slice index, one byte
+per pixel — cheap to keep) and a `stack.depth` field (z range in steps, colour map used; no
+steps-to-micrometres factor exists yet in this codebase, so depth stays in steps). The gallery viewer
+shows an Image / Depth map / Relief toggle for any item that has one.
+
 ## Logs and crashes
 
 The service log lives in the systemd journal, which the image makes persistent and size-capped

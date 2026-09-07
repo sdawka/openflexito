@@ -50,7 +50,8 @@ export function displacement(template: Gray, image: Gray, sigmaPx = 10): Displac
   let peak = -Infinity, min = Infinity, pi = 0
   for (let i = 0; i < re.length; i++) { if (re[i] > peak) { peak = re[i]; pi = i } if (re[i] < min) min = re[i] }
   const px = pi % W, py = Math.floor(pi / W)
-  // centre of mass of the neighbourhood above 90 % of the range (background subtracted)
+  // centre of mass of the neighbourhood above 90 % of the range (background subtracted): coarse
+  // sub-pixel estimate, robust when the peak is asymmetric or the parabolic fit is degenerate.
   const thr = min + 0.9 * (peak - min)
   let sx = 0, sy = 0, sw = 0, second = -Infinity
   for (let y = py - 5; y <= py + 5; y++) for (let x = px - 5; x <= px + 5; x++) {
@@ -63,10 +64,28 @@ export function displacement(template: Gray, image: Gray, sigmaPx = 10): Displac
     const ddx = Math.min(Math.abs(x - px), W - Math.abs(x - px)), ddy = Math.min(Math.abs(y - py), H - Math.abs(y - py))
     if ((ddx > 8 || ddy > 8) && re[i] > second) second = re[i]
   }
-  let dx = px + (sw ? sx / sw : 0), dy = py + (sw ? sy / sw : 0)
+  const { dx: parX, dy: parY } = parabolicOffset(re, W, H, px, py)
+  // blend: parabolic interpolation is sharper for small (sub-pixel) shifts, the centroid is more
+  // robust when the peak is broad or asymmetric; average the two when both are well defined.
+  const cenX = sw ? sx / sw : 0, cenY = sw ? sy / sw : 0
+  let dx = px + (sw ? 0.5 * (parX + cenX) : parX), dy = py + (sw ? 0.5 * (parY + cenY) : parY)
   if (dx > W / 2) dx -= W
   if (dy > H / 2) dy -= H
   return { dx, dy, peak, quality: second > 0 ? peak / second : Infinity }
+}
+
+/** Sub-pixel offset of the true peak from the integer sample (px, py) by 1-D parabolic
+ *  interpolation through the three samples straddling the peak along each axis (wraps at the
+ *  edges, since the correlation surface is periodic). Returns 0 where the fit is degenerate
+ *  (flat or saddle neighbourhood). */
+function parabolicOffset(re: Float64Array, W: number, H: number, px: number, py: number): { dx: number; dy: number } {
+  const xm = (px - 1 + W) % W, xp = (px + 1) % W, ym = (py - 1 + H) % H, yp = (py + 1) % H
+  const c = re[py * W + px], l = re[py * W + xm], r = re[py * W + xp], t = re[ym * W + px], b = re[yp * W + px]
+  const denX = l - 2 * c + r, denY = t - 2 * c + b
+  const dx = Math.abs(denX) > 1e-9 ? 0.5 * (l - r) / denX : 0
+  const dy = Math.abs(denY) > 1e-9 ? 0.5 * (t - b) / denY : 0
+  // a valid parabolic fit puts the peak between its neighbours; clamp otherwise
+  return { dx: Math.max(-1, Math.min(1, dx)), dy: Math.max(-1, Math.min(1, dy)) }
 }
 
 /** Crop the central fraction of an image (template for tracking; ±(1-frac)/2 of the FoV is trackable). */

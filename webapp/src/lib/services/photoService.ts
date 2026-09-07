@@ -13,18 +13,22 @@ import { displacement } from '../algo/fftTrack'
 import { translateRgba } from '../algo/pyramidFuse'
 import { toRgba8 } from '../algo/rawdev'
 import type { StackMessage } from '../workers/stackWorker'
+import type { SuperresMessage } from '../workers/superresWorker'
 import { developParamsFromTuning } from '../algo/rawdev'
 import { runAutofocus } from './autofocusService'
 import { saveSnapshot, type GalleryItem } from '../store/gallery'
 import { device } from '../store/device.svelte'
+import { calibration } from '../store/calibration.svelte'
+import { smoothDepthIndex, depthZMap, colorizeDepth, reliefShade } from '../algo/depthMap'
 
-export type PhotoMode = 'single' | 'raw' | 'focus' | 'focusfine' | 'focusfineraw' | 'exposure'
+export type PhotoMode = 'single' | 'raw' | 'focus' | 'focusfine' | 'focusfineraw' | 'exposure' | 'superres'
 export interface PhotoOptions {
   mode: PhotoMode
   slices?: number        // focus: number of z slices (odd, centred on the current z)
   stepZ?: number         // focus: steps between slices
   range?: number         // focusfine: total z range of the autofocus sweep that locates the focus plane
   levels?: number[]      // exposure: LED brightness factors relative to the current level
+  frames?: number        // superres: number of pixel-shifted stills (a square number, default 9 = 3x3)
   onProgress?: (msg: string) => void
 }
 
@@ -55,6 +59,24 @@ async function encodeRgba8(img: { data: Uint8ClampedArray; width: number; height
   const c = ctx2d(img.width, img.height)
   c.putImageData(new ImageData(img.data as Uint8ClampedArray<ArrayBuffer>, img.width, img.height), 0, 0)
   return canvas!.convertToBlob({ type: 'image/jpeg', quality })
+}
+async function encodeRgba8Png(img: { data: Uint8ClampedArray; width: number; height: number }): Promise<Blob> {
+  const c = ctx2d(img.width, img.height)
+  c.putImageData(new ImageData(img.data as Uint8ClampedArray<ArrayBuffer>, img.width, img.height), 0, 0)
+  return canvas!.convertToBlob({ type: 'image/png' })
+}
+
+/** Centre-crop an RGBA image so neither side exceeds `maxLong`; returns the crop rectangle used
+ *  (null if the image was already small enough). A 2x drizzle of the full ~6560x4928 sensor frame
+ *  can exceed canvas/texture size limits in some browsers, so super-resolution works on a bounded
+ *  central crop instead. */
+function centerCropRgba(img: Rgba, maxLong: number): { img: Rgba; crop: { width: number; height: number; x0: number; y0: number } | null } {
+  if (Math.max(img.width, img.height) <= maxLong) return { img, crop: null }
+  const w = Math.min(img.width, maxLong), h = Math.min(img.height, maxLong)
+  const x0 = Math.floor((img.width - w) / 2), y0 = Math.floor((img.height - h) / 2)
+  const data = new Uint8ClampedArray(w * h * 4)
+  for (let y = 0; y < h; y++) data.set(img.data.subarray(((y0 + y) * img.width + x0) * 4, ((y0 + y) * img.width + x0 + w) * 4), y * w * 4)
+  return { img: { data, width: w, height: h }, crop: { width: w, height: h, x0, y0 } }
 }
 
 /** Download the sensor's raw Bayer frame (10-bit, ~16 MB) with progress. */
@@ -120,6 +142,7 @@ export async function takePhoto(o: PhotoOptions): Promise<GalleryItem> {
     })
   }
   if (o.mode === 'focusfine' || o.mode === 'focusfineraw') return fineStack(o, say, meta, o.mode === 'focusfineraw' ? 'raw' : 'jpeg')
+  if (o.mode === 'superres') return superresPhoto(o, say, meta)
   if (o.mode === 'focus') {
     const slices = Math.max(2, Math.round(o.slices ?? 5)), step = Math.max(1, Math.round(o.stepZ ?? 50))
     const startZ = device.position.z
@@ -205,7 +228,7 @@ async function fineStack(o: PhotoOptions, say: (m: string) => void, meta: { posi
   const worker = new Worker(new URL('../workers/stackWorker.ts', import.meta.url), { type: 'module' })
   const post = (m: StackMessage, transfer?: Transferable[]) => worker.postMessage(m, transfer ?? [])
   let progressHook: ((m: string) => void) | null = null
-  const finished = new Promise<{ data: Uint8ClampedArray | Uint16Array; width: number; height: number; contributions: number[]; shifts: { dx: number; dy: number }[] }>((resolve, reject) => {
+  const finished = new Promise<{ data: Uint8ClampedArray | Uint16Array; width: number; height: number; contributions: number[]; shifts: { dx: number; dy: number }[]; depthIndex: Uint8Array }>((resolve, reject) => {
     worker.onmessage = (ev) => {
       if (ev.data.progress) progressHook?.(ev.data.progress)
       else if (ev.data.error) reject(new Error(ev.data.error))
@@ -250,7 +273,21 @@ async function fineStack(o: PhotoOptions, say: (m: string) => void, meta: { posi
   say(`fine stack: done, taken from each slice: ${shares.map((s) => s + '%').join(' ')}`)
   const extraBlobs: Record<string, Blob> = {}
   frames.forEach((f, i) => { extraBlobs[`slice/${i}`] = f.blob })
-  const stack = { slices, stepZ: step, zs: frames.map((f) => f.z), contributions: r.contributions, method: 'pyramid' as const, centreZ, span, shifts: r.shifts, source }
+  const zs = frames.map((f) => f.z)
+  // depth-from-focus: which slice won each pixel, smoothed, turned into a z map and a colour/relief preview
+  say('fine stack: extracting depth map…')
+  const depthIndex = smoothDepthIndex(r.depthIndex, r.width, r.height)
+  const zMap = depthZMap(depthIndex, zs)
+  const depthColor = colorizeDepth(zMap, r.width, r.height)
+  const baseRgba = r.data instanceof Uint16Array ? toRgba8({ data: r.data, width: r.width, height: r.height }, 4).data : r.data
+  const relief = reliefShade(baseRgba, zMap, r.width, r.height)
+  extraBlobs['depth'] = await encodeRgba8Png({ data: depthColor.data, width: r.width, height: r.height })
+  extraBlobs['relief'] = await encodeRgba8({ data: relief, width: r.width, height: r.height }, 0.9)
+  extraBlobs['depth.bin'] = new Blob([new Uint8Array(depthIndex)], { type: 'application/octet-stream' })
+  const stack = {
+    slices, stepZ: step, zs, contributions: r.contributions, method: 'pyramid' as const, centreZ, span, shifts: r.shifts, source,
+    depth: { minZ: depthColor.stats.min, maxZ: depthColor.stats.max, colorMap: 'ramp' as const },
+  }
   if (r.data instanceof Uint16Array) {
     say('fine stack: encoding 16-bit PNG…')
     const png = await encodePng16(r.data, r.width, r.height)
@@ -264,5 +301,70 @@ async function fineStack(o: PhotoOptions, say: (m: string) => void, meta: { posi
   return saveSnapshot(image, {
     ...meta, position: { ...meta.position, z: centreZ }, name: `Fine focus stack ${slices}×${step}`,
     extra: { stack }, extraBlobs,
+  })
+}
+
+const SUPERRES_SCALE = 2
+
+/** Pixel-shift super-resolution: capture N full-resolution stills in a square raster pattern with
+ *  sub-pixel stage offsets (from the CSM calibration's pixels/step), register every frame to the
+ *  first by phase correlation (the measured shift, not the commanded one — backlash and residual
+ *  stage error would otherwise misalign the fusion) and drizzle them onto a finer grid in a worker.
+ *  Moves are raw, like the other sweeps, and the stage returns to the starting position at the end. */
+async function superresPhoto(o: PhotoOptions, say: (m: string) => void, meta: { position: { x: number; y: number; z: number }; controls?: object }): Promise<GalleryItem> {
+  const csm = calibration.csm
+  if (!csm) throw new Error('super-resolution: run the stage↔camera calibration first (Calibrate tab) — choosing sub-pixel offsets needs pixels/step')
+  const side = Math.max(2, Math.round(Math.sqrt(Math.max(4, Math.round(o.frames ?? 9)))))
+  const total = side * side
+
+  say(`super-resolution: capturing frame 1/${total} (reference)…`)
+  const firstImg = await decode(await captureFull())
+  const { img: firstCropped, crop } = centerCropRgba(firstImg, 4096)
+  const scaleFactor = firstImg.width / csm.imageWidth
+  const pxPerStepX = Math.hypot(csm.calX.pixelsPerStep[0], csm.calX.pixelsPerStep[1]) * scaleFactor
+  const pxPerStepY = Math.hypot(csm.calY.pixelsPerStep[0], csm.calY.pixelsPerStep[1]) * scaleFactor
+  if (!(pxPerStepX > 0) || !(pxPerStepY > 0)) throw new Error('super-resolution: calibration reports zero pixels/step; recalibrate the stage↔camera mapping')
+  const stepX = Math.max(1, Math.round(0.5 / pxPerStepX)), stepY = Math.max(1, Math.round(0.5 / pxPerStepY))
+  say(`super-resolution: ${side}×${side} pattern, ${stepX} step(s) in x and ${stepY} in y (~0.5 px at full resolution)`)
+
+  const worker = new Worker(new URL('../workers/superresWorker.ts', import.meta.url), { type: 'module' })
+  const postMsg = (m: SuperresMessage, transfer?: Transferable[]) => worker.postMessage(m, transfer ?? [])
+  let progressHook: ((m: string) => void) | null = (m) => say(`super-resolution: ${m}`)
+  const finished = new Promise<{ data: Uint8ClampedArray; width: number; height: number; coverage: number; shifts: { dx: number; dy: number; quality: number }[] }>((resolve, reject) => {
+    worker.onmessage = (ev) => {
+      if (ev.data.progress) progressHook?.(ev.data.progress)
+      else if (ev.data.error) reject(new Error(ev.data.error))
+      else if (ev.data.result) resolve(ev.data.result)
+    }
+    worker.onerror = (e) => reject(new Error(e.message))
+  })
+  postMsg({ type: 'init', width: firstCropped.width, height: firstCropped.height, scale: SUPERRES_SCALE })
+  postMsg({ type: 'add', index: 0, data: firstCropped.data }, [firstCropped.data.buffer])
+
+  let curCol = 0, curRow = 0
+  try {
+    for (let i = 1; i < total; i++) {
+      const row = Math.floor(i / side), col = i % side
+      await device.moveRel({ x: (col - curCol) * stepX, y: (row - curRow) * stepY }, false)
+      curCol = col; curRow = row
+      await settle(150); await waitForFrames(2, 1500)
+      say(`super-resolution: capturing frame ${i + 1}/${total}`)
+      const { img: cropped } = centerCropRgba(await decode(await captureFull()), 4096)
+      postMsg({ type: 'add', index: i, data: cropped.data }, [cropped.data.buffer])
+    }
+  } finally {
+    say('super-resolution: returning to the starting position')
+    await device.moveRel({ x: -curCol * stepX, y: -curRow * stepY }, false).catch(() => {})
+  }
+  say('super-resolution: fusing…')
+  postMsg({ type: 'finish' })
+  const r = await finished
+  worker.terminate()
+  say(`super-resolution: done, ${Math.round(r.coverage * 100)}% of the ${SUPERRES_SCALE}× grid covered by drizzled frames`)
+  const image = await encodeRgba8Png({ data: r.data, width: r.width, height: r.height })
+  return saveSnapshot(image, {
+    ...meta, size: { width: r.width, height: r.height },
+    name: `Super-resolution ${total} frames ×${SUPERRES_SCALE}`,
+    extra: { superres: { frames: total, scale: SUPERRES_SCALE, shifts: r.shifts, crop } },
   })
 }
