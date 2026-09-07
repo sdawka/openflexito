@@ -1,5 +1,6 @@
 /** Grab settled, downsampled greyscale frames from the device for browser-side image maths. */
 
+import { fetchSnapshotBitmap } from './snapshot'
 import type { Gray } from '../algo/sharpness'
 import { toGray } from '../algo/sharpness'
 import { device } from '../store/device.svelte'
@@ -26,9 +27,7 @@ function getCanvas(w: number, h: number): OffscreenCanvas | HTMLCanvasElement {
 export async function grabGray(maxWidth = 410, settleMs = 80): Promise<Gray> {
   if (settleMs) await new Promise((r) => setTimeout(r, settleMs))
   await waitForFrames(1, 1000)
-  const res = await fetch(device.url('/snapshot.jpg') + '?t=' + Date.now(), { cache: 'no-store' })
-  if (!res.ok) throw new Error(`snapshot failed: ${res.status}`)
-  const bmp = await createImageBitmap(await res.blob())
+  const bmp = await fetchSnapshotBitmap()
   const scale = Math.min(1, maxWidth / bmp.width)
   const w = Math.round(bmp.width * scale), h = Math.round(bmp.height * scale)
   const c = getCanvas(w, h)

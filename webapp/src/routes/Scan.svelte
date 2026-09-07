@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fetchSnapshot } from '../lib/api/snapshot'
   import { device } from '../lib/store/device.svelte'
   import { calibration } from '../lib/store/calibration.svelte'
   import { planScan, relativeMoves, type TilePlan } from '../lib/algo/scanPlan'
@@ -26,11 +27,7 @@
     return [[m[0][0] * k, m[0][1] * k], [m[1][0] * k, m[1][1] * k]]
   }
 
-  async function snapshotBlob(): Promise<Blob> {
-    const res = await fetch(device.url('/snapshot.jpg') + (fullRes ? '?full=1&' : '?') + 't=' + Date.now(), { cache: 'no-store' })
-    if (!res.ok) throw new Error(`snapshot failed ${res.status}`)
-    return res.blob()
-  }
+  const snapshotBlob = () => fetchSnapshot({ full: fullRes })
 
   async function run() {
     if (!csm) return

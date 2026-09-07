@@ -4,7 +4,8 @@ import json
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from openflexito.camera import RAW_HEADER, RAW_MAGIC, FakeCamera
+from openflexito.camera import RAW_HEADER, RAW_MAGIC
+from openflexito.fake_camera import FakeCamera
 from openflexito.config import CameraConfig
 from openflexito.events import EventBus
 from openflexito.rpc import INVALID_PARAMS, METHOD_NOT_FOUND, RpcRegistry

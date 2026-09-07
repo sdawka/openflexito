@@ -9,7 +9,7 @@
  *  Step mode: move in discrete steps, settle, measure any sharpness metric (e.g. Laplacian on a
  *  snapshot). Slower but metric-agnostic and independent of stage speed. */
 
-import type { FrameMeta, MoveResult } from '../api/types'
+import type { FrameMeta, MoveResult } from './types'
 
 export type SharpnessMetric = 'jpeg' | 'fom'
 

@@ -1,19 +1,5 @@
-export type Axis = 'x' | 'y' | 'z'
-export type Vec3 = Record<Axis, number>
-
-export interface FrameMeta {
-  seq: number
-  size: number
-  stream: 'main' | 'lores'
-  ts: number | null          // libcamera SensorTimestamp (ns, CLOCK_BOOTTIME)
-  t: number                  // device clock when metadata was recorded (ns, same clock)
-  exposure?: number | null
-  gain?: number | null
-  digital_gain?: number | null
-  colour_gains?: number[]
-  focus_fom?: number | null
-  lux?: number | null
-}
+export type { Axis, Vec3, FrameMeta, MoveResult } from '../algo/types'
+import type { Axis, Vec3, FrameMeta } from '../algo/types'
 
 export interface PositionEvent {
   t: number                  // ns, same clock as FrameMeta.ts
@@ -72,15 +58,6 @@ export interface DeviceStatus {
   camera: CameraStatus | null
   stage: StageStatus | null
   stream_clients: number
-}
-
-export interface MoveResult {
-  position: Vec3
-  t0: number
-  t1: number
-  start_hw: Vec3
-  end_hw: Vec3
-  cancelled: boolean
 }
 
 export interface RpcMethodDoc {

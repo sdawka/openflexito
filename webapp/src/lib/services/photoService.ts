@@ -3,6 +3,7 @@
  *  move for a photo except the z sweep of a focus stack, which ends where it started using the
  *  device's z backlash compensation (v3 Z_ONLY) so the final image matches the live view. */
 
+import { fetchSnapshot } from '../api/snapshot'
 import { waitForFrames } from '../api/sampler'
 import { exposureFuse, focusStack, type Rgba } from '../algo/stack'
 import type { RawDevelopRequest, RawDevelopResult, RawRgb16Result } from '../workers/rawWorker'
@@ -27,11 +28,7 @@ export interface PhotoOptions {
   onProgress?: (msg: string) => void
 }
 
-async function captureFull(): Promise<Blob> {
-  const res = await fetch(device.url('/snapshot.jpg') + '?full=1&t=' + Date.now(), { cache: 'no-store' })
-  if (!res.ok) throw new Error(`capture failed: ${res.status}`)
-  return res.blob()
-}
+const captureFull = () => fetchSnapshot({ full: true })
 
 let canvas: OffscreenCanvas | null = null
 function ctx2d(w: number, h: number): OffscreenCanvasRenderingContext2D {

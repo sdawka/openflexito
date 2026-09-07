@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
   import { onMount } from 'svelte'
   import { device } from '../lib/store/device.svelte'
   import { settings } from '../lib/store/settings.svelte'
@@ -69,8 +70,7 @@
   async function detectLoop() {
     if (!detecting) return
     try {
-      const res = await fetch(device.url('/snapshot.jpg') + '?t=' + Date.now(), { cache: 'no-store' })
-      const bmp = await createImageBitmap(await res.blob())
+      const bmp = await fetchSnapshotBitmap()
       detections = await ai.detect(bmp, settings.detectThreshold)
     } catch (e) { afLog = `detection: ${(e as Error).message}` }
     if (detecting) detectTimer = setTimeout(detectLoop, settings.detectIntervalMs)
@@ -89,8 +89,7 @@
     // Shift-drag: search the gallery for similar regions (alt: hold ctrl/cmd to follow instead)
     searching = true
     try {
-      const res = await fetch(device.url('/snapshot.jpg') + '?t=' + Date.now(), { cache: 'no-store' })
-      hits = await searchByImage(await res.blob(), r, 8)
+      hits = await searchByImage(await fetchSnapshot(), r, 8)
       for (const h of hits) {
         const key = `${h.item.id}/${h.blob}`
         if (!hitThumbs[key]) {

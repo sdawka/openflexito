@@ -1,6 +1,7 @@
 /** Focus stack fusion off the main thread. Slices arrive one at a time, 8-bit RGBA (from JPEG
  *  stills) or 16-bit RGB (developed RAW), are aligned to the first slice by phase correlation (a z move
  *  on a flexure stage shifts the image slightly) and fused into a Laplacian pyramid. */
+import { defineWorker, post } from './workerUtil'
 import { PyramidFuser, translatePlanes } from '../algo/pyramidFuse'
 import { displacement } from '../algo/fftTrack'
 import { grayDown } from '../algo/stack'
@@ -33,39 +34,34 @@ function grayOfPlanes(pl: [Float32Array, Float32Array, Float32Array], maxW = 410
   return { data, width: gw, height: gh }
 }
 
-self.onmessage = (ev: MessageEvent<StackMessage>) => {
-  const m = ev.data
-  try {
-    if (m.type === 'init') { W = m.width; H = m.height; depth = m.depth; fuser = new PyramidFuser(W, H); ref = null; shifts.length = 0; return }
-    if (m.type === 'add') {
-      if (!fuser) throw new Error('stack not initialised')
-      const planes = toPlanes(m.data)
-      const g = m.data instanceof Uint16Array ? grayOfPlanes(planes) : grayDown(m.data, W, H)
-      let dx = 0, dy = 0
-      if (!ref) ref = g
-      else {
-        const d = displacement(ref, g)   // same-size phase correlation: how far this slice moved from the first
-        const f = W / g.width
-        // accept a plausible, confident shift only (a badly defocused slice correlates poorly)
-        if (Number.isFinite(d.quality) && d.quality > 1.15 && Math.hypot(d.dx, d.dy) * f < W * 0.05) { dx = Math.round(-d.dx * f); dy = Math.round(-d.dy * f) }
-      }
-      shifts.push({ dx, dy })
-      fuser.addPlanes(translatePlanes(planes, W, H, dx, dy), m.index)
-      ;(self as any).postMessage({ progress: `slice ${m.index + 1} fused${dx || dy ? ` (aligned ${dx}, ${dy} px)` : ''}` })
-      return
+defineWorker<StackMessage>((m) => {
+  if (m.type === 'init') { W = m.width; H = m.height; depth = m.depth; fuser = new PyramidFuser(W, H); ref = null; shifts.length = 0; return }
+  if (m.type === 'add') {
+    if (!fuser) throw new Error('stack not initialised')
+    const planes = toPlanes(m.data)
+    const g = m.data instanceof Uint16Array ? grayOfPlanes(planes) : grayDown(m.data, W, H)
+    let dx = 0, dy = 0
+    if (!ref) ref = g
+    else {
+      const d = displacement(ref, g)   // same-size phase correlation: how far this slice moved from the first
+      const f = W / g.width
+      // accept a plausible, confident shift only (a badly defocused slice correlates poorly)
+      if (Number.isFinite(d.quality) && d.quality > 1.15 && Math.hypot(d.dx, d.dy) * f < W * 0.05) { dx = Math.round(-d.dx * f); dy = Math.round(-d.dy * f) }
     }
-    if (m.type === 'finish') {
-      if (!fuser) throw new Error('stack not initialised')
-      if (depth === 16) {
-        const r = fuser.result16()
-        ;(self as any).postMessage({ result: { ...r, shifts: [...shifts] } }, [r.data.buffer])
-      } else {
-        const r = fuser.result()
-        ;(self as any).postMessage({ result: { ...r, shifts: [...shifts] } }, [r.data.buffer])
-      }
-      fuser = null; ref = null
-    }
-  } catch (e) {
-    ;(self as any).postMessage({ error: (e as Error).message })
+    shifts.push({ dx, dy })
+    fuser.addPlanes(translatePlanes(planes, W, H, dx, dy), m.index)
+    post({ progress: `slice ${m.index + 1} fused${dx || dy ? ` (aligned ${dx}, ${dy} px)` : ''}` })
+    return
   }
-}
+  if (m.type === 'finish') {
+    if (!fuser) throw new Error('stack not initialised')
+    if (depth === 16) {
+      const r = fuser.result16()
+      post({ result: { ...r, shifts: [...shifts] } }, [r.data.buffer])
+    } else {
+      const r = fuser.result()
+      post({ result: { ...r, shifts: [...shifts] } }, [r.data.buffer])
+    }
+    fuser = null; ref = null
+  }
+})

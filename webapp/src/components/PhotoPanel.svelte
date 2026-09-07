@@ -1,6 +1,7 @@
 <script lang="ts">
   /** Photo capture: one big button, a mode chooser, mode-specific parameters, a status line. */
   import { device } from '../lib/store/device.svelte'
+import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
   import { saveSnapshot } from '../lib/store/gallery'
   import { takePhoto, type PhotoMode } from '../lib/services/photoService'
   import { recorder } from '../lib/services/recorder.svelte'
@@ -37,8 +38,7 @@
   async function quickFrame() {
     busy = true
     try {
-      const res = await fetch(device.url('/snapshot.jpg') + '?t=' + Date.now(), { cache: 'no-store' })
-      const item = await saveSnapshot(await res.blob(), { position: { ...device.position }, controls: device.controls ?? undefined, name: 'Quick frame' })
+      const item = await saveSnapshot(await fetchSnapshot(), { position: { ...device.position }, controls: device.controls ?? undefined, name: 'Quick frame' })
       status = { kind: 'ok', text: `saved "${item.name}" (stream frame)` }
       setTimeout(() => { if (status?.kind === 'ok') status = null }, 4000)
     } catch (e) { status = { kind: 'err', text: (e as Error).message } } finally { busy = false }
@@ -54,9 +54,9 @@
     if (recorder.status) status = { kind: 'err', text: recorder.status }
   }
   async function download() {
-    const res = await fetch(device.url('/snapshot.jpg') + '?full=1&t=' + Date.now(), { cache: 'no-store' })
+    const blob = await fetchSnapshot({ full: true })
     const a = document.createElement('a')
-    a.href = URL.createObjectURL(await res.blob()); a.download = `photo-${new Date().toISOString().replace(/[:.]/g, '-')}.jpg`; a.click()
+    a.href = URL.createObjectURL(blob); a.download = `photo-${new Date().toISOString().replace(/[:.]/g, '-')}.jpg`; a.click()
     setTimeout(() => URL.revokeObjectURL(a.href), 5000)
   }
 </script>

@@ -5,6 +5,7 @@
  *  gains (r, b) <-> (temperature, tint):  r = 2^(tint - temp/2),  b = 2^(tint + temp/2)
  *  so temp > 0 boosts blue (cooler), tint > 0 raises both r and b against green (magenta). */
 
+import { fetchSnapshotBitmap } from '../api/snapshot'
 import { device } from '../store/device.svelte'
 
 export const wb = $state({ picking: false, status: '' })
@@ -21,8 +22,7 @@ const lin = (v: number) => { const c = v / 255; return c <= 0.04045 ? c / 12.92 
 
 /** Mean linear RGB of the live frame around a point (fractions of the image), radius as a fraction of the width. */
 async function sampleLinear(frac: { x: number; y: number }, radiusFrac = 0.015): Promise<[number, number, number]> {
-  const res = await fetch(device.url('/snapshot.jpg') + '?t=' + Date.now(), { cache: 'no-store' })
-  const bmp = await createImageBitmap(await res.blob())
+  const bmp = await fetchSnapshotBitmap()
   const r = Math.max(2, Math.round(bmp.width * radiusFrac))
   const cx = Math.round(frac.x * bmp.width), cy = Math.round(frac.y * bmp.height)
   const x0 = Math.max(0, cx - r), y0 = Math.max(0, cy - r), w = Math.min(bmp.width - x0, 2 * r), h = Math.min(bmp.height - y0, 2 * r)
