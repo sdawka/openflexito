@@ -9,7 +9,7 @@
    *  `onSampleChange`; other callers, e.g. Live's search-hit preview, omit them). */
   import { onMount } from 'svelte'
   import OpenSeadragon from 'openseadragon'
-  import type { GalleryItem } from '../lib/store/gallery'
+  import { getBlob, type GalleryItem } from '../lib/store/gallery'
   import type { SampleRecord } from '../lib/store/sample.svelte'
   import TimelapseViewer from './TimelapseViewer.svelte'
   import { measure } from '../lib/services/measureService.svelte'
@@ -38,7 +38,28 @@
   let draft = $state<SampleRecord>(emptySample())
   $effect(() => { draft = item?.sample ? { ...item.sample } : emptySample() })
   function save() { onSampleChange?.({ ...draft }); editing = false }
+  // Fine-stack items carry a depth map: switch the shown blob between image / 'depth' / 'relief'.
+  const hasDepth = $derived(!!item?.stack?.depth && !isVideo && !isTimelapse)
+  let mode = $state<'image' | 'depth' | 'relief'>('image')
+  // svelte-ignore state_referenced_locally -- seed once from the prop (a fresh Viewer is mounted per item)
+  let viewBlob = $state<Blob | null>(blob)
+  $effect(() => {
+    if (!hasDepth || mode === 'image') { viewBlob = blob; return }
+    const wanted = mode, id = item!.id
+    getBlob(id, wanted).then((b) => { if (b) viewBlob = b })
+  })
+  let shown: Blob | null = null
+  $effect(() => {
+    const b = viewBlob
+    if (!viewer || !b || b === shown) return
+    shown = b
+    const url = URL.createObjectURL(b)
+    viewer.open({ type: 'image', url, buildPyramid: true } as any)
+    return () => URL.revokeObjectURL(url)
+  })
+
   onMount(() => {
+    shown = blob
     if (isTimelapse || !blob) return
     const url = URL.createObjectURL(blob)
     if (isVideo) { videoUrl = url; return () => URL.revokeObjectURL(url) }
@@ -110,6 +131,13 @@
   {#if item && onSampleChange}
     <button class="sample-toggle" onclick={() => (editing = !editing)}>{editing ? '✕' : '🏷'} sample{item.sample?.name ? `: ${item.sample.name}` : ''}</button>
   {/if}
+  {#if hasDepth}
+    <div class="modes">
+      <button class:on={mode === 'image'} onclick={() => (mode = 'image')}>Image</button>
+      <button class:on={mode === 'depth'} onclick={() => (mode = 'depth')}>Depth map</button>
+      <button class:on={mode === 'relief'} onclick={() => (mode = 'relief')}>Relief</button>
+    </div>
+  {/if}
   {#if isTimelapse && item}
     <TimelapseViewer {item} />
   {:else if isVideo}
@@ -168,4 +196,6 @@
   .sample-toggle { position: absolute; top: 12px; left: 12px; z-index: 51; }
   .sample-edit { position: absolute; top: 52px; left: 12px; z-index: 51; width: 260px; display: flex; flex-direction: column; gap: 6px; }
   .sample-edit label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+  .modes { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 51; display: flex; gap: 6px; }
+  .modes button.on { background: var(--accent); color: #fff; }
 </style>

@@ -55,12 +55,13 @@ defineWorker<StackMessage>((m) => {
   }
   if (m.type === 'finish') {
     if (!fuser) throw new Error('stack not initialised')
+    const depthIndex = fuser.depthIndex()
     if (depth === 16) {
       const r = fuser.result16()
-      post({ result: { ...r, shifts: [...shifts] } }, [r.data.buffer])
+      post({ result: { ...r, shifts: [...shifts], depthIndex } }, [r.data.buffer, depthIndex.buffer])
     } else {
       const r = fuser.result()
-      post({ result: { ...r, shifts: [...shifts] } }, [r.data.buffer])
+      post({ result: { ...r, shifts: [...shifts], depthIndex } }, [r.data.buffer, depthIndex.buffer])
     }
     fuser = null; ref = null
   }

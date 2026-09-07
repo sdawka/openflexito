@@ -18,7 +18,14 @@ export interface GalleryItem {
   /** blob keys: 'image' (snapshot or stitched mosaic), 'thumb', 'tile/<n>' */
   blobs: string[]
   /** focus stack: how it was taken and how much of the result each slice supplied */
-  stack?: { slices: number; stepZ: number; zs: number[]; contributions: number[]; method?: 'blocks' | 'pyramid'; centreZ?: number; span?: number; shifts?: { dx: number; dy: number }[]; source?: 'jpeg' | 'raw' }
+  stack?: {
+    slices: number; stepZ: number; zs: number[]; contributions: number[]; method?: 'blocks' | 'pyramid'; centreZ?: number; span?: number; shifts?: { dx: number; dy: number }[]; source?: 'jpeg' | 'raw'
+    /** depth-from-focus map derived alongside a pyramid fusion: blobs 'depth' (colour-mapped PNG),
+     *  'relief' (pseudo-3D shaded preview) and 'depth.bin' (raw per-pixel winning-slice index, 8-bit) */
+    depth?: { minZ: number; maxZ: number; colorMap: 'ramp' }
+  }
+  /** pixel-shift super-resolution: N sub-pixel-shifted stills fused by drizzle onto a finer grid */
+  superres?: { frames: number; scale: number; shifts: { dx: number; dy: number; quality: number }[]; crop: { width: number; height: number; x0: number; y0: number } | null }
   /** video: blob 'video' (WebM) recorded in the browser from the live view or the live focus stack */
   video?: { durationS: number; fps: number; source: string; mime: string }
   /** time-lapse: blobs 'f0000', 'f0001', ... one JPEG per frame, plus 'thumb' from the first frame.
@@ -117,7 +124,7 @@ export async function makeThumb(blob: Blob, size = 256): Promise<Blob> {
 
 export async function saveSnapshot(blob: Blob, meta: { position?: GalleryItem['position']; controls?: object; name?: string;
   /** extra item fields (stack, raw) and extra blobs (slices, raw data) stored alongside the image */
-  extra?: Partial<Pick<GalleryItem, 'stack' | 'raw'>>; extraBlobs?: Record<string, Blob>; thumbFrom?: Blob; size?: { width: number; height: number } }): Promise<GalleryItem> {
+  extra?: Partial<Pick<GalleryItem, 'stack' | 'raw' | 'superres'>>; extraBlobs?: Record<string, Blob>; thumbFrom?: Blob; size?: { width: number; height: number } }): Promise<GalleryItem> {
   const id = newId()
   const bmp = meta.size ?? await createImageBitmap(meta.thumbFrom ?? blob)
   const extraNames = Object.keys(meta.extraBlobs ?? {})
