@@ -5,7 +5,7 @@ Thin-device microscope stack. **Rule: the Pi only relays; all image maths lives 
 ## Commands
 - device: `cd device && .venv/bin/pytest -q` · run fake: `.venv/bin/python -m openflexito --fake --port 8080`
 - webapp: `cd webapp && npm run check && npx vitest --run && npm run build` · dev: `OPENFLEXITO_DEVICE=http://localhost:8080 npm run dev`
-- browser e2e (Playwright + installed Chrome): start the fake with `--webapp-dir webapp/dist --port 8099`, then `cd webapp && npm run test:e2e` (13 steps: tabs, jog, snapshot, both calibrations, drag-to-pan, autofocus, scan, settings, logs). `npm run test:e2e -- http://microscope.local` runs it on the real Pi (moves the stage, rewrites tuning); `E2E_MOVES=0` skips moves. Run it after any UI change: unit tests do not catch Svelte effect loops or leaked MJPEG connections.
+- browser e2e (Playwright + installed Chrome): start the fake with `--webapp-dir webapp/dist --port 8099`, then `cd webapp && npm run test:e2e` (29 steps: tabs, jog, snapshot, both calibrations, drag-to-pan, autofocus, scan, photo modes, stacks, live stack, video, measurement, histogram, scan regions, time-lapse, tracking, sample metadata, macros, settings, logs). `npm run test:e2e -- http://microscope.local` runs it on the real Pi (moves the stage, rewrites tuning); `E2E_MOVES=0` skips moves. Run it after any UI change: unit tests do not catch Svelte effect loops or leaked MJPEG connections.
 - image: `image/build-mac.sh` (mtools injection into the official Bookworm Lite image; needs `image/secrets.env`) is the working builder; `image/build.sh` (sdm) is untested. `sudo image/install.sh [--trim] [--readonly]` on a live Pi.
 
 ## Conventions
