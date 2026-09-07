@@ -3,6 +3,7 @@
    *  with a neutral picker and temperature/tint sliders. */
   import { device } from '../lib/store/device.svelte'
   import { wb, gainsToTempTint, tempTintToGains, neutralWholeField } from '../lib/services/whiteBalance.svelte'
+  import FlickerCheck from './FlickerCheck.svelte'
 
   const c = $derived(device.controls)
   const live = $derived(device.frame)
@@ -66,6 +67,7 @@
       <label class="check" style="margin-left:auto"><input type="checkbox" checked={c.AwbEnable} onchange={(e) => toggleAwb(e.currentTarget.checked)} /> auto</label>
     </div>
     {#if wb.status}<div class="status-line {wb.status.startsWith('white balance: red') ? 'ok' : wb.status.includes('…') ? 'busy' : 'err'}">{wb.status}</div>{/if}
+    <FlickerCheck />
   {:else}
     <span class="muted">camera not available</span>
   {/if}

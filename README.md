@@ -165,8 +165,18 @@ libcamera's `NoiseReductionMode` Fast and HighQuality are identical on the vc4 I
 remaining noise is shot noise (fixed by how full the pixel wells are, independent of how the LED and
 exposure share the photon budget) plus MJPEG compression. Neither the LED (firmware PWM at 64 kHz;
 row banding under 0.25 levels at 20–100 %) nor frame flicker (whole-frame mean stable to 0.1 level over
-66 stream frames) produces bands or waves. The browser-side **Smooth** mode (Focus panel: Off / Smooth
-/ Stack) averages the last ~4 frames while the stage is still and halves the visible noise.
+66 stream frames) produces bands or waves. The condenser LED is not PWM-dimmed at all: the firmware
+sets the TPS61060's current with its one-wire step interface (`cc_set_value` in `illumination.cpp`), so
+it is a true DC constant current; only the two auxiliary PWM outputs are chopped (64 kHz). Holding the
+motor coils energised (v3 behaviour) or releasing them makes no difference to the stream either
+(< 0.07 levels of band residual at 0.5–8 ms exposures, LED 10–100 %). The browser-side **Smooth** mode
+(Focus panel: Off / Smooth / Stack) averages the last ~4 frames while the stage is still and halves the
+visible noise. Because rolling "hum bars" could not be reproduced in the frames leaving the Pi, the
+Camera panel has a **Flicker check** (`algo/flicker.ts`): it samples what the browser displays ~200
+times a second for 3 s and reports torn (partially painted) frames, the dominant horizontal band with
+its period, amplitude and rolling speed (converted to the beat frequency with the shutter), and any
+whole-frame brightness pulsing, with a rows × frames residual picture. Run it while the waves are
+visible: a real light-source beat shows up as diagonal stripes with a steady speed.
 
 **Live focus stack** (Focus panel): small z vibrations move the plane of focus from frame to frame,
 so a running per-block "keep the sharpest" composite of the stream becomes an extended-depth-of-field
