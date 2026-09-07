@@ -287,65 +287,58 @@ await step('histogram samples the live view in the Camera panel', async () => {
   await nav('live')
   await page.locator('.panel:has(h3:has-text("Camera"))').scrollIntoViewIfNeeded()
   await page.waitForFunction(() => /mean \d+\/255/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 10000 })
-
-await step('time-lapse captures 3 frames and opens in the viewer', async () => {
-  await nav('live')
-  const panel = page.locator('.panel:has(h3:has-text("Time-lapse"))')
-  const intervalInput = panel.locator('.row').first().locator('input[type=number]')
-  await intervalInput.click({ clickCount: 3 }); await intervalInput.pressSequentially('1')
-  await panel.locator('.seg button:has-text("Frames")').click()
-  const frameInput = panel.locator('.row:has(.seg) input[type=number]')
-  await frameInput.click({ clickCount: 3 }); await frameInput.pressSequentially('3')
-  await panel.locator('button:has-text("Start time-lapse")').click()
-  await page.waitForFunction(() => /saved "Time-lapse/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 30000 })
-    .catch(async () => { throw new Error('time-lapse did not finish: ' + (await panel.innerText()).replace(/\s+/g, ' ').slice(-200)) })
-  await panel.locator('button:has-text("Open in viewer")').click()
-  await page.waitForSelector('.overlay canvas', { timeout: 5000 })
-  const playing = await page.locator('.overlay button:has-text("Play")').count()
-  expect(playing === 1, 'time-lapse viewer controls not shown')
-  await page.click('.overlay button.close')
 })
 
-await step('organism tracking finds tracks on the live stream and exports a CSV', async () => {
-  await nav('live')
-  const panel = '.panel:has(h3:has-text("Tracking"))'
-  await page.click(`${panel} button:has-text("Start tracking")`)
-  await page.waitForTimeout(2000)
-  await page.click(`${panel} button:has-text("Stop tracking")`)
-  await page.click(`${panel} button:has-text("Export CSV")`)
+if (moves) await step('scan 2×2 with autofocus every tile builds a height map', async () => {
+  await nav('scan')
+  for (const i of [0, 1]) {
+    const box = page.locator('main input[type=number]').nth(i)
+    await box.click({ clickCount: 3 }); await box.pressSequentially('2'); await page.waitForTimeout(200)
+  }
+  await page.selectOption('select:near(:text("focus"))', 'every')
+  await page.waitForFunction(() => /4 tiles/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 8000 })
+  await page.click('button:has-text("Start scan")')
+  const t0 = Date.now()
+  while (!(await page.locator('img[alt="stitched scan"]').count())) {
+    if (Date.now() - t0 > 240000) throw new Error('scan did not finish; last progress: ' + (await page.locator('main').innerText()).replace(/\s+/g, ' ').slice(-200))
+    await page.waitForTimeout(2000)
+  }
+  await page.selectOption('select:near(:text("focus"))', 'none')   // leave the panel in its default state for later steps
+  await nav('gallery')
+  await page.waitForFunction(() => /focus: every tile/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 8000 })
+  await page.locator('.card:has-text("Scan 2×2") button:has-text("Open")').first().click()
+  await page.waitForSelector('button:has-text("show height map")', { timeout: 5000 })
+  await page.click('button:has-text("show height map")')
+  const cells = await page.locator('.hm-cell').count()
+  expect(cells === 4, `expected 4 height-map cells, got ${cells}`)
+  await page.click('button:has-text("close")')
+})
+
+await step('spiral order and polygon region update the scan plan without moving the stage', async () => {
+  await nav('scan')
+  await page.waitForSelector('text=/\\d+ tiles of/', { timeout: 5000 })
+  const before = await page.locator('main').innerText()
+  const beforeCount = before.match(/(\d+) tiles of/)?.[1]
+  await page.selectOption('select:near(:text("order"))', 'spiral')
   await page.waitForTimeout(300)
-
-await step('sample metadata is captured on a quick frame and shown in the gallery', async () => {
-  await nav('live')
-  const samplePanel = page.locator('.panel:has(h3:has-text("Sample"))')
-  await samplePanel.locator('summary').click()
-  const nameInput = samplePanel.locator('input').first()
-  await nameInput.fill('E2E sample A1')
-  await page.click('button:has-text("Quick frame")')
-  await page.waitForFunction(() => /saved "Quick frame/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 10000 })
-  await nav('gallery'); await page.waitForTimeout(600)
-  expect(/E2E sample A1/.test(await page.locator('main').innerText()), 'gallery does not show the sample name on the new item')
+  const afterSpiral = await page.locator('main').innerText()
+  expect(/tiles of .* est\./.test(afterSpiral), 'tile count / time estimate missing after selecting spiral order: ' + afterSpiral.replace(/\s+/g, ' ').slice(0, 200))
+  await page.selectOption('select:near(:text("region"))', 'polygon')
+  await page.waitForSelector('.poly-canvas', { timeout: 5000 })
+  const box = await page.locator('.poly-canvas').boundingBox()
+  // click three points to draw a small triangular region, clipping the plan below the full grid's tile count
+  for (const [fx, fy] of [[0.5, 0.1], [0.1, 0.9], [0.9, 0.9]]) {
+    await page.mouse.click(box.x + fx * box.width, box.y + fy * box.height)
+  }
+  await page.waitForTimeout(300)
+  const afterPolygon = await page.locator('main').innerText()
+  const afterCount = afterPolygon.match(/(\d+) tiles of/)?.[1]
+  expect(!!afterCount, 'tile count missing after drawing a polygon region: ' + afterPolygon.replace(/\s+/g, ' ').slice(0, 200))
+  expect(Number(afterCount) <= Number(beforeCount), `polygon region did not clip the tile count (${beforeCount} -> ${afterCount})`)
+  // back to a plain rectangle scan for anyone re-running this file interactively
+  await page.selectOption('select:near(:text("region"))', 'rect')
+  await page.selectOption('select:near(:text("order"))', 'snake')
 })
-
-if (moves) await step('a recorded macro of two jogs replays and returns the stage', async () => {
-  await nav('live')
-  const macroPanel = page.locator('.panel:has(h3:has-text("Macro"))')
-  await macroPanel.locator('summary').click()
-  const p0 = await position()
-  await macroPanel.locator('button:has-text("Record")').click()
-  await page.click('button[title="D / →"]')
-  await page.waitForFunction((x1) => { const m = document.querySelector('nav')?.textContent?.match(/x\s+(-?\d+)/); return m && +m[1] === x1 }, p0.x + 500, { timeout: 8000 })
-  await page.click('button[title="A / ←"]')
-  await page.waitForFunction((x0) => { const m = document.querySelector('nav')?.textContent?.match(/x\s+(-?\d+)/); return m && +m[1] === x0 }, p0.x, { timeout: 8000 })
-  await macroPanel.locator('button:has-text("Stop")').click()
-  await macroPanel.locator('input[placeholder="macro name"]').fill('E2E jog macro')
-  await macroPanel.locator('button:has-text("Save")').click()
-  await page.waitForFunction(() => /E2E jog macro/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 5000 })
-  await macroPanel.locator('button[title="replay this macro"]').first().click()
-  await page.waitForFunction(() => /replay of .E2E jog macro. finished/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 20000 })
-  const pEnd = await position()
-  expect(pEnd.x === p0.x, `macro replay left x at ${pEnd.x}, expected back at the starting ${p0.x}`)
-  await macroPanel.locator('summary').click()
 
 if (moves) await step('super-resolution captures a dithered pattern and drizzles it to 2x', async () => {
   await nav('live')
@@ -381,6 +374,67 @@ if (moves) await step('fine focus stack produces a depth map with an image/depth
   await page.click('.modes button:has-text("Image")')
   await page.waitForTimeout(300)
   await page.click('button:has-text("close")')
+})
+
+await step('time-lapse captures 3 frames and opens in the viewer', async () => {
+  await nav('live')
+  const panel = page.locator('.panel:has(h3:has-text("Time-lapse"))')
+  const intervalInput = panel.locator('.row').first().locator('input[type=number]')
+  await intervalInput.click({ clickCount: 3 }); await intervalInput.pressSequentially('1')
+  await panel.locator('.seg button:has-text("Frames")').click()
+  const frameInput = panel.locator('.row:has(.seg) input[type=number]')
+  await frameInput.click({ clickCount: 3 }); await frameInput.pressSequentially('3')
+  await panel.locator('button:has-text("Start time-lapse")').click()
+  await page.waitForFunction(() => /saved "Time-lapse/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 30000 })
+    .catch(async () => { throw new Error('time-lapse did not finish: ' + (await panel.innerText()).replace(/\s+/g, ' ').slice(-200)) })
+  await panel.locator('button:has-text("Open in viewer")').click()
+  await page.waitForSelector('.overlay canvas', { timeout: 5000 })
+  const playing = await page.locator('.overlay button:has-text("Play")').count()
+  expect(playing === 1, 'time-lapse viewer controls not shown')
+  await page.click('.overlay button.close')
+})
+
+await step('organism tracking finds tracks on the live stream and exports a CSV', async () => {
+  await nav('live')
+  const panel = '.panel:has(h3:has-text("Tracking"))'
+  await page.click(`${panel} button:has-text("Start tracking")`)
+  await page.waitForTimeout(2000)
+  await page.click(`${panel} button:has-text("Stop tracking")`)
+  await page.click(`${panel} button:has-text("Export CSV")`)
+  await page.waitForTimeout(300)
+})
+
+await step('sample metadata is captured on a quick frame and shown in the gallery', async () => {
+  await nav('live')
+  const samplePanel = page.locator('.panel:has(h3:has-text("Sample"))')
+  await samplePanel.locator('summary').click()
+  const nameInput = samplePanel.locator('input').first()
+  await nameInput.fill('E2E sample A1')
+  await page.click('button:has-text("Quick frame")')
+  await page.waitForFunction(() => /saved "Quick frame/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 10000 })
+  await nav('gallery'); await page.waitForTimeout(600)
+  expect(/E2E sample A1/.test(await page.locator('main').innerText()), 'gallery does not show the sample name on the new item')
+})
+
+if (moves) await step('a recorded macro of two jogs replays and returns the stage', async () => {
+  await nav('live')
+  const macroPanel = page.locator('.panel:has(h3:has-text("Macro"))')
+  await macroPanel.locator('summary').click()
+  const p0 = await position()
+  await macroPanel.locator('button:has-text("Record")').click()
+  await page.click('button[title="D / →"]')
+  await page.waitForFunction((x1) => { const m = document.querySelector('nav')?.textContent?.match(/x\s+(-?\d+)/); return m && +m[1] === x1 }, p0.x + 500, { timeout: 8000 })
+  await page.click('button[title="A / ←"]')
+  await page.waitForFunction((x0) => { const m = document.querySelector('nav')?.textContent?.match(/x\s+(-?\d+)/); return m && +m[1] === x0 }, p0.x, { timeout: 8000 })
+  await macroPanel.locator('button:has-text("Stop")').click()
+  await macroPanel.locator('input[placeholder="macro name"]').fill('E2E jog macro')
+  await macroPanel.locator('button:has-text("Save")').click()
+  await page.waitForFunction(() => /E2E jog macro/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 5000 })
+  await macroPanel.locator('button[title="replay this macro"]').first().click()
+  await page.waitForFunction(() => /replay of .E2E jog macro. finished/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 20000 })
+  const pEnd = await position()
+  expect(pEnd.x === p0.x, `macro replay left x at ${pEnd.x}, expected back at the starting ${p0.x}`)
+  await macroPanel.locator('summary').click()
 })
 
 await step('no page errors during the run', async () => { expect(problems.length === 0, problems.join(' | ')) })

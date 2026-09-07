@@ -36,8 +36,14 @@ export interface GalleryItem {
   raw?: { bitDepth: number; bayer: string; blackLevel: number; gains: [number, number]; applied?: { lsc: boolean; ccm: boolean; gammaCurve: boolean; demosaic: string } }
   scan?: {
     cols: number; rows: number; overlap: number
-    tiles: { index: number; col: number; row: number; stage: { x: number; y: number }; x: number; y: number; width: number; height: number; blob: string }[]
+    tiles: { index: number; col: number; row: number; stage: { x: number; y: number }; x: number; y: number; width: number; height: number; blob: string
+      /** focused z for this tile (device steps): measured directly (focus 'every tile'), or predicted
+       *  from the height map (focus 'interpolate') — see `algo/heightMap.ts` and `routes/Scan.svelte`. */
+      z?: number; zMeasured?: boolean }[]
     positions?: { x: number; y: number }[]
+    /** how autofocus was used during this scan, and its region/order settings, for the gallery's height-map overlay */
+    focus?: { mode: 'none' | 'every' | 'interpolate'; step?: number; method?: 'plane' | 'bilinear' }
+    region?: { mode: 'rect' | 'polygon'; order: 'raster' | 'snake' | 'spiral' }
   }
   /** what was on the stage, copied from `store/sample.svelte.ts` at capture time (if it was filled in). */
   sample?: SampleRecord

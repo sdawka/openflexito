@@ -16,6 +16,7 @@
   import { currentScale, umPerPxAt } from '../lib/store/scaleCal.svelte'
   import { scaleForWidth, niceScaleBarLength, type Pt } from '../lib/algo/measure'
   import MeasurePanel from './MeasurePanel.svelte'
+  import HeightMapOverlay from './HeightMapOverlay.svelte'
 
   let { blob = null, width, item, onclose, onSampleChange }: { blob?: Blob | null; width?: number; item?: GalleryItem; onclose: () => void; onSampleChange?: (s: SampleRecord) => void } = $props()
   let el: HTMLDivElement | undefined = $state()
@@ -164,6 +165,7 @@
       {#if scaleBar}<div class="scalebar" style="width:{scaleBar.px / imgPxPerScreenPx}px"><span>{scaleBar.label}</span></div>{/if}
     </div>
     <div class="measure-dock"><MeasurePanel compact /></div>
+    {#if item?.scan}<HeightMapOverlay {item} />{/if}
   {/if}
   {#if editing && item && onSampleChange}
     <div class="sample-edit panel">
