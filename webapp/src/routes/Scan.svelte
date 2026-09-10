@@ -153,8 +153,6 @@
           await captureTile(t, focusMode === 'every' ? autofocusHere : undefined)
         }
       }
-      progress = 'returning to start'
-      await device.moveTo(origin, 'xy')
       if (cancel || !blobs.length) { progress = 'cancelled'; return }
       progress = 'stitching…'
       const res = await stitchInWorker({ tiles: blobs, maxDim: 8192, analysisWidth: 256, refine }, (m) => (progress = m))
@@ -169,6 +167,10 @@
     } catch (e) {
       progress = `error: ${(e as Error).message}`
     } finally {
+      // also on error: the stage must not stay wherever the scan died (z is left where autofocus put it)
+      const msg = progress
+      progress = 'returning to start'
+      try { await device.moveTo(origin, 'xy'); progress = msg } catch (e) { progress = `${msg} · could not return to the start: ${(e as Error).message}` }
       running = false
     }
   }

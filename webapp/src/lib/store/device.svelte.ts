@@ -115,12 +115,21 @@ class DeviceStore {
   zero(): Promise<unknown> { return this.guard(this.client.call('stage.zero')) }
   restorePosition(): Promise<unknown> { return this.guard(this.client.call('stage.restore_position')) }
 
+  private lightSeq = 0
+  private controlsSeq = 0
+
+  // Replies carry the full device state; an older request resolving after a newer one must not
+  // overwrite the store with the older state.
   async setLight(cc?: number, pwm?: number[]): Promise<void> {
-    this.light = await this.guard(this.client.call('light.set', { cc, pwm }))
+    const seq = ++this.lightSeq
+    const l = await this.guard(this.client.call('light.set', { cc, pwm }))
+    if (seq === this.lightSeq) this.light = l
   }
 
   async setControls(c: Partial<CameraControls>): Promise<void> {
-    this.controls = await this.guard(this.client.call<CameraControls>('camera.set_controls', c))
+    const seq = ++this.controlsSeq
+    const r = await this.guard(this.client.call<CameraControls>('camera.set_controls', c))
+    if (seq === this.controlsSeq) this.controls = r
   }
 
   async stageStatus(): Promise<StageStatus> {

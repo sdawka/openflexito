@@ -14,10 +14,18 @@
   const tt = $derived(gainsToTempTint(gains[0], gains[1]))
   let busy = $state(false)
   let timer: ReturnType<typeof setTimeout> | undefined
+  let pending: Record<string, unknown> = {}
 
+  // One debounce for every control here, so patches are MERGED: clearing the timer used to drop the
+  // previous patch outright (temperature then tint within 120 ms reverted the temperature; "auto
+  // exposure off" then a slider drag left AE on).
   function set(patch: Record<string, unknown>) {
+    pending = { ...pending, ...patch }
     clearTimeout(timer)
-    timer = setTimeout(async () => { busy = true; try { await device.setControls(patch) } finally { busy = false } }, 120)
+    timer = setTimeout(async () => {
+      const p = pending; pending = {}
+      busy = true; try { await device.setControls(p) } finally { busy = false }
+    }, 120)
   }
   // Switching an auto mode off freezes what the camera is doing right now instead of jumping back
   // to the last stored manual values (that is what turned the field green before).

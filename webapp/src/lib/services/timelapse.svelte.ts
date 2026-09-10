@@ -88,10 +88,13 @@ class TimelapseService {
     void this.finish()
   }
 
+  private inflight: Promise<void> | null = null
+
   private async tick(): Promise<void> {
     if (this.cancelled || !this.cfg) return
     try {
-      await this.captureOne()
+      this.inflight = this.captureOne()
+      await this.inflight
     } catch (e) {
       this.status = `frame ${this.captured}: ${(e as Error).message}`
     }
@@ -146,7 +149,10 @@ class TimelapseService {
     if (!this.active) return null
     this.active = false
     clearTimeout(this.timer)
-    if (this.cfg?.ledOff && this.savedLight) await device.setLight(this.savedLight.cc, this.savedLight.pwm).catch(() => {})
+    // Stop pressed mid-capture: let that frame finish (it switches the LED off at its end and pushes
+    // its frame) before restoring the light and saving, otherwise the LED ended up off and the frame lost
+    await this.inflight?.catch(() => {})
+    if (this.cfg?.ledOff && this.savedLight) await device.setLight(this.savedLight.cc, this.savedLight.pwm).catch((e) => { this.status = `could not restore the light: ${(e as Error).message}` })
     if (!this.frames.length) { this.status = ''; return null }
     this.status = 'saving…'
     const item = await saveTimelapse(this.frames.map((f) => f.blob), this.frames.map((f) => f.meta), {

@@ -79,6 +79,20 @@ async def test_restore_position_after_power_cycle(stage, transport, events, tmp_
     assert stage2.position["z"] == 0
     stage2.restore_position()
     assert stage2.position["z"] == 300
+    assert not stage2.lost_position()
+
+
+async def test_second_power_loss_restores_the_latest_saved_position(stage, transport, events):
+    """Without a service restart the fallback used to be the boot-time snapshot, not the last save."""
+    events.bind(asyncio.get_running_loop())
+    await stage.move_rel(z=300, compensate=False)
+    await stage.move_rel(x=40, compensate=False)
+    transport.pos = [0, 0, 0]
+    transport._target = [0, 0, 0]  # board forgot (brown-out while the service kept running)
+    stage._refresh_hw()
+    assert stage.lost_position()
+    stage.restore_position()
+    assert stage.position == {"x": 40, "y": 0, "z": 300}
 
 
 async def test_position_events_have_timestamps(stage, transport, events):

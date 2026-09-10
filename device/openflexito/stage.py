@@ -157,6 +157,9 @@ class Stage:
             self._saved_hw = None
 
     def _save_state(self) -> None:
+        # what restore_position() falls back to must be the last *saved* position, not the one this
+        # process booted with, or a second power loss without a restart restores a stale position
+        self._saved_hw = dict(self._hw)
         try:
             with self._state_lock:
                 self.state_file.parent.mkdir(parents=True, exist_ok=True)

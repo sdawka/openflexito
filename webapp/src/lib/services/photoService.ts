@@ -158,7 +158,7 @@ export async function takePhoto(o: PhotoOptions): Promise<GalleryItem> {
       }
     } finally {
       say('focus stack: returning to the starting focus')
-      await device.moveTo({ z: startZ }, 'z').catch(() => {})
+      await device.moveTo({ z: startZ }, 'z').catch((e) => say(`focus stack: could not return to z=${startZ}: ${(e as Error).message}`))
     }
     say('focus stack: aligning and merging…')
     // align every slice to the first (a z move on a flexure stage shifts the image a little):
@@ -197,8 +197,8 @@ export async function takePhoto(o: PhotoOptions): Promise<GalleryItem> {
       frames.push(await decode(await captureFull()))
     }
   } finally {
-    await device.setLight(base).catch(() => {})
-    if (lockAe) await device.setControls({ AeEnable: true }).catch(() => {})
+    await device.setLight(base).catch((e) => say(`LED stack: could not restore the LED to ${Math.round(base * 100)} %: ${(e as Error).message}`))
+    if (lockAe) await device.setControls({ AeEnable: true }).catch((e) => say(`LED stack: could not re-enable auto exposure: ${(e as Error).message}`))
   }
   say('LED stack: fusing…')
   return saveSnapshot(await encode(exposureFuse(frames)), { ...meta, name: `LED exposure stack ×${levels.length}` })
@@ -261,7 +261,7 @@ async function fineStack(o: PhotoOptions, say: (m: string) => void, meta: { posi
     }
   } finally {
     say('fine stack: returning to the focus plane')
-    await device.moveTo({ z: centreZ }, 'z').catch(() => {})
+    await device.moveTo({ z: centreZ }, 'z').catch((e) => say(`fine stack: could not return to z=${centreZ}: ${(e as Error).message}`))
   }
   say('fine stack: fusing…')
   post({ type: 'finish' })
@@ -352,7 +352,7 @@ async function superresPhoto(o: PhotoOptions, say: (m: string) => void, meta: { 
     }
   } finally {
     say('super-resolution: returning to the starting position')
-    await device.moveRel({ x: -curCol * stepX, y: -curRow * stepY }, false).catch(() => {})
+    await device.moveRel({ x: -curCol * stepX, y: -curRow * stepY }, false).catch((e) => say(`super-resolution: could not return to the start: ${(e as Error).message}`))
   }
   say('super-resolution: fusing…')
   postMsg({ type: 'finish' })

@@ -218,6 +218,7 @@ class PiCamera(CameraBase):
         super().__init__(cfg, state_dir, events)
         from picamera2 import Picamera2  # noqa: F401  (import check)
         self._picam = None
+        self._video_config: dict | None = None
         self._encoders: dict = {}
         self._meta_ring: deque = deque(maxlen=8)
         self._meta_lock = threading.Lock()
@@ -413,14 +414,31 @@ class PiCamera(CameraBase):
         # Under the same lock as _reinit/_raw/_full_still so we never poke a camera that is being
         # closed and reopened (set_controls on a closed Picamera2 raises).
         async with self._lock:
+            # keep the preview configuration current: picamera2 re-applies its `controls` whenever it
+            # switches back after a still, so stale values here would undo this very change
+            if self._video_config is not None:
+                self._video_config["controls"] = self._libcamera_controls(self.controls)
             if self._picam is not None:
                 await asyncio.to_thread(self._picam.set_controls, self._libcamera_controls(controls))
+
+    def _restore_controls_sync(self) -> None:
+        """Re-apply the persistent controls after a mode switch. `switch_mode_and_capture_*` returns to
+        the preview configuration and re-applies the controls *that configuration* was created with;
+        until 2026-09 those were the startup values, so every full-res or RAW still (focus stacks,
+        photos) silently reverted a white balance or exposure the user had set since."""
+        if self._picam is None:
+            return
+        try:
+            self._picam.set_controls(self._libcamera_controls(self.controls))
+        except Exception:  # noqa: BLE001
+            log.exception("could not restore camera controls after the still")
 
     def _still_controls(self) -> dict:
         """Controls for a mode switch (full-res still, raw). Switching configuration restarts
         libcamera's AE/AWB from their defaults and the still is taken on the first frames, so under
         auto modes the picture would ignore the exposure and colour the live view had settled on.
-        Freeze the live values from the latest frame metadata into manual controls instead."""
+        Freeze the live values from the latest frame metadata into manual controls instead. These
+        apply to the still only: `_restore_controls_sync` puts the persistent controls back."""
         controls = dict(self.controls)
         with self._meta_lock:
             last = self._meta_ring[-1] if self._meta_ring else {}
@@ -460,6 +478,7 @@ class PiCamera(CameraBase):
             picam.switch_mode_and_capture_file(still, buf, format="jpeg")
             return buf.getvalue()
         finally:
+            self._restore_controls_sync()
             self._start_encoders()
 
     async def capture_raw(self) -> bytes:
@@ -477,6 +496,7 @@ class PiCamera(CameraBase):
         try:
             arr = picam.switch_mode_and_capture_array(still, "raw")
         finally:
+            self._restore_controls_sync()
             self._start_encoders()
         raw16 = arr.view(np.uint16)[:h, :w] if arr.dtype == np.uint8 else arr[:h, :w]
         bayer = self.cfg.raw_format.replace("S", "").rstrip("0123456789P_") or "BGGR"

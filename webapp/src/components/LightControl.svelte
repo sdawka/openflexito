@@ -8,10 +8,14 @@
   function setCC(v: number) { clearTimeout(timer); timer = setTimeout(() => device.setLight(v).catch(() => {}), 80) }
   const pwmCount = $derived(device.light.channels?.pwm ?? 0)
   let pwmTimer: ReturnType<typeof setTimeout> | undefined
+  let pendingPwm: number[] | null = null
+  // all channels share one debounce, so keep the pending array across calls: rebuilding it from
+  // device.light.pwm on every call re-sent the previous channel's OLD value and reverted it
   function setPwm(i: number, v: number) {
     clearTimeout(pwmTimer)
-    const pwm = [...device.light.pwm]; while (pwm.length <= i) pwm.push(0); pwm[i] = v
-    pwmTimer = setTimeout(() => device.setLight(undefined, pwm).catch(() => {}), 80)
+    const pwm = pendingPwm ?? [...device.light.pwm]; while (pwm.length <= i) pwm.push(0); pwm[i] = v
+    pendingPwm = pwm
+    pwmTimer = setTimeout(() => { pendingPwm = null; device.setLight(undefined, pwm).catch(() => {}) }, 80)
   }
   const auxNames = ['darkfield ring', 'side LED']
   let presetName = $state('')
