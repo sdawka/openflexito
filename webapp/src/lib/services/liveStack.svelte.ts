@@ -4,6 +4,7 @@ import { device } from '../store/device.svelte'
 import { saveSnapshot, type GalleryItem } from '../store/gallery'
 import type { LiveStackMessage } from '../workers/liveStackWorker'
 import type { LiveStackStats } from '../algo/liveStack'
+import type { PositionEvent } from '../api/types'
 
 class LiveStack {
   active = $state(false)
@@ -18,7 +19,12 @@ class LiveStack {
   private canvas: OffscreenCanvas | null = null
   private size: { w: number; h: number } | null = null
   private inflight = false
-  private lastPos = ''
+  private dropNext = false   // a frame sent before a reset is answered after it: discard that stale composite
+  /** ms to wait after the last position event before trusting frames again (MJPEG latency + settling) */
+  settleMs = 400
+  private lastMoveEvent: PositionEvent | null = null
+  private settleUntil = 0
+  private settleTs = 0
   private lastComposite: { data: Uint8ClampedArray; width: number; height: number } | null = null
 
   start(mode: 'stack' | 'average' = 'stack'): void {
@@ -26,9 +32,11 @@ class LiveStack {
     if (this.active) this.stop()
     this.mode = mode
     this.active = true
+    this.lastMoveEvent = device.lastMove; this.settleUntil = 0; this.settleTs = 0
     this.worker = new Worker(new URL('../workers/liveStackWorker.ts', import.meta.url), { type: 'module' })
     this.worker.onmessage = async (ev) => {
       this.inflight = false
+      if (this.dropNext) { this.dropNext = false; return }
       if (ev.data.error) { console.error('live stack:', ev.data.error); return }
       const { composite, width, height, stats } = ev.data
       this.lastComposite = { data: composite, width, height }
@@ -44,21 +52,32 @@ class LiveStack {
     clearInterval(this.timer)
     this.worker?.terminate(); this.worker = null
     this.composite?.close(); this.composite = null
-    this.stats = null; this.size = null; this.inflight = false; this.lastComposite = null
+    this.stats = null; this.size = null; this.inflight = false; this.dropNext = false; this.lastComposite = null
   }
 
   reset(): void {
     this.worker?.postMessage({ type: 'reset' } as LiveStackMessage)
-    this.stats = null
+    this.dropNext = this.inflight
+    this.stats = null; this.lastComposite = null
+    this.composite?.close(); this.composite = null
   }
 
   private tick(): void {
     const img = this.source
     if (!img || !img.naturalWidth || !this.worker || this.inflight) return
-    // any stage motion invalidates the composite
-    const pos = `${device.position.x},${device.position.y},${device.position.z}`
-    if (device.moving) { this.lastPos = ''; return }
-    if (pos !== this.lastPos) { if (this.lastPos) this.reset(); this.lastPos = pos }
+    // Any position event (start or end of a move, zero, jog back to the same spot) invalidates the
+    // composite. Frames are then ignored while the stage moves and until both the wall clock and the
+    // frame timestamps say the stream shows the settled stage: the <img> lags the events by a few frames.
+    const mv = device.lastMove
+    if (mv !== this.lastMoveEvent) {
+      this.lastMoveEvent = mv
+      this.settleUntil = performance.now() + this.settleMs
+      this.settleTs = mv ? mv.t + this.settleMs * 1e6 : 0
+      this.reset()
+    }
+    if (device.moving || performance.now() < this.settleUntil) return
+    const fts = device.frame ? (device.frame.ts ?? device.frame.t) : null
+    if (fts != null && fts < this.settleTs) return
     const w = img.naturalWidth, h = img.naturalHeight
     if (!this.size || this.size.w !== w || this.size.h !== h) {
       this.size = { w, h }

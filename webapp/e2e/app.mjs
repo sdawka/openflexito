@@ -219,6 +219,18 @@ await step('live focus stack builds a composite and saves it', async () => {
   await page.waitForTimeout(1500)
   const visible = await page.locator('.view canvas.composite').evaluate((c) => c.width > 0 && getComputedStyle(c).opacity !== '0')
   expect(visible, 'composite canvas not shown')
+  if (moves) {
+    // any stage movement restarts the composite: the frame count drops and climbs again
+    const frames = () => page.evaluate(() => +(document.querySelector('main')?.textContent?.match(/(\d+) frames · /)?.[1] ?? 0))
+    const before = await frames()
+    expect(before >= 5, `expected a few frames stacked before the jog, got ${before}`)
+    await page.click('button[title="D / →"]')
+    await page.waitForFunction((n) => { const m = document.querySelector('main')?.textContent?.match(/(\d+) frames · /); return m && +m[1] < n }, before, { timeout: 8000 })
+      .catch(async () => { throw new Error(`live stack kept its ${before} frames across a jog (now ${await frames()})`) })
+    await page.waitForFunction(() => /\d+ frames · \d+ % of blocks/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 15000 })
+    await page.click('button[title="A / ←"]')
+    await page.waitForTimeout(1500)
+  }
   await page.click('.panel:has(h3:has-text("Focus")) button:has-text("Save")')
   await page.waitForFunction(() => /saved "Live stack/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 10000 })
   await page.click('.panel:has(h3:has-text("Focus")) .seg button:has-text("Off")')

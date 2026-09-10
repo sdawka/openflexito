@@ -59,7 +59,8 @@
   let compCanvas: HTMLCanvasElement | undefined = $state()
   $effect(() => {
     const bmp = liveStack.composite, c = compCanvas
-    if (!bmp || !c) return
+    if (!c) return
+    if (!bmp) { c.getContext('2d')!.clearRect(0, 0, c.width, c.height); return }   // reset (stage moved): show the live image again
     if (c.width !== bmp.width || c.height !== bmp.height) { c.width = bmp.width; c.height = bmp.height }
     c.getContext('2d')!.drawImage(bmp, 0, 0)
   })

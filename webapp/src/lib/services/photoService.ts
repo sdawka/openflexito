@@ -8,9 +8,7 @@ import { waitForFrames } from '../api/sampler'
 import { exposureFuse, focusStack, type Rgba } from '../algo/stack'
 import type { RawDevelopRequest, RawDevelopResult, RawRgb16Result } from '../workers/rawWorker'
 import { encodePng16 } from '../png16'
-import { grayDown } from '../algo/stack'
-import { displacement } from '../algo/fftTrack'
-import { translateRgba } from '../algo/pyramidFuse'
+import { SliceAligner, luminance, translateRgbaSubpixel } from '../algo/align'
 import { toRgba8 } from '../algo/rawdev'
 import type { StackMessage } from '../workers/stackWorker'
 import type { SuperresMessage } from '../workers/superresWorker'
@@ -163,12 +161,12 @@ export async function takePhoto(o: PhotoOptions): Promise<GalleryItem> {
       await device.moveTo({ z: startZ }, 'z').catch(() => {})
     }
     say('focus stack: aligning and merging…')
-    // align every slice to the first (a z move on a flexure stage shifts the image a little)
-    const ref = grayDown(frames[0].data, frames[0].width, frames[0].height)
-    for (let i = 1; i < frames.length; i++) {
-      const g = grayDown(frames[i].data, frames[i].width, frames[i].height), d = displacement(ref, g), f = frames[i].width / g.width
-      if (Number.isFinite(d.quality) && d.quality > 1.15 && Math.hypot(d.dx, d.dy) * f < frames[i].width * 0.05)
-        frames[i] = { ...frames[i], data: translateRgba(frames[i].data, frames[i].width, frames[i].height, Math.round(-d.dx * f), Math.round(-d.dy * f)) }
+    // align every slice to the first (a z move on a flexure stage shifts the image a little):
+    // neighbour-chained, sub-pixel (algo/align)
+    const aligner = new SliceAligner()
+    for (let i = 0; i < frames.length; i++) {
+      const d = aligner.next(luminance(frames[i].data, frames[i].width, frames[i].height))
+      if (i && Math.hypot(d.dx, d.dy) >= 0.05) frames[i] = { ...frames[i], data: translateRgbaSubpixel(frames[i].data, frames[i].width, frames[i].height, -d.dx, -d.dy) }
     }
     const { image, contributions } = focusStack(frames)
     const shares = contributions.map((c) => Math.round(c * 100))

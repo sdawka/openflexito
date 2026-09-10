@@ -210,7 +210,7 @@
         <div class="seg">
           <button class:on={!liveStack.active} onclick={() => liveStack.stop()}>Off</button>
           <button class:on={liveStack.active && liveStack.mode === 'average'} onclick={() => liveStack.start('average')} disabled={!device.connected} title="average the last ~4 frames while the stage is still: halves the noise">Smooth</button>
-          <button class:on={liveStack.active && liveStack.mode === 'stack'} onclick={() => liveStack.start('stack')} disabled={!device.connected} title="keep the sharpest blocks over time: extended depth of field from z vibration">Stack</button>
+          <button class:on={liveStack.active && liveStack.mode === 'stack'} onclick={() => liveStack.start('stack')} disabled={!device.connected} title="weight each block by sharpness over time: extended depth of field from z vibration, noise averaged where the focus is steady; restarts whenever the stage moves">Stack</button>
         </div>
         {#if liveStack.active}
           <button onclick={() => liveStack.reset()} title="start afresh">Reset</button>
@@ -218,7 +218,7 @@
         {/if}
       </div>
       {#if liveStack.active && liveStack.stats}
-        <div class="status-line busy">{liveStack.stats.frames} frames{liveStack.mode === 'stack' ? ` · ${Math.round(liveStack.stats.replaced * 100)} % of blocks refreshed by the last frame` : ' averaged'}{liveStack.stats.shift.dx || liveStack.stats.shift.dy ? ` · aligned ${liveStack.stats.shift.dx}, ${liveStack.stats.shift.dy} px` : ''}</div>
+        <div class="status-line busy">{liveStack.stats.frames} frames{liveStack.mode === 'stack' ? ` · ${Math.round(liveStack.stats.replaced * 100)} % of blocks sharpened by the last frame` : ' averaged'}{liveStack.stats.shift.dx || liveStack.stats.shift.dy ? ` · aligned ${liveStack.stats.shift.dx}, ${liveStack.stats.shift.dy} px` : ''}</div>
       {/if}
       <details class="help">
         <summary>What these do</summary>

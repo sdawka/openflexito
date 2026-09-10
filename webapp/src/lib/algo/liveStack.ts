@@ -1,97 +1,134 @@
 /** Temporal focus stacking of the live stream ("lucky imaging" for depth of field).
  *
- *  Small z vibrations move the plane of focus a little from frame to frame. For every 16×16 block the
- *  composite keeps the content of the frame in which that block was sharpest (Laplacian energy), so
- *  over a second or two the live view accumulates an extended-depth-of-field image without moving
- *  the stage. Each frame is first aligned to the composite (xy jitter), replacements are feathered
- *  between blocks, and the stored sharpness decays slowly so the composite follows a genuine change of
- *  scene instead of freezing on stale frames. */
+ *  Small z vibrations move the plane of focus a little from frame to frame. The composite is a
+ *  per-pixel weighted average of the recent frames where each 16×16 block weights a frame by
+ *  (sharpness / best sharpness seen)^power: the sharpest frames dominate a block, frames of equal
+ *  sharpness are averaged (so a still scene gets its noise averaged away instead of flickering),
+ *  and blurrier frames barely count. Sharpness is Laplacian energy on a half-resolution luminance,
+ *  which is far less sensitive to JPEG noise than the full-resolution measure. Each frame is aligned
+ *  to the first one (xy jitter); a large shift means the scene moved and restarts the composite. The
+ *  accumulators forget old frames and the stored best sharpness decays slowly, so the composite
+ *  follows a genuine change of scene instead of freezing on stale frames.
+ *
+ *  Previous version replaced whole blocks whenever a frame beat the stored sharpness by 5 %: JPEG
+ *  noise alone fluctuates more than that, so the composite was the latest frame with a lag. */
 
 import { displacement } from './fftTrack'
 import type { Gray } from './sharpness'
 import { grayDown } from './stack'
-import { translateRgba } from './pyramidFuse'
+import { translateRgbaSubpixel } from './align'
 
-export interface LiveStackStats { frames: number; replaced: number /* fraction of blocks refreshed by the last frame */; shift: { dx: number; dy: number }; coverage: number /* fraction of blocks ever filled */ }
+export interface LiveStackStats { frames: number; replaced: number /* fraction of blocks the last frame sharpened noticeably */; shift: { dx: number; dy: number }; coverage: number /* fraction of blocks ever filled */ }
 
 export class LiveStacker {
   composite: Uint8ClampedArray
-  private best: Float32Array
-  private filled: Uint8Array
+  private acc: Float32Array      // Σ weight·rgb per pixel
+  private wsum: Float32Array     // Σ weight per pixel
+  private best: Float32Array     // per block: decayed running maximum of the sharpness
   private cellsX: number; private cellsY: number
   private ref: Gray | null = null
   frames = 0
-  /** per-frame multiplier on the stored sharpness; 0.99 ≈ a block is up for replacement after ~1–2 s at 10 fps */
-  decay = 0.99
-  /** a new block must beat the stored sharpness by this factor to replace it */
-  margin = 1.05
+  /** how strongly sharper frames dominate a block: weight = (sharpness / best)^power */
+  power = 4
+  /** smallest weight of any frame, so a blurrier new scene still takes over within ~3 s at 8 fps */
+  floor = 0.02
+  /** per-frame multiplier on the accumulated weights (frames older than ~25 are forgotten) */
+  forget = 0.96
+  /** per-frame multiplier on the stored best sharpness */
+  bestDecay = 0.995
+  /** xy shift (fraction of the width) beyond which the scene has moved: the composite restarts */
+  maxShift = 0.05
 
   constructor(public width: number, public height: number, public cell = 16) {
     this.cellsX = Math.ceil(width / cell); this.cellsY = Math.ceil(height / cell)
     this.composite = new Uint8ClampedArray(width * height * 4)
+    this.acc = new Float32Array(width * height * 3)
+    this.wsum = new Float32Array(width * height)
     this.best = new Float32Array(this.cellsX * this.cellsY).fill(-1)
-    this.filled = new Uint8Array(this.cellsX * this.cellsY)
   }
 
   reset(): void {
-    this.composite.fill(0); this.best.fill(-1); this.filled.fill(0); this.ref = null; this.frames = 0
+    this.composite.fill(0); this.acc.fill(0); this.wsum.fill(0); this.best.fill(-1); this.ref = null; this.frames = 0
   }
 
+  /** Per-block Laplacian energy of the 2×2-averaged luminance (noise-robust, 4× cheaper). */
   private energies(rgba: Uint8ClampedArray): Float32Array {
     const { width: w, height: h, cell, cellsX } = this
-    const lum = new Float32Array(w * h)
-    for (let i = 0, p = 0; i < w * h; i++, p += 4) lum[i] = 0.299 * rgba[p] + 0.587 * rgba[p + 1] + 0.114 * rgba[p + 2]
+    const w2 = w >> 1, h2 = h >> 1
+    const lum = new Float32Array(w2 * h2)
+    for (let y = 0; y < h2; y++) for (let x = 0; x < w2; x++) {
+      let s = 0
+      for (let dy = 0; dy < 2; dy++) { let p = ((2 * y + dy) * w + 2 * x) * 4; for (let dx = 0; dx < 2; dx++, p += 4) s += 0.299 * rgba[p] + 0.587 * rgba[p + 1] + 0.114 * rgba[p + 2] }
+      lum[y * w2 + x] = s * 0.25
+    }
     const e = new Float32Array(this.cellsX * this.cellsY)
-    for (let y = 1; y < h - 1; y++) {
-      const cy = Math.floor(y / cell) * cellsX
-      for (let x = 1; x < w - 1; x++) {
-        const i = y * w + x
-        const lap = 4 * lum[i] - lum[i - 1] - lum[i + 1] - lum[i - w] - lum[i + w]
-        e[cy + Math.floor(x / cell)] += lap * lap
+    const half = cell / 2
+    for (let y = 1; y < h2 - 1; y++) {
+      const cy = Math.floor(y / half) * cellsX
+      for (let x = 1; x < w2 - 1; x++) {
+        const i = y * w2 + x
+        const lap = 4 * lum[i] - lum[i - 1] - lum[i + 1] - lum[i - w2] - lum[i + w2]
+        e[cy + Math.floor(x / half)] += lap * lap
       }
     }
     return e
   }
 
   update(frame: Uint8ClampedArray): LiveStackStats {
-    const { width: w, height: h, cell, cellsX, cellsY } = this
-    // xy alignment against the first frame of this composite
+    const { width: w, height: h, cell, cellsX, cellsY, power, floor, forget } = this
+    // xy alignment against the first frame of this composite; a big shift means the scene moved
     const g = grayDown(frame, w, h, 205)
     let dx = 0, dy = 0
-    if (!this.ref) this.ref = g
-    else {
+    if (this.ref) {
       const d = displacement(this.ref, g), f = w / g.width
-      if (Number.isFinite(d.quality) && d.quality > 1.15 && Math.hypot(d.dx, d.dy) * f < w * 0.05) { dx = Math.round(-d.dx * f); dy = Math.round(-d.dy * f) }
-    }
-    const aligned = translateRgba(frame, w, h, dx, dy)
-    const e = this.energies(aligned)
-    const mask = new Float32Array(cellsX * cellsY)
-    let replaced = 0
-    for (let c = 0; c < mask.length; c++) {
-      this.best[c] *= this.decay
-      if (!this.filled[c] || e[c] > this.best[c] * this.margin) {
-        mask[c] = 1; this.best[c] = e[c]; this.filled[c] = 1; replaced++
+      if (Number.isFinite(d.quality) && d.quality > 1.15) {
+        const r = Math.hypot(d.dx, d.dy) * f
+        if (r >= w * this.maxShift) this.reset()
+        else if (r >= 0.25) { dx = -d.dx * f; dy = -d.dy * f }
       }
     }
-    // feathered blend: per-pixel weight is the bilinear interpolation of the block mask
-    const comp = this.composite
+    if (!this.ref) this.ref = g
+    const aligned = dx || dy ? translateRgbaSubpixel(frame, w, h, dx, dy) : frame
+    const e = this.energies(aligned)
+    // per block: weight of this frame and the factor that re-expresses the old accumulation
+    // relative to a new best (the weights are pure powers of the ratio, so this is exact)
+    const wgt = new Float32Array(cellsX * cellsY), fac = new Float32Array(cellsX * cellsY)
+    let replaced = 0
+    for (let c = 0; c < wgt.length; c++) {
+      const b = this.best[c] * this.bestDecay
+      if (b <= 0) { wgt[c] = 1; fac[c] = forget; this.best[c] = Math.max(e[c], 0); replaced++; continue }
+      if (e[c] > b) {
+        wgt[c] = 1; fac[c] = forget * Math.pow(b / e[c], power); this.best[c] = e[c]
+        if (e[c] > b * 1.05) replaced++
+      } else { wgt[c] = Math.max(floor, Math.pow(e[c] / b, power)); fac[c] = forget; this.best[c] = b }
+    }
+    // feathered accumulation: per-pixel weight and factor are the bilinear interpolation of the block maps
+    const xs0 = new Int32Array(w), xs1 = new Int32Array(w), txs = new Float32Array(w)
+    for (let x = 0; x < w; x++) {
+      const fx = Math.min(cellsX - 1, Math.max(0, (x + 0.5) / cell - 0.5)), x0 = Math.floor(fx)
+      xs0[x] = x0; xs1[x] = Math.min(cellsX - 1, x0 + 1); txs[x] = fx - x0
+    }
+    const { acc, wsum, composite: comp } = this
     for (let y = 0; y < h; y++) {
       const fy = Math.min(cellsY - 1, Math.max(0, (y + 0.5) / cell - 0.5)), y0 = Math.floor(fy), y1 = Math.min(cellsY - 1, y0 + 1), ty = fy - y0
+      const r0 = y0 * cellsX, r1 = y1 * cellsX
       for (let x = 0; x < w; x++) {
-        const fx = Math.min(cellsX - 1, Math.max(0, (x + 0.5) / cell - 0.5)), x0 = Math.floor(fx), x1 = Math.min(cellsX - 1, x0 + 1), tx = fx - x0
-        const wgt = (mask[y0 * cellsX + x0] * (1 - tx) + mask[y0 * cellsX + x1] * tx) * (1 - ty) + (mask[y1 * cellsX + x0] * (1 - tx) + mask[y1 * cellsX + x1] * tx) * ty
-        if (wgt <= 0) continue
-        const p = (y * w + x) * 4
-        if (wgt >= 1) { comp[p] = aligned[p]; comp[p + 1] = aligned[p + 1]; comp[p + 2] = aligned[p + 2]; comp[p + 3] = 255; continue }
-        comp[p] = comp[p] + (aligned[p] - comp[p]) * wgt
-        comp[p + 1] = comp[p + 1] + (aligned[p + 1] - comp[p + 1]) * wgt
-        comp[p + 2] = comp[p + 2] + (aligned[p + 2] - comp[p + 2]) * wgt
-        comp[p + 3] = 255
+        const x0 = xs0[x], x1 = xs1[x], tx = txs[x]
+        const a00 = (1 - tx) * (1 - ty), a01 = tx * (1 - ty), a10 = (1 - tx) * ty, a11 = tx * ty
+        const wt = wgt[r0 + x0] * a00 + wgt[r0 + x1] * a01 + wgt[r1 + x0] * a10 + wgt[r1 + x1] * a11
+        const f = fac[r0 + x0] * a00 + fac[r0 + x1] * a01 + fac[r1 + x0] * a10 + fac[r1 + x1] * a11
+        const i = y * w + x, q = i * 3, p = i * 4
+        const s = wsum[i] * f + wt
+        acc[q] = acc[q] * f + aligned[p] * wt
+        acc[q + 1] = acc[q + 1] * f + aligned[p + 1] * wt
+        acc[q + 2] = acc[q + 2] * f + aligned[p + 2] * wt
+        wsum[i] = s
+        const inv = 1 / s
+        comp[p] = acc[q] * inv; comp[p + 1] = acc[q + 1] * inv; comp[p + 2] = acc[q + 2] * inv; comp[p + 3] = 255
       }
     }
     this.frames++
-    let filled = 0; for (let c = 0; c < this.filled.length; c++) filled += this.filled[c]
-    return { frames: this.frames, replaced: replaced / mask.length, shift: { dx, dy }, coverage: filled / mask.length }
+    return { frames: this.frames, replaced: replaced / wgt.length, shift: { dx: Math.round(dx), dy: Math.round(dy) }, coverage: 1 }
   }
 }
 
