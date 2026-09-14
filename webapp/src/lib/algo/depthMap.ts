@@ -2,8 +2,9 @@
  *  index of the slice whose Laplacian energy won at the finest pyramid level (the sharpest slice at
  *  that pixel). Paired with each slice's z this is a coarse depth map (z steps), noisy at the pixel
  *  level near ties between adjacent slices; a small majority-vote smoothing pass cleans it up before
- *  colour-mapping or relief shading. No hardware z-steps-to-micrometres factor exists yet in this
- *  codebase, so depth is reported in z steps only. */
+ *  colour-mapping or relief shading. `depthZMap` itself just looks up z (in whatever unit `zs` is);
+ *  `stepsToUm`/`depthLegend` below convert to micrometres using Settings' `stageStepUm.z` where a
+ *  caller has it, and fall back to plain z steps where they don't. */
 
 export interface DepthStats { min: number; max: number }
 
@@ -48,6 +49,24 @@ export function depthStats(z: Float32Array): DepthStats {
   for (const v of z) { if (v < min) min = v; if (v > max) max = v }
   if (!Number.isFinite(min)) { min = 0; max = 0 }
   return { min, max }
+}
+
+/** Convert a z lookup table (stage steps, as passed to `depthZMap`) to micrometres, given the stage's
+ *  z distance-per-step (Settings' `stageStepUm.z`, `store/settings.svelte.ts`; 0.05 µm/step by
+ *  default on this rig). Feed the result to `depthZMap` in place of the raw step values to get a
+ *  z map already in µm — `colorizeDepth`/`reliefShade`/`depthStats` are unit-agnostic, so nothing
+ *  else needs to change. */
+export function stepsToUm(zs: number[], umPerStep: number): number[] {
+  return zs.map((z) => z * umPerStep)
+}
+
+export interface DepthLegend extends DepthStats { unit: 'µm' | 'steps' }
+
+/** Legend for a depth map's min/max: µm if a positive z µm/step factor is supplied (i.e. `zs` was
+ *  converted with `stepsToUm` before `depthZMap`), plain z steps otherwise — not every rig has that
+ *  factor calibrated, so steps is the honest fallback rather than a fabricated distance. */
+export function depthLegend(stats: DepthStats, umPerStep?: number): DepthLegend {
+  return { ...stats, unit: umPerStep && umPerStep > 0 ? 'µm' : 'steps' }
 }
 
 // A few hand-picked stops of a blue -> cyan -> green -> yellow -> red colour ramp (cheap

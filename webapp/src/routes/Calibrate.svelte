@@ -13,6 +13,8 @@
   import { setLensShading, setStaticGreenEqualisation, setContrastEnhancement, isLensShadingCalibrated, CT_CALIBRATED, CT_UNCALIBRATED, type Tuning } from '../lib/algo/tuning'
   import { calibrate1D, contrast, imageToStageMatrix, moveUntilMotionDetected } from '../lib/algo/csm'
   import LstView from '../components/LstView.svelte'
+  import { captureFlatField } from '../lib/services/photo/rawPhoto'
+  import { saveRawFlatField } from '../lib/store/calibration.svelte'
 
   // ---- shared state -------------------------------------------------------------------------
   let previewImg: HTMLImageElement | undefined = $state()
@@ -143,6 +145,13 @@
     await device.refreshStatus()
   })
   const pxPerStep = (v: [number, number] | number[]) => Math.hypot(v[0], v[1])
+
+  // ---- RAW flat field (device.md §2 `/flat.bin`): per-channel gain maps that override the tuning's
+  // ALSC tables in every RAW-family develop (algo/rawdev.ts#prepareMosaic prefers it when present) ----
+  const rawFlat = $derived(calibration.rawFlatField)
+  let flatFrames = $state(4)
+  const captureFlat = () => run('flat field', async () => { await captureFlatField(say, flatFrames) })
+  const clearFlat = () => saveRawFlatField(null)
 </script>
 
 <div class="wrap">
@@ -241,6 +250,25 @@
       <p class="muted small">Stored for {settings.deviceUrl || 'this device'} in this browser. Stage backlash currently used by the microscope:
         {device.status?.stage?.backlash ? `x ${device.status.stage.backlash.x}, y ${device.status.stage.backlash.y}, z ${device.status.stage.backlash.z}` : '…'}.</p>
     {/if}
+  </div>
+
+  <div class="panel">
+    <h3>RAW flat field</h3>
+    <p class="muted"><b>Do this with the sample removed</b> and the illumination as it will be used for RAW captures.
+      Averages several raw blank-field frames on the device and derives a per-channel gain map that is applied
+      instead of the tuning file's lens-shading tables for every RAW-family capture (RAW, RAW average, HDR RAW,
+      fine stack from RAW) until cleared.</p>
+    {#if rawFlat}
+      <div class="callout" style="border-color:var(--accent)">
+        <b>A flat field is active</b> — it overrides the tuning file's lens-shading correction for RAW-family
+        captures.{#if rawFlat.when} Captured {new Date(rawFlat.when).toLocaleString()}.{/if}
+      </div>
+    {/if}
+    <div class="row">
+      <label>Frames <input class="mono" type="number" min="2" max="8" style="width:70px" bind:value={flatFrames} disabled={!!busy || !device.connected} /></label>
+      <button class="primary" onclick={captureFlat} disabled={!!busy || !device.connected}>Capture flat field</button>
+      {#if rawFlat}<button class="danger" onclick={clearFlat} disabled={!!busy}>Clear</button>{/if}
+    </div>
   </div>
 
   <div class="panel">

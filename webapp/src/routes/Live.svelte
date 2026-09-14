@@ -124,7 +124,7 @@
 
   let lastClick = $state<string | null>(null)
   let focusing = $state(false)
-  let afMode = $state<'fast' | 'looping' | 'step'>('fast')
+  let afMode = $state<'fast' | 'looping' | 'step' | 'twopass'>('fast')
   let afRange = $state(2000)
   let afLog = $state('')
 
@@ -199,6 +199,7 @@
           <option value="fast">fast (JPEG size)</option>
           <option value="looping">looping</option>
           <option value="step">step (Laplacian)</option>
+          <option value="twopass" title="coarse JPEG-size sweep locates the plane, then a short fine Laplacian sweep sub-pixel-fits the peak">two-pass (fine sub-pixel)</option>
         </select>
         <select bind:value={afRange} disabled={focusing}>
           <option value={500}>±250</option><option value={1000}>±500</option><option value={2000}>±1000</option><option value={4000}>±2000</option>

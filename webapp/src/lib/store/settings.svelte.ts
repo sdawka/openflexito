@@ -27,6 +27,16 @@ export interface Settings {
    *  use "calibrate from a known length" against a stage micrometer instead. */
   stageStepUm: { x: number; y: number; z: number }
   showScaleBar: boolean
+  /** Video recording defaults (`PhotoPanel.svelte`); `codec` mirrors `services/recorder.svelte.ts`'s
+   *  `VideoCodec` ('vp9' | 'av1' | 'vp8' | 'auto') but is kept as `string` here to avoid a runtime
+   *  import into this plain settings module. */
+  videoCodec: string
+  videoBitrateMbps: number
+  videoStabilise: boolean
+  /** Super-resolution defaults (`services/photo/superres.ts#SuperresOptions`). */
+  superresScale: 2 | 3
+  superresPixfrac: number
+  superresSharpen: boolean
 }
 
 const defaults: Settings = {
@@ -41,6 +51,8 @@ const defaults: Settings = {
   },
   stageStepUm: { x: 0.088, y: 0.088, z: 0.050 },
   showScaleBar: true,
+  videoCodec: 'vp9', videoBitrateMbps: 12, videoStabilise: true,
+  superresScale: 2, superresPixfrac: 0.5, superresSharpen: false,
 }
 
 function load(): Settings {

@@ -153,6 +153,84 @@ export async function loopingAutofocus(io: FastAutofocusIO, dz = 2000, metric: S
   throw new Error('autofocus: no focus found within range')
 }
 
+export type PeakModel = 'quadratic' | 'gaussian' | 'lorentzian'
+
+/** Sub-pixel peak fit with a choice of curve shape. 'quadratic' is `quadraticPeak` unchanged.
+ *  'gaussian' fits a parabola to ln(s) (exact for a true Gaussian peak, and the standard trick for
+ *  fitting one — the log of a Gaussian is a parabola). 'lorentzian' fits a parabola to −1/s (a
+ *  Lorentzian's reciprocal is a parabola too), which has heavier tails than a Gaussian and tracks a
+ *  focus curve that falls off more slowly away from the peak (common on low-contrast samples: a
+ *  Gaussian fit there under-weights the tails and can be pulled off-centre by a single noisy sample).
+ *  Falls back to 'quadratic' if any sample is non-positive (ln/reciprocal undefined). */
+export function fitPeak(samples: Sample[], model: PeakModel = 'quadratic'): QuadraticPeak | null {
+  if (model === 'quadratic' || samples.some((s) => !(s.s > 0))) return quadraticPeak(samples)
+  if (model === 'gaussian') {
+    const q = quadraticPeak(samples.map((s) => ({ z: s.z, s: Math.log(s.s) })))
+    return q && { ...q, s: Math.exp(q.s) }
+  }
+  const q = quadraticPeak(samples.map((s) => ({ z: s.z, s: -1 / s.s })))
+  return q && { ...q, s: -1 / q.s }
+}
+
+export interface TwoPassIO extends FastAutofocusIO {
+  /** Fine-pass sharpness metric (e.g. Laplacian variance on a snapshot), read after settling. */
+  measure(): Promise<number>
+}
+
+export interface TwoPassOptions {
+  coarseDz?: number
+  coarseMetric?: SharpnessMetric
+  fineRange?: number      // z span of the fine sweep around the coarse peak; default coarseDz/10
+  fineSteps?: number      // default 9
+  fineModel?: PeakModel   // default 'gaussian'
+  /** Optional full-resolution confirmation: given a candidate z, returns its sharpness (any metric
+   *  comparable across calls, e.g. Laplacian on a full-res still) so a stream-proxy false peak can be
+   *  rejected. Not called unless provided (an extra full-res capture costs ~1.3 s on the Pi). */
+  confirm?(z: number): Promise<number>
+}
+
+export interface TwoPassResult { peakZ: number; coarse: FastAutofocusResult; fineSamples: Sample[]; finePeak: QuadraticPeak | null; confirmed: boolean }
+
+/** Two-pass autofocus: a fast, coarse JPEG-size (or FocusFoM) sweep over the full range locates the
+ *  focus plane roughly, then a short step sweep around it measures a sharper, metric-agnostic
+ *  Laplacian/Brenner-style figure at rest (no stream-proxy noise) and fits a Gaussian or Lorentzian
+ *  peak for the final z. More robust than either pass alone: the coarse pass would need many more
+ *  samples to reach the same sub-pixel precision over its full range, and the fine pass alone would
+ *  need to search blindly if not seeded by the coarse peak. */
+export async function twoPassAutofocus(io: TwoPassIO, opts: TwoPassOptions = {}): Promise<TwoPassResult> {
+  const coarseDz = opts.coarseDz ?? 2000
+  const coarse = await fastAutofocus(io, coarseDz, opts.coarseMetric ?? 'jpeg')
+  const range = Math.max(20, opts.fineRange ?? Math.round(coarseDz / 10)), steps = Math.max(5, opts.fineSteps ?? 9)
+  const step = Math.max(1, range / (steps - 1))
+  io.onProgress?.(`fine pass: ${steps} points across ${range} steps around z=${coarse.peakZ}`)
+  await io.moveZ(-Math.round(range / 2) - step, 'z')   // approach the fine window from below
+  await io.moveZ(step)
+  const fineSamples: Sample[] = []
+  for (let i = 0; i < steps; i++) {
+    fineSamples.push({ z: io.currentZ(), s: await io.measure() })
+    io.onProgress?.(`fine pass: z=${io.currentZ()} sharpness=${fineSamples[i].s.toFixed(1)}`)
+    if (i < steps - 1) await io.moveZ(step)
+  }
+  const best = argmax(fineSamples)!
+  const bi = fineSamples.indexOf(best)
+  const win = fineSamples.slice(Math.max(0, bi - 3), bi + 4)
+  const finePeak = fitPeak(win, opts.fineModel ?? 'gaussian')
+  let peakZ = Math.round(finePeak?.confident && Math.abs(finePeak.z - best.z) <= step * 2 ? finePeak.z : best.z)
+  await io.moveZ(peakZ - io.currentZ(), 'z')
+  let confirmed = true
+  if (opts.confirm) {
+    const atPeak = await opts.confirm(peakZ)
+    // if a neighbouring fine sample was actually sharper at full resolution, the stream proxy was
+    // fooled (e.g. by a compression artefact); fall back to the best fine sample instead of the fit.
+    if (atPeak < best.s * 0.9 && best.z !== peakZ) {
+      confirmed = false
+      peakZ = Math.round(best.z)
+      await io.moveZ(peakZ - io.currentZ(), 'z')
+    }
+  }
+  return { peakZ, coarse, fineSamples, finePeak, confirmed }
+}
+
 export interface StepAutofocusIO {
   moveZ(dz: number): Promise<unknown>
   currentZ(): number

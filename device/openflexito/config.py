@@ -27,6 +27,22 @@ class CameraConfig:
     raw_format: str = "SBGGR10"
     black_level: int = 64
     tuning_name: str = "imx219"
+    # Stills (full-res JPEG, RAW, brackets, flats) are taken in their own mode switch. `still_clean`
+    # turns the ISP's spatial denoise and sharpening off for them: those inflate Laplacian focus
+    # metrics and add halos to every stack input; the browser does its own processing. Toggle at
+    # run time with `camera.set_still_clean`. Software JPEG quality for stills is pinned.
+    still_clean: bool = True
+    still_jpeg_quality: int = 95
+    # picamera2's video configuration pins FrameDurationLimits to 33333 us, which clamps exposure
+    # at one (fps-limited) frame; explicit limits let long low-gain exposures through on dim
+    # samples. Stream: 30 fps ceiling down to 2 fps; stills: 100 us to 1 s.
+    stream_frame_duration_us: tuple[int, int] = (33333, 500_000)
+    still_frame_duration_us: tuple[int, int] = (100, 1_000_000)
+    # Main-stream size of the RAW still configuration (the ISP output is not read; keep it tiny).
+    raw_main_size: tuple[int, int] = (640, 480)
+    # Upper bound for `/raw.bin?frames=N` (each frame is a 16 MB uint16 mosaic on the Pi 3).
+    max_raw_frames: int = 8
+    max_bracket_frames: int = 8
 
 
 @dataclass

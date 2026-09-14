@@ -1,10 +1,24 @@
 /** Gallery storage in the browser: IndexedDB for metadata and image blobs. */
 
 import { currentSample, type SampleRecord } from './sample.svelte'
+import { fileStem, blobFileName } from '../algo/naming'
 
 export type ItemKind = 'snapshot' | 'scan' | 'video' | 'timelapse'
 
-export interface TimelapseFrameMeta { t: string; z: number; shift: { dx: number; dy: number } }
+/** One time-lapse frame. `shift` is the drift from the first frame in FULL-FRAME pixels when
+ *  `measureWidth` is present (the analysis width it was measured at, kept for reference); items saved
+ *  before `measureWidth` existed hold the raw measurement at min(410, frame width) px and are rescaled
+ *  by `algo/drift.ts#playbackShift`. `slot` is the absolute-clock slot index (gaps = skipped slots),
+ *  `sharpness` the mean |Laplacian| of the analysis frame, `refocused` marks frames taken right after
+ *  an autofocus, `remetered` frames taken right after the AE/AWB lock was refreshed. */
+export interface TimelapseFrameMeta {
+  t: string; z: number; shift: { dx: number; dy: number }
+  measureWidth?: number; slot?: number; sharpness?: number; refocused?: boolean; remetered?: boolean
+}
+
+/** Per-frame log of a video recording (blob 'frames', JSON array): device frame time t (ns,
+ *  CLOCK_BOOTTIME), stream sequence number and stage position when the frame was drawn. */
+export interface VideoFrameLog { t: number; seq: number; position: { x: number; y: number; z: number } }
 
 export interface GalleryItem {
   id: string
@@ -21,26 +35,60 @@ export interface GalleryItem {
   stack?: {
     slices: number; stepZ: number; zs: number[]; contributions: number[]; method?: 'blocks' | 'pyramid'; centreZ?: number; span?: number; shifts?: { dx: number; dy: number }[]; source?: 'jpeg' | 'raw'
     /** depth-from-focus map derived alongside a pyramid fusion: blobs 'depth' (colour-mapped PNG),
-     *  'relief' (pseudo-3D shaded preview) and 'depth.bin' (raw per-pixel winning-slice index, 8-bit) */
-    depth?: { minZ: number; maxZ: number; colorMap: 'ramp' }
+     *  'relief' (pseudo-3D shaded preview) and 'depth.bin' (raw per-pixel winning-slice index, 8-bit).
+     *  `minZ`/`maxZ` are always in z steps regardless of `unit` (additive, informational only — the
+     *  Viewer converts to µm at display time from Settings' current `stageStepUm.z` via
+     *  `algo/depthMap.ts#stepsToUm`, so an absent/'steps' unit here does not lose information). */
+    depth?: { minZ: number; maxZ: number; colorMap: 'ramp'; unit?: 'steps' | 'µm' }
   }
-  /** pixel-shift super-resolution: N sub-pixel-shifted stills fused by drizzle onto a finer grid */
-  superres?: { frames: number; scale: number; shifts: { dx: number; dy: number; quality: number }[]; crop: { width: number; height: number; x0: number; y0: number } | null }
+  /** pixel-shift super-resolution: N sub-pixel-shifted stills fused by drizzle onto a finer grid;
+   *  `used` is how many of `frames` passed registration confidence + phase-validity checks and
+   *  actually contributed (services/photo/superres.ts) */
+  superres?: {
+    frames: number; used?: number; scale: number; pixfrac?: number; sharpened?: boolean
+    shifts: { dx: number; dy: number; quality: number; confident?: boolean }[]
+    crop: { width: number; height: number; x0: number; y0: number } | null
+  }
   /** video: blob 'video' (WebM) recorded in the browser from the live view or the live focus stack */
-  video?: { durationS: number; fps: number; source: string; mime: string }
+  video?: {
+    durationS: number; fps: number; source: string; mime: string
+    /** encoder settings and the per-frame sidecar ('frames' blob, `VideoFrameLog[]`, `frameCount` entries) */
+    codec?: string; bitrateBps?: number; frameCount?: number; frameLog?: string
+    /** whether per-frame stabilisation (`algo/stabilize.ts`) was applied to this recording (additive) */
+    stabilised?: boolean
+  }
   /** time-lapse: blobs 'f0000', 'f0001', ... one JPEG per frame, plus 'thumb' from the first frame.
    *  `frames[i].shift` is that frame's measured drift (px) from the first frame (see `algo/drift.ts`);
    *  subtracting it plays the sequence back drift-free. */
-  timelapse?: { intervalMs: number; source: 'stream' | 'full'; driftCorrected: boolean; frames: TimelapseFrameMeta[] }
+  timelapse?: {
+    intervalMs: number; source: 'stream' | 'full'; driftCorrected: boolean; frames: TimelapseFrameMeta[]
+    /** frame encoding ('png' = lossless re-encode of the device JPEG/still), camera lock and refocus settings, slots skipped for running late */
+    format?: 'jpeg' | 'png'; locked?: { ae: boolean; awb: boolean }; remeterEveryN?: number; refocusDropPct?: number; skipped?: number; startedAt?: string
+  }
   /** raw develop: the sensor data behind 'image' ('dng' blob = the untouched mosaic as a DNG) */
   raw?: { bitDepth: number; bayer: string; blackLevel: number; gains: [number, number]; applied?: { lsc: boolean; ccm: boolean; gammaCurve: boolean; demosaic: string } }
+  /** the still's own request metadata (device.md §1 `X-Frame`: exposure, gain, colour_gains, ts, lux,
+   *  matched, ...) plus the pixel scale in force at capture time, for an honest per-item record
+   *  independent of `stack`/`raw`/`superres`. Additive: only photo modes that fetch the still's own
+   *  metadata (single, raw, exposure/hdr brackets) fill it in. */
+  capture?: { meta: Record<string, unknown> | null; umPerPx?: number; scaleSource?: 'manual' | 'stage' }
   scan?: {
     cols: number; rows: number; overlap: number
     tiles: { index: number; col: number; row: number; stage: { x: number; y: number }; x: number; y: number; width: number; height: number; blob: string
       /** focused z for this tile (device steps): measured directly (focus 'every tile'), or predicted
        *  from the height map (focus 'interpolate') — see `algo/heightMap.ts` and `routes/Scan.svelte`. */
-      z?: number; zMeasured?: boolean }[]
+      z?: number; zMeasured?: boolean
+      /** how this tile was focused: 'measured' (autofocus here), 'predicted' (height map), 'refined'
+       *  (height map + short local sweep), 'failed' (autofocus threw; `error` says why; the tile was
+       *  still captured at whatever z the stage had), 'none' (focus off) */
+      focus?: { status: 'measured' | 'predicted' | 'refined' | 'failed' | 'none'; error?: string }
+      settleMs?: number }[]
     positions?: { x: number; y: number }[]
+    /** stitching diagnostics: overlaps measured, dropped as outliers, per-tile luminance gains, blend mode, flat-field applied */
+    stitch?: { pairs: number; dropped: number; gains?: number[]; blend: 'feather' | 'multiband'; flatField: boolean; analysisWidth: number }
+    /** camera lock held for the run and the number of tiles whose autofocus failed */
+    locked?: { ae: boolean; awb: boolean }
+    focusFailures?: number
     /** how autofocus was used during this scan, and its region/order settings, for the gallery's height-map overlay */
     focus?: { mode: 'none' | 'every' | 'interpolate'; step?: number; method?: 'plane' | 'bilinear' }
     region?: { mode: 'rect' | 'polygon'; order: 'raster' | 'snake' | 'spiral' }
@@ -130,12 +178,12 @@ export async function makeThumb(blob: Blob, size = 256): Promise<Blob> {
 
 export async function saveSnapshot(blob: Blob, meta: { position?: GalleryItem['position']; controls?: object; name?: string;
   /** extra item fields (stack, raw) and extra blobs (slices, raw data) stored alongside the image */
-  extra?: Partial<Pick<GalleryItem, 'stack' | 'raw' | 'superres'>>; extraBlobs?: Record<string, Blob>; thumbFrom?: Blob; size?: { width: number; height: number } }): Promise<GalleryItem> {
+  extra?: Partial<Pick<GalleryItem, 'stack' | 'raw' | 'superres' | 'capture'>>; extraBlobs?: Record<string, Blob>; thumbFrom?: Blob; size?: { width: number; height: number } }): Promise<GalleryItem> {
   const id = newId()
   const bmp = meta.size ?? await createImageBitmap(meta.thumbFrom ?? blob)
   const extraNames = Object.keys(meta.extraBlobs ?? {})
   const item: GalleryItem = {
-    id, kind: 'snapshot', name: meta.name ?? `Snapshot ${new Date().toLocaleString()}`, when: new Date().toISOString(),
+    id, kind: 'snapshot', name: meta.name ?? 'Photo', when: new Date().toISOString(),
     position: meta.position, controls: meta.controls, width: bmp.width, height: bmp.height, blobs: ['image', 'thumb', ...extraNames],
     sample: currentSample(),
     ...(meta.extra ?? {}),
@@ -148,21 +196,24 @@ export async function saveSnapshot(blob: Blob, meta: { position?: GalleryItem['p
   return item
 }
 
-export async function saveVideo(blob: Blob, thumb: Blob | null, meta: { durationS: number; fps: number; source: string; width: number; height: number; position?: GalleryItem['position'] }): Promise<GalleryItem> {
+export async function saveVideo(blob: Blob, thumb: Blob | null, meta: { durationS: number; fps: number; source: string; width: number; height: number; position?: GalleryItem['position']
+  codec?: string; bitrateBps?: number; frames?: VideoFrameLog[] }): Promise<GalleryItem> {
   const id = newId()
+  const frames = meta.frames?.length ? meta.frames : undefined
   const item: GalleryItem = {
     id, kind: 'video', name: `Video ${meta.source} ${meta.durationS.toFixed(0)} s`, when: new Date().toISOString(),
-    position: meta.position, width: meta.width, height: meta.height, blobs: thumb ? ['video', 'thumb'] : ['video'],
-    video: { durationS: meta.durationS, fps: meta.fps, source: meta.source, mime: blob.type },
+    position: meta.position, width: meta.width, height: meta.height, blobs: ['video', ...(thumb ? ['thumb'] : []), ...(frames ? ['frames'] : [])],
+    video: { durationS: meta.durationS, fps: meta.fps, source: meta.source, mime: blob.type, codec: meta.codec, bitrateBps: meta.bitrateBps, frameCount: frames?.length, frameLog: frames ? 'frames' : undefined },
     sample: currentSample(),
   }
   await putBlob(id, 'video', blob)
   if (thumb) await putBlob(id, 'thumb', thumb)
+  if (frames) await putBlob(id, 'frames', new Blob([JSON.stringify(frames)], { type: 'application/json' }))
   await putItem(item)
   return item
 }
 
-export async function saveTimelapse(frames: Blob[], frameMeta: TimelapseFrameMeta[], info: { intervalMs: number; source: 'stream' | 'full'; driftCorrected: boolean }): Promise<GalleryItem> {
+export async function saveTimelapse(frames: Blob[], frameMeta: TimelapseFrameMeta[], info: Omit<NonNullable<GalleryItem['timelapse']>, 'frames'>): Promise<GalleryItem> {
   if (!frames.length) throw new Error('no frames to save')
   const id = newId()
   const bmp = await createImageBitmap(frames[0])
@@ -172,7 +223,7 @@ export async function saveTimelapse(frames: Blob[], frameMeta: TimelapseFrameMet
   const item: GalleryItem = {
     id, kind: 'timelapse', name: `Time-lapse ${frames.length} frames`, when: new Date().toISOString(),
     width, height, blobs: [...blobNames, 'thumb'],
-    timelapse: { intervalMs: info.intervalMs, source: info.source, driftCorrected: info.driftCorrected, frames: frameMeta },
+    timelapse: { ...info, frames: frameMeta },
   }
   for (let i = 0; i < frames.length; i++) await putBlob(id, blobNames[i], frames[i])
   await putBlob(id, 'thumb', await makeThumb(frames[0]))
@@ -185,14 +236,13 @@ export async function saveTimelapse(frames: Blob[], frameMeta: TimelapseFrameMet
  *  `exportSampleBundle`. */
 async function itemFiles(item: GalleryItem): Promise<{ name: string; blob: Blob }[]> {
   const files: { name: string; blob: Blob }[] = []
-  const safe = item.name.replace(/[^\w.-]+/g, '_')
   for (const b of item.blobs) {
     const blob = await getBlob(item.id, b)
     if (!blob) continue
-    const ext = blob.type === 'image/png' ? 'png' : blob.type === 'image/x-adobe-dng' ? 'dng' : blob.type.startsWith('video/webm') ? 'webm' : blob.type.startsWith('video/') ? 'mp4' : blob.type === 'application/octet-stream' ? 'bin' : 'jpg'
-    files.push({ name: `${safe}-${b.replace('/', '-')}.${ext}`, blob })
+    const ext = blob.type === 'image/png' ? 'png' : blob.type === 'image/x-adobe-dng' ? 'dng' : blob.type.startsWith('video/webm') ? 'webm' : blob.type.startsWith('video/') ? 'mp4' : blob.type === 'application/octet-stream' ? 'bin' : blob.type === 'application/json' ? 'json' : 'jpg'
+    files.push({ name: blobFileName(item, b, ext), blob })
   }
-  files.push({ name: `${safe}.json`, blob: new Blob([JSON.stringify(item, null, 2)], { type: 'application/json' }) })
+  files.push({ name: `${fileStem(item)}.json`, blob: new Blob([JSON.stringify(item, null, 2)], { type: 'application/json' }) })
   return files
 }
 
@@ -242,7 +292,7 @@ export async function exportSampleBundle(items: GalleryItem[], sampleName: strin
     const fh = await root.getFileHandle(`${safeSample}-index.csv`, { create: true })
     const w = await fh.createWritable(); await w.write(csv); await w.close()
     for (const it of items) {
-      const sub = await root.getDirectoryHandle(`${it.name.replace(/[^\w.-]+/g, '_') || it.id}-${it.id}`, { create: true })
+      const sub = await root.getDirectoryHandle(fileStem(it), { create: true })
       for (const f of await itemFiles(it)) {
         const fh2 = await sub.getFileHandle(f.name, { create: true })
         const w2 = await fh2.createWritable(); await w2.write(f.blob); await w2.close()

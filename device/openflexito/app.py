@@ -34,7 +34,7 @@ class Device:
         self.camera: CameraBase | None = None
         self.stage: Stage | None = None
         self.errors: dict[str, str] = {}
-        self.net: dict = {"state": "unknown", "ip": None, "connections": []}
+        self.net: dict = {"state": "unknown", "ip": None, "connections": [], "link": "none", "interface": None, "link_local": False, "speed_mbit": None, "interfaces": []}
         self.led_state = "booting"
         self._status_dirty = asyncio.Event()
         self.events.on_change = lambda n: self.status(changed=True)
@@ -101,7 +101,7 @@ class Device:
     async def status_loop(self) -> None:
         while True:
             try:
-                self.net = await network_state(self.cfg.hotspot_connection)
+                self.net = await network_state(self.cfg.hotspot_connection, fake=self.cfg.camera.fake)
             except Exception as e:  # noqa: BLE001
                 log.debug("network state failed: %s", e)
             new = self._compute_led_state()
@@ -195,6 +195,8 @@ class Device:
             r.register("camera.reset_tuning", cam.reset_tuning, "Restore the bundled tuning file.")
             r.register("camera.set_stream_size", cam.set_stream_size, "Change stream resolution (width, height).")
             r.register("camera.metadata", cam.capture_metadata, "Latest libcamera request metadata.")
+            r.register("camera.set_still_clean", cam.set_still_clean,
+                       "Stills only (full-res JPEG, RAW, brackets): ISP denoise off and Sharpness 0 when enabled.")
 
     def _light_dict(self) -> dict:
         ch = getattr(self, "_light_channels", {"cc": 1, "pwm": 0})

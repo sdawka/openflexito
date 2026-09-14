@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { SliceAligner, alignPyramids, lumPyramid, luminance, translatePlanesSubpixel, translateRgbaSubpixel } from '../align'
+import { SliceAligner, alignPyramids, alignStack, alignSimilarity, chooseReference, laplacianEnergy, lumPyramid, luminance, scaleGray, translateFloat, translatePlanesSubpixel, translateRgbaSubpixel } from '../align'
 import type { Gray } from '../sharpness'
 
 const W = 640, H = 480
@@ -60,6 +60,62 @@ describe('SliceAligner', () => {
       const d = al.next(s)
       expect(Math.abs(d.dx - shifts[k].dx)).toBeLessThan(0.3); expect(Math.abs(d.dy - shifts[k].dy)).toBeLessThan(0.3)
     })
+  })
+})
+
+describe('chooseReference / alignStack', () => {
+  it('picks the middle slice by default and chains outward both ways to it', () => {
+    const base = texture()
+    // slice k: cumulative shift (2.6k, -1.4k), blur |k-2|*2 (sharpest at k=2, the middle of 5)
+    const shifts = [0, 1, 2, 3, 4].map((k) => ({ dx: 2.6 * k, dy: -1.4 * k }))
+    const lums = shifts.map((s, k) => blur(shifted(base, s.dx, s.dy), Math.abs(k - 2) * 2))
+    expect(chooseReference(5)).toBe(2)
+    const out = alignStack(lums, chooseReference(5))
+    expect(out[2]).toEqual({ dx: 0, dy: 0, quality: Infinity })
+    for (let k = 0; k < 5; k++) {
+      const wantDx = shifts[k].dx - shifts[2].dx, wantDy = shifts[k].dy - shifts[2].dy
+      expect(Math.abs(out[k].dx - wantDx)).toBeLessThan(0.3)
+      expect(Math.abs(out[k].dy - wantDy)).toBeLessThan(0.3)
+    }
+  })
+  it('"sharpest" mode picks the slice with the most Laplacian energy', () => {
+    const base = texture()
+    const lums = [0, 1, 2].map((k) => blur(base, k === 1 ? 0 : 4))   // slice 1 is the only sharp one
+    expect(chooseReference(3, 'sharpest', lums)).toBe(1)
+    expect(laplacianEnergy(lums[1])).toBeGreaterThan(laplacianEnergy(lums[0]))
+  })
+})
+
+describe('Lanczos-3 resampling', () => {
+  it('preserves more high-frequency content than bilinear at a half-pixel shift', () => {
+    const ref = texture()
+    const half = 0.5
+    const bilinear = translateFloat(ref.data, W, H, 1, half, 0, 'bilinear')
+    const lanczos = translateFloat(ref.data, W, H, 1, half, 0, 'lanczos3')
+    // shift back by -half and compare high-frequency (Laplacian) energy retained vs the original:
+    // a box-like kernel (bilinear) attenuates near Nyquist far more than Lanczos-3.
+    const energyOf = (d: Float32Array) => { let s = 0; for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) { const i = y * W + x, l = 4 * d[i] - d[i - 1] - d[i + 1] - d[i - W] - d[i + W]; s += l * l } return s }
+    expect(energyOf(lanczos)).toBeGreaterThan(energyOf(bilinear))
+    // an integer shift is exact for both methods
+    const intB = translateFloat(ref.data, W, H, 1, 3, 0, 'bilinear'), intL = translateFloat(ref.data, W, H, 1, 3, 0, 'lanczos3')
+    let dmax = 0; for (let i = 0; i < intB.length; i++) dmax = Math.max(dmax, Math.abs(intB[i] - intL[i]))
+    expect(dmax).toBeLessThan(1e-6)
+  })
+})
+
+describe('alignSimilarity (optional scale + translation)', () => {
+  it('recovers a ~1% magnification change and a translation', () => {
+    const ref = texture()
+    const img = { data: scaleGray(ref, 1.01).data, width: W, height: H }
+    const shiftedImg: Gray = { data: translateFloat(img.data, W, H, 1, 4, -3, 'bilinear'), width: W, height: H }
+    const s = alignSimilarity(ref, shiftedImg, { maxScale: 0.03 })
+    expect(Math.abs(s.scale - 1.01)).toBeLessThan(0.01)
+    expect(Math.abs(s.dx - 4)).toBeLessThan(1); expect(Math.abs(s.dy + 3)).toBeLessThan(1)
+  })
+  it('reports scale ~1 for two identical slices', () => {
+    const ref = texture()
+    const s = alignSimilarity(ref, ref)
+    expect(Math.abs(s.scale - 1)).toBeLessThan(0.01)
   })
 })
 

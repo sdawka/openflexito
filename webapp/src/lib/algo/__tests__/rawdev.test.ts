@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { develop, cellColour, toRgba8, developParamsFromTuning } from '../rawdev'
-import { encodePng16 } from '../../png16'
-import { encodeDng, colorMatrixFromCcm, invert3 } from '../../dng'
+import { encodePng16 } from '../png16'
+import { encodeDng, colorMatrixFromCcm, invert3, mulVec3, D65_XYZ } from '../dng'
 import type { RawImage } from '../raw'
 
 function flat(r: number, g: number, b: number, w = 16, h = 12, vignette = 0): RawImage {
@@ -12,7 +12,7 @@ function flat(r: number, g: number, b: number, w = 16, h = 12, vignette = 0): Ra
     const f = 1 - vignette * (((x - w / 2) / (w / 2)) ** 2 + ((y - h / 2) / (h / 2)) ** 2) / 2
     data[y * w + x] = 64 + Math.round(v * f)
   }
-  return { width: w, height: h, bitDepth: 10, blackLevel: 64, bayer: 'BGGR', data }
+  return { width: w, height: h, bitDepth: 10, blackLevel: 64, whiteLevel: 1023, bayer: 'BGGR', data, meta: null }
 }
 const px = (img: { data: Uint16Array; width: number }, x: number, y: number) => [img.data[(y * img.width + x) * 3], img.data[(y * img.width + x) * 3 + 1], img.data[(y * img.width + x) * 3 + 2]]
 
@@ -86,8 +86,19 @@ describe('encodeDng', () => {
     const strip = dv.getUint32(tags[273].off, true), bytes = dv.getUint32(tags[279].off, true)
     expect(bytes).toBe(16 * 12 * 2); expect(strip + bytes).toBe(b.length)
     expect(dv.getUint16(strip, true)).toBe(raw.data[0])
+    // colorMatrixFromCcm normalises the result so its response to the D65 white peaks at 1 (readers
+    // only use its direction, per the ColorMatrix1 docstring in dng.ts), so scaling the CCM by a
+    // constant must not change the normalised matrix.
     const cm = colorMatrixFromCcm([2, 0, 0, 0, 2, 0, 0, 0, 2])!
-    expect(cm[0]).toBeCloseTo(3.2404542 / 2, 5)
+    const cmIdentity = colorMatrixFromCcm([1, 0, 0, 0, 1, 0, 0, 0, 1])!
+    expect(cm[0]).toBeCloseTo(cmIdentity[0], 5)
+    // white-balance gains scale only the channels they touch (red/blue), unbalancing the matrix so
+    // ColorMatrix1 · XYZ(D65) is proportional to (1/gr, 1, 1/gb), not to (1, 1, 1).
+    const balanced = colorMatrixFromCcm([1, 0, 0, 0, 1, 0, 0, 0, 1], [1, 1])!
+    const unbalanced = colorMatrixFromCcm([1, 0, 0, 0, 1, 0, 0, 0, 1], [2, 4])!
+    const whiteBalanced = mulVec3(balanced, D65_XYZ), whiteUnbalanced = mulVec3(unbalanced, D65_XYZ)
+    expect(whiteUnbalanced[0] / whiteUnbalanced[1]).toBeCloseTo((whiteBalanced[0] / whiteBalanced[1]) / 2, 5)
+    expect(whiteUnbalanced[2] / whiteUnbalanced[1]).toBeCloseTo((whiteBalanced[2] / whiteBalanced[1]) / 4, 5)
     expect(invert3([1, 2, 3, 4, 5, 6, 7, 8, 9])).toBeNull()
   })
 })

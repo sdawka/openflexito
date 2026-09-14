@@ -56,3 +56,40 @@ describe('driftBounds', () => {
     expect(driftBounds([])).toEqual({ x: 0, y: 0 })
   })
 })
+
+import { shiftToFrame, playbackShift, LEGACY_MEASURE_WIDTH, nextSlot, sharpnessDropped, meanAbsLaplacian } from '../drift'
+
+describe('drift shift units (D2)', () => {
+  it('scales a shift measured on the downsample to full-frame pixels', () => {
+    expect(shiftToFrame({ dx: 10, dy: -4 }, 410, 820)).toEqual({ dx: 20, dy: -8 })
+    expect(shiftToFrame({ dx: 10, dy: -4 }, 410, 3280)).toEqual({ dx: 80, dy: -32 })
+  })
+  it('playback: items with measureWidth are already in frame px; legacy items are rescaled', () => {
+    expect(playbackShift({ shift: { dx: 20, dy: 8 }, measureWidth: 410 }, 820)).toEqual({ dx: 20, dy: 8 })
+    expect(playbackShift({ shift: { dx: 10, dy: 4 } }, 820)).toEqual({ dx: 20, dy: 8 })
+    expect(playbackShift({ shift: { dx: 10, dy: 4 } }, 3280)).toEqual({ dx: 80, dy: 32 })
+    // a legacy frame narrower than the analysis width was measured at its own width: no scaling
+    expect(playbackShift({ shift: { dx: 3, dy: 1 } }, 320)).toEqual({ dx: 3, dy: 1 })
+    expect(LEGACY_MEASURE_WIDTH).toBe(410)
+  })
+})
+
+describe('time-lapse scheduling', () => {
+  it('keeps the next slot on the absolute clock and skips missed ones', () => {
+    expect(nextSlot(1000, 0, 1000, 0)).toEqual({ slot: 1, dueAt: 1000, skipped: 0 })   // exactly on time
+    expect(nextSlot(1400, 0, 1000, 0)).toEqual({ slot: 2, dueAt: 2000, skipped: 1 })   // slot 1 already 400 ms late: skip it
+    expect(nextSlot(3500, 0, 1000, 0)).toEqual({ slot: 4, dueAt: 4000, skipped: 3 })
+    expect(nextSlot(200, 0, 1000, 0)).toEqual({ slot: 1, dueAt: 1000, skipped: 0 })    // early: wait for slot 1
+  })
+  it('refocus trigger on a sharpness drop', () => {
+    expect(sharpnessDropped(60, 100, 30)).toBe(true)
+    expect(sharpnessDropped(75, 100, 30)).toBe(false)
+    expect(sharpnessDropped(10, 100, 0)).toBe(false)
+  })
+  it('mean |Laplacian| is larger for a sharp edge than a blurred one', () => {
+    const w = 32, h = 8
+    const sharp = new Float32Array(w * h), soft = new Float32Array(w * h)
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { sharp[y * w + x] = x < 16 ? 0 : 100; soft[y * w + x] = 50 + 50 * Math.tanh((x - 16) / 4) }
+    expect(meanAbsLaplacian({ data: sharp, width: w, height: h })).toBeGreaterThan(meanAbsLaplacian({ data: soft, width: w, height: h }))
+  })
+})

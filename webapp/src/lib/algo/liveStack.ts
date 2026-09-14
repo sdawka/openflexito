@@ -11,7 +11,15 @@
  *  follows a genuine change of scene instead of freezing on stale frames.
  *
  *  Previous version replaced whole blocks whenever a frame beat the stored sharpness by 5 %: JPEG
- *  noise alone fluctuates more than that, so the composite was the latest frame with a lag. */
+ *  noise alone fluctuates more than that, so the composite was the latest frame with a lag.
+ *
+ *  Re-anchoring: every frame is aligned to `ref`, the first frame of the current composite, so slow
+ *  drift (thermal creep, a barely-settled stage) is corrected by an ever-larger bilinear shift of each
+ *  new frame relative to that one stale reference — softening frames the longer the composite has
+ *  run, even though the composite itself stays sharp. Every `reanchorEvery` frames (0 disables) `ref`
+ *  is replaced by a downsampled read of the *composite itself*: the composite is already the sharpest
+ *  available estimate of the scene, so realigning to it resets the accumulated softening without
+ *  restarting the accumulation (unlike `reset()`, which throws the composite away too). */
 
 import { displacement } from './fftTrack'
 import type { Gray } from './sharpness'
@@ -38,6 +46,8 @@ export class LiveStacker {
   bestDecay = 0.995
   /** xy shift (fraction of the width) beyond which the scene has moved: the composite restarts */
   maxShift = 0.05
+  /** re-anchor the alignment reference to the composite every this many frames; 0 disables */
+  reanchorEvery = 200
 
   constructor(public width: number, public height: number, public cell = 16) {
     this.cellsX = Math.ceil(width / cell); this.cellsY = Math.ceil(height / cell)
@@ -128,6 +138,7 @@ export class LiveStacker {
       }
     }
     this.frames++
+    if (this.reanchorEvery > 0 && this.frames % this.reanchorEvery === 0) this.ref = grayDown(this.composite, w, h, 205)
     return { frames: this.frames, replaced: replaced / wgt.length, shift: { dx: Math.round(dx), dy: Math.round(dy) }, coverage: 1 }
   }
 }

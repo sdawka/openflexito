@@ -80,6 +80,17 @@ describe('LiveStacker', () => {
     expect(Math.abs(half[(40 * W + 60) * 4] - mid(60, 40))).toBeLessThanOrEqual(1)
     expect(rms(translateRgbaSubpixel(sharp.data, W, H, 2, -1), translateRgba(sharp.data, W, H, 2, -1))).toBe(0)
   })
+  it('re-anchoring to the composite keeps it sharp under slow continuous drift; without it, softening grows', () => {
+    const sharp = scene()
+    // continuous sub-pixel drift, well under maxShift per frame so it is corrected (not reset)
+    const frameAt = (k: number) => translateRgbaSubpixel(sharp.data, W, H, 0.3 * k, 0)
+    const withReanchor = new LiveStacker(W, H, 16); withReanchor.reanchorEvery = 10
+    const without = new LiveStacker(W, H, 16); without.reanchorEvery = 0
+    for (let k = 0; k < 40; k++) { withReanchor.update(frameAt(k)); without.update(frameAt(k)) }
+    const compA = { data: withReanchor.composite, width: W, height: H }, compB = { data: without.composite, width: W, height: H }
+    expect(totalSharpness(compA)).toBeGreaterThan(totalSharpness(compB))
+  })
+
   it('reset clears everything', () => {
     const st = new LiveStacker(W, H); st.update(scene().data); st.reset()
     expect(st.frames).toBe(0); expect(st.composite[3]).toBe(0)

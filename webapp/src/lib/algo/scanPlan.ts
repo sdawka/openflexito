@@ -127,3 +127,11 @@ export function spiralOrder(tiles: TilePlan[]): TilePlan[] {
   }
   return ordered.map((t, index) => ({ ...t, index }))
 }
+
+/** Settle time after a stage move of `steps` (Euclidean, motor steps): proportional to the move
+ *  length so long hops let the flexure stage ring down, never below `minMs` (the old fixed default)
+ *  and capped at `maxMs`. 0.05 ms/step ≈ 150 ms for 3000 steps, 1 s for 20 000 steps. */
+export function settleForMove(steps: number, minMs = 150, msPerStep = 0.05, maxMs = 1500): number {
+  if (!Number.isFinite(steps) || steps <= 0) return minMs
+  return Math.round(Math.max(minMs, Math.min(maxMs, steps * msPerStep)))
+}

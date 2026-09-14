@@ -2,9 +2,13 @@
 
 The device does no image processing. It exposes:
   * the latest JPEG frame (for MJPEG streaming) with per-frame metadata,
-  * a full-resolution still,
-  * an unprocessed raw Bayer capture (for browser-side calibration),
+  * a full-resolution still with the still's own request metadata,
+  * unprocessed raw Bayer captures (single, multi-frame averaged, flat-field, packed) as OFRW v2
+    records with a JSON trailer, and exposure brackets as OFBK containers (formats: rawfmt.py),
   * libcamera controls and the tuning file (read/write).
+
+Stills, raws and brackets are each ONE mode switch: encoders stop, `switch_mode(still_config)`,
+N `capture_request()`s, `switch_mode(video_config)`, controls restored, encoders restart.
 """
 
 from __future__ import annotations
@@ -13,10 +17,7 @@ import asyncio
 import io
 import json
 import logging
-import math
-import struct
 import threading
-import time
 from collections import deque
 from importlib import resources
 from pathlib import Path
@@ -25,6 +26,8 @@ from typing import Any
 from .clock import now_ns
 from .config import CameraConfig
 from .events import EventBus
+from .rawfmt import (RAW_HEADER, RAW_MAGIC, MosaicAccumulator, encode_bracket, encode_raw,  # noqa: F401  re-exported
+                     frame_meta, json_safe, pack_raw)
 
 log = logging.getLogger(__name__)
 
@@ -36,8 +39,7 @@ DEFAULT_CONTROLS: dict[str, Any] = {
     "AeEnable": True, "AwbEnable": True, "ExposureTime": 500, "AnalogueGain": 1.0,
     "ColourGains": [1.0, 1.0], "Brightness": 0.0, "Contrast": 1.0, "Saturation": 1.0, "Sharpness": 1.0,
 }
-RAW_MAGIC = b"OFRW"
-RAW_HEADER = struct.Struct("<4sIIHH8s")  # magic, width, height, bit_depth, black_level, bayer order
+MIN_EXPOSURE_US = 20  # IMX219 floor is ~60 us; libcamera clamps, this only guards the arithmetic
 
 
 class FrameHub:
@@ -96,6 +98,7 @@ class CameraBase:
         self.controls: dict[str, Any] = dict(DEFAULT_CONTROLS)
         self.tuning: dict = {}
         self.stream_size = tuple(cfg.stream_size)
+        self.still_clean = bool(cfg.still_clean)
         self.sensor: dict = {}
         self._load_controls()
         self.tuning = self._load_tuning()
@@ -116,13 +119,16 @@ class CameraBase:
             self.controls.update({k: v for k, v in data.get("controls", {}).items() if k in PERSISTENT_CONTROL_KEYS})
             if "stream_size" in data:
                 self.stream_size = tuple(data["stream_size"])
+            if "still_clean" in data:
+                self.still_clean = bool(data["still_clean"])
         except (OSError, ValueError):
             pass
 
     def _save_controls(self) -> None:
         try:
             self.state_dir.mkdir(parents=True, exist_ok=True)
-            self.controls_file.write_text(json.dumps({"controls": self.controls, "stream_size": list(self.stream_size)}))
+            self.controls_file.write_text(json.dumps({"controls": self.controls, "stream_size": list(self.stream_size),
+                                                      "still_clean": self.still_clean}))
         except OSError as e:
             log.warning("could not save camera settings: %s", e)
 
@@ -150,6 +156,10 @@ class CameraBase:
             "controls": self.controls, "clients": self.main.clients + self.lores.clients,
             "tuning_customised": self.tuning_file.exists(), "fake": self.is_fake,
             "last_frame": self.main.meta,
+            "still_clean": self.still_clean, "still_jpeg_quality": self.cfg.still_jpeg_quality,
+            "frame_duration_limits_us": {"stream": list(self.cfg.stream_frame_duration_us),
+                                         "still": list(self.cfg.still_frame_duration_us)},
+            "max_raw_frames": self.cfg.max_raw_frames, "max_bracket_frames": self.cfg.max_bracket_frames,
         }
 
     async def get_controls(self) -> dict:
@@ -163,6 +173,13 @@ class CameraBase:
         self._save_controls()
         await self._apply_controls({k: self.controls[k] for k in controls})
         return dict(self.controls)
+
+    async def set_still_clean(self, enabled: bool = True) -> dict:
+        """Stills only: ISP denoise off and Sharpness 0 when enabled (the browser does its own
+        processing); when disabled stills get the same ISP treatment as the live stream."""
+        self.still_clean = bool(enabled)
+        self._save_controls()
+        return {"still_clean": self.still_clean}
 
     async def get_tuning(self) -> dict:
         return self.tuning
@@ -191,6 +208,35 @@ class CameraBase:
         await self._reinit()
         return {"stream_size": list(self.stream_size)}
 
+    # ---- helpers shared by real and fake ---------------------------------------------------
+
+    @property
+    def bayer(self) -> str:
+        return self.cfg.raw_format.replace("S", "").rstrip("0123456789P_") or "BGGR"
+
+    def _check_raw_args(self, frames: int, packed: bool) -> int:
+        frames = int(frames)
+        if not 1 <= frames <= self.cfg.max_raw_frames:
+            raise ValueError(f"frames must be 1..{self.cfg.max_raw_frames}")
+        if packed and frames > 1:
+            raise ValueError("packed raw is only available for a single frame")
+        if packed and self.cfg.full_size[0] % 4:
+            raise ValueError("packed raw needs a width that is a multiple of 4")
+        return frames
+
+    def _check_bracket_args(self, factors: list[float]) -> list[float]:
+        factors = [float(f) for f in factors]
+        if not 1 <= len(factors) <= self.cfg.max_bracket_frames:
+            raise ValueError(f"1..{self.cfg.max_bracket_frames} exposure factors")
+        if any(not 0.01 <= f <= 100 for f in factors):
+            raise ValueError("exposure factors must be within 0.01..100")
+        return factors
+
+    def _encode_raw(self, arrays, metas: list[dict], packed: bool, flat: bool) -> tuple[bytes, dict]:
+        """`arrays`: list of mosaics or a MosaicAccumulator (one metadata dict per frame)."""
+        return encode_raw(arrays, metas, bayer=self.bayer, black_level=self.cfg.black_level, bit_depth=10,
+                          packed=packed, flat=flat, tuning=self.tuning)
+
     # ---- to implement ----------------------------------------------------------------------
 
     async def start(self) -> None: ...
@@ -202,13 +248,26 @@ class CameraBase:
         Encoders only run while someone is connected (they cost ~30% of a Pi 3 core)."""
         self.active = active
 
-    async def snapshot(self, full: bool = False) -> bytes: ...
-    async def capture_raw(self) -> bytes: ...
+    async def snapshot(self, full: bool = False) -> bytes:
+        """Latest stream frame, or (full=True) a full-resolution still without its metadata."""
+        if full:
+            return (await self.still())[0]
+        return self.main.jpeg
+
+    async def still(self) -> tuple[bytes, dict]:
+        """Full-resolution JPEG still plus the still's own request metadata (X-Frame shape)."""
+        ...
+
+    async def capture_raw(self, frames: int = 1, packed: bool = False, flat: bool = False) -> tuple[bytes, dict]:
+        """OFRW v2 record of `frames` raw mosaics averaged (one mode switch) plus its trailer dict."""
+        ...
+
+    async def capture_bracket(self, factors: list[float], raw: bool = False) -> tuple[bytes, dict]:
+        """OFBK container: one still per exposure factor (x current exposure), gain and colour gains
+        locked, one mode switch. Returns (bytes, summary)."""
+        ...
+
     async def capture_metadata(self) -> dict: return dict(self.main.meta)
-
-
-def pack_raw(width: int, height: int, bit_depth: int, black_level: int, bayer: str, data: bytes) -> bytes:
-    return RAW_HEADER.pack(RAW_MAGIC, width, height, bit_depth, black_level, bayer.encode()[:8].ljust(8, b"\0")) + data
 
 
 # ================================ real camera ===================================================
@@ -223,12 +282,14 @@ class PiCamera(CameraBase):
         self._meta_ring: deque = deque(maxlen=8)
         self._meta_lock = threading.Lock()
         self._lock = asyncio.Lock()
+        self._warned_unmatched = False
 
     def _open(self):
         from picamera2 import Picamera2
         from libcamera import controls as lc  # noqa: F401
         tuning = self.tuning or None
         self._picam = Picamera2(tuning=tuning) if tuning else Picamera2()
+        self._picam.options["quality"] = int(self.cfg.still_jpeg_quality)  # capture_file path (idle snapshot)
         props = self._picam.camera_properties
         self.sensor = {"model": props.get("Model"), "pixel_array_size": list(props.get("PixelArraySize", ())),
                        "modes": [{"size": list(m["size"]), "bit_depth": m["bit_depth"], "fps": m.get("fps")}
@@ -238,7 +299,7 @@ class PiCamera(CameraBase):
             lores={"size": tuple(self.cfg.lores_size), "format": "YUV420"},
             raw=None,  # no raw stream while streaming: saves a per-frame DMA sync of a 4 MB buffer on the Pi 3
             sensor={"output_size": tuple(self.cfg.sensor_size), "bit_depth": 10},
-            controls=self._libcamera_controls(self.controls),
+            controls=self._stream_controls(),
             buffer_count=4,
         )
         self._picam.configure(self._video_config)
@@ -267,17 +328,20 @@ class PiCamera(CameraBase):
                 out[k] = float(v)
         return out
 
+    def _stream_controls(self) -> dict:
+        """Video-configuration controls: the persistent controls plus explicit FrameDurationLimits.
+        picamera2's default for video configurations is (33333, 33333), which caps ExposureTime at
+        one frame; the configured range lets AE (or the user) go long on dim samples."""
+        out = self._libcamera_controls(self.controls)
+        out["FrameDurationLimits"] = tuple(int(x) for x in self.cfg.stream_frame_duration_us)
+        return out
+
     def _on_request(self, request) -> None:
         # Runs on picamera2's event thread for every completed request: an exception here would
         # take that thread down and stop the camera silently, so it must never escape.
         try:
             md = request.get_metadata()
-            entry = {
-                "ts": md.get("SensorTimestamp"), "exposure": md.get("ExposureTime"), "gain": md.get("AnalogueGain"),
-                "digital_gain": md.get("DigitalGain"), "colour_gains": list(md.get("ColourGains", ()) or ()),
-                "focus_fom": md.get("FocusFoM"), "lux": md.get("Lux"), "frame_duration": md.get("FrameDuration"),
-                "t": now_ns(),
-            }
+            entry = frame_meta(md)
             with self._meta_lock:
                 self._meta_ring.append(entry)
         except Exception:  # noqa: BLE001
@@ -292,8 +356,15 @@ class PiCamera(CameraBase):
         if timestamp_us is not None:
             for m in reversed(ring):
                 if m.get("ts") is not None and m["ts"] // 1000 == timestamp_us:
-                    return m
-        return ring[-1] if ring else {"t": now_ns()}
+                    return {**m, "matched": True}
+        # No entry for this encoder timestamp: report the newest metadata but say so, rather than
+        # letting the browser trust a `ts` that belongs to a neighbouring frame.
+        if not self._warned_unmatched:
+            self._warned_unmatched = True
+            log.warning("encoder frame timestamp %s not found in the metadata ring (%d entries); "
+                        "frame metadata flagged matched=false from now on when this happens",
+                        timestamp_us, len(ring))
+        return {**(ring[-1] if ring else {"t": now_ns()}), "matched": False}
 
     def _make_output(self, hub: FrameHub, encoder):
         from picamera2.outputs import Output
@@ -417,7 +488,7 @@ class PiCamera(CameraBase):
             # keep the preview configuration current: picamera2 re-applies its `controls` whenever it
             # switches back after a still, so stale values here would undo this very change
             if self._video_config is not None:
-                self._video_config["controls"] = self._libcamera_controls(self.controls)
+                self._video_config["controls"] = self._stream_controls()
             if self._picam is not None:
                 await asyncio.to_thread(self._picam.set_controls, self._libcamera_controls(controls))
 
@@ -433,8 +504,10 @@ class PiCamera(CameraBase):
         except Exception:  # noqa: BLE001
             log.exception("could not restore camera controls after the still")
 
-    def _still_controls(self) -> dict:
-        """Controls for a mode switch (full-res still, raw). Switching configuration restarts
+    # ---- still mode ------------------------------------------------------------------------
+
+    def _frozen_controls(self) -> dict:
+        """Our-style controls for a mode switch (full-res still, raw). Switching configuration restarts
         libcamera's AE/AWB from their defaults and the still is taken on the first frames, so under
         auto modes the picture would ignore the exposure and colour the live view had settled on.
         Freeze the live values from the latest frame metadata into manual controls instead. These
@@ -446,66 +519,188 @@ class PiCamera(CameraBase):
             controls.update(AeEnable=False, ExposureTime=int(last["exposure"]) - 1, AnalogueGain=float(last["gain"]))
         if controls.get("AwbEnable") and len(last.get("colour_gains") or ()) == 2:
             controls.update(AwbEnable=False, ColourGains=[float(g) for g in last["colour_gains"]])
-        return self._libcamera_controls(controls)
+        return controls
+
+    @staticmethod
+    def _noise_reduction_off():
+        try:
+            from libcamera import controls as lc
+            return lc.draft.NoiseReductionModeEnum.Off
+        except Exception:  # noqa: BLE001  no libcamera (tests): the enum's integer value
+            return 0
+
+    def _still_controls(self, frozen: dict | None = None) -> dict:
+        """libcamera controls for a still configuration: frozen AE/AWB values, explicit
+        FrameDurationLimits (picamera2's still default already allows long exposures; pinned so it
+        stays true), and with `still_clean` the ISP denoise off and Sharpness 0 (the stream keeps
+        the tuning's `rpi.sdn`/`rpi.sharpen`; stills feed browser-side stacking and metrics)."""
+        out = self._libcamera_controls(frozen if frozen is not None else self._frozen_controls())
+        out["FrameDurationLimits"] = tuple(int(x) for x in self.cfg.still_frame_duration_us)
+        if self.still_clean:
+            out["NoiseReductionMode"] = self._noise_reduction_off()
+            out["Sharpness"] = 0.0
+        return out
 
     def _require_camera(self):
         if self._picam is None:
             raise RuntimeError("camera is not running")
         return self._picam
 
+    def _in_still_mode(self, still_config, fn):
+        """Run fn(picam) with the camera switched to `still_config`, encoders stopped; switch back to
+        the video configuration, restore controls and restart encoders afterwards (one mode switch
+        for however many requests fn captures)."""
+        picam = self._require_camera()
+        self._stop_encoders()
+        try:
+            picam.switch_mode(still_config)
+            return fn(picam)
+        finally:
+            try:
+                picam.switch_mode(self._video_config)
+            except Exception:  # noqa: BLE001
+                log.exception("could not switch back to the stream configuration")
+            self._restore_controls_sync()
+            self._start_encoders()
+
+    @staticmethod
+    def _take_request(picam, want_exposure: int | None = None, max_tries: int = 8):
+        """Capture one request; when `want_exposure` is set, drop frames until the request's own
+        ExposureTime is within 5 % (libcamera applies a control change 2-3 frames later)."""
+        for i in range(max_tries):
+            req = picam.capture_request()
+            md = req.get_metadata()
+            if want_exposure is None or abs(int(md.get("ExposureTime") or 0) - want_exposure) <= max(want_exposure * 0.05, 50) \
+                    or i == max_tries - 1:
+                return req, md
+            req.release()
+        raise RuntimeError("unreachable")
+
+    def _jpeg_from_request(self, req) -> bytes:
+        buf = io.BytesIO()
+        req.make_image("main").save(buf, "JPEG", quality=int(self.cfg.still_jpeg_quality))
+        return buf.getvalue()
+
     async def snapshot(self, full: bool = False) -> bytes:
-        if not full:
-            fresh = self.main.jpeg and now_ns() - int(self.main.meta.get("t") or 0) < 1_000_000_000
-            if "main" in self._encoders and fresh:
-                return self.main.jpeg
-            async with self._lock:  # encoder idle (no clients): software JPEG of the current frame
-                return await asyncio.to_thread(self._jpeg_sync)
-        async with self._lock:
-            return await asyncio.to_thread(self._full_still_sync)
+        if full:
+            return (await self.still())[0]
+        fresh = self.main.jpeg and now_ns() - int(self.main.meta.get("t") or 0) < 1_000_000_000
+        if "main" in self._encoders and fresh:
+            return self.main.jpeg
+        async with self._lock:  # encoder idle (no clients): software JPEG of the current frame
+            return await asyncio.to_thread(self._jpeg_sync)
 
     def _jpeg_sync(self) -> bytes:
         buf = io.BytesIO()
         self._require_camera().capture_file(buf, "main", format="jpeg")
         return buf.getvalue()
 
-    def _full_still_sync(self) -> bytes:
-        picam = self._require_camera()
-        still = picam.create_still_configuration(
-            main={"size": tuple(self.cfg.full_size)}, controls=self._still_controls())
-        self._stop_encoders()
-        try:
-            buf = io.BytesIO()
-            picam.switch_mode_and_capture_file(still, buf, format="jpeg")
-            return buf.getvalue()
-        finally:
-            self._restore_controls_sync()
-            self._start_encoders()
-
-    async def capture_raw(self) -> bytes:
+    async def still(self) -> tuple[bytes, dict]:
         async with self._lock:
-            return await asyncio.to_thread(self._raw_sync)
+            return await asyncio.to_thread(self._still_sync)
 
-    def _raw_sync(self) -> bytes:
-        import numpy as np
-        w, h = self.cfg.full_size
+    def _still_sync(self) -> tuple[bytes, dict]:
         picam = self._require_camera()
-        still = picam.create_still_configuration(
-            main={"size": (w, h)}, raw={"format": self.cfg.raw_format, "size": (w, h)},
-            controls=self._still_controls())
-        self._stop_encoders()
-        try:
-            arr = picam.switch_mode_and_capture_array(still, "raw")
-        finally:
-            self._restore_controls_sync()
-            self._start_encoders()
-        raw16 = arr.view(np.uint16)[:h, :w] if arr.dtype == np.uint8 else arr[:h, :w]
-        bayer = self.cfg.raw_format.replace("S", "").rstrip("0123456789P_") or "BGGR"
-        return pack_raw(w, h, 10, self.cfg.black_level, bayer, np.ascontiguousarray(raw16, dtype="<u2").tobytes())
+        w, h = self.cfg.full_size
+        # JPEG still: main only (no raw stream: it would allocate 16 MB buffers nobody reads)
+        still = picam.create_still_configuration(main={"size": (w, h)}, raw=None, controls=self._still_controls())
+
+        def capture(picam):
+            req, md = self._take_request(picam)
+            try:
+                return self._jpeg_from_request(req), md
+            finally:
+                req.release()
+        jpeg, md = self._in_still_mode(still, capture)
+        meta = frame_meta(md, still=True, matched=True, width=w, height=h, size=len(jpeg))
+        return jpeg, meta
+
+    async def capture_raw(self, frames: int = 1, packed: bool = False, flat: bool = False) -> tuple[bytes, dict]:
+        frames = self._check_raw_args(frames, packed)
+        async with self._lock:
+            return await asyncio.to_thread(self._raw_sync, frames, packed, flat)
+
+    def _raw_config(self, picam, controls: dict):
+        w, h = self.cfg.full_size
+        return picam.create_still_configuration(
+            main={"size": tuple(self.cfg.raw_main_size)}, raw={"format": self.cfg.raw_format, "size": (w, h)},
+            controls=controls)
+
+    @staticmethod
+    def _raw_array(req, w: int, h: int):
+        import numpy as np
+        arr = req.make_array("raw")
+        return arr.view(np.uint16)[:h, :w] if arr.dtype == np.uint8 else arr[:h, :w]
+
+    def _raw_sync(self, frames: int, packed: bool, flat: bool) -> tuple[bytes, dict]:
+        picam = self._require_camera()
+        w, h = self.cfg.full_size
+        still = self._raw_config(picam, self._still_controls())
+
+        def capture(picam):
+            acc, metas = MosaicAccumulator(10), []
+            for _ in range(frames):
+                req, md = self._take_request(picam)
+                try:
+                    acc.add(self._raw_array(req, w, h))  # summed before the buffer goes back: one 16 MB copy live
+                finally:
+                    req.release()
+                metas.append(frame_meta(md))
+            return acc, metas
+        acc, metas = self._in_still_mode(still, capture)
+        return self._encode_raw(acc, metas, packed, flat)
+
+    async def capture_bracket(self, factors: list[float], raw: bool = False) -> tuple[bytes, dict]:
+        factors = self._check_bracket_args(factors)
+        async with self._lock:
+            return await asyncio.to_thread(self._bracket_sync, factors, raw)
+
+    def _bracket_sync(self, factors: list[float], raw: bool) -> tuple[bytes, dict]:
+        picam = self._require_camera()
+        w, h = self.cfg.full_size
+        frozen = self._frozen_controls()
+        frozen["AeEnable"] = False  # gain and colour gains stay at the frozen values; only exposure varies
+        frozen["AwbEnable"] = False
+        # `base` is the exposure libcamera actually runs (our controls store it minus one, see
+        # _libcamera_controls); the per-item targets are in the same actual microseconds.
+        base = int(frozen.get("ExposureTime") or DEFAULT_CONTROLS["ExposureTime"]) + 1
+        lo, hi = MIN_EXPOSURE_US, int(self.cfg.still_frame_duration_us[1])
+        exposures = [max(lo, min(hi, int(round(base * f)))) for f in factors]
+        first = dict(frozen, ExposureTime=exposures[0] - 1)
+        controls = self._still_controls(first)
+        still = (self._raw_config(picam, controls) if raw else
+                 picam.create_still_configuration(main={"size": (w, h)}, raw=None, controls=controls))
+
+        def capture(picam):
+            items = []
+            for i, (f, exp) in enumerate(zip(factors, exposures)):
+                if i > 0:
+                    picam.set_controls({"ExposureTime": exp})
+                req, md = self._take_request(picam, want_exposure=exp)
+                try:
+                    if raw:
+                        data, trailer = self._encode_raw([self._raw_array(req, w, h).copy()], [frame_meta(md)], False, False)
+                        meta = frame_meta(md, still=True, matched=True, width=w, height=h, size=len(data),
+                                          factor=f, index=i, kind="raw", requested_exposure=exp)
+                    else:
+                        data = self._jpeg_from_request(req)
+                        meta = frame_meta(md, still=True, matched=True, width=w, height=h, size=len(data),
+                                          factor=f, index=i, kind="jpeg", requested_exposure=exp)
+                finally:
+                    req.release()
+                items.append((meta, data))
+            return items
+        items = self._in_still_mode(still, capture)
+        summary = {"count": len(items), "factors": factors, "base_exposure": base, "exposures": exposures,
+                   "gain": frozen.get("AnalogueGain"), "colour_gains": frozen.get("ColourGains"), "raw": raw,
+                   "frames": [m for m, _ in items]}
+        return encode_bracket(items), summary
 
     async def capture_metadata(self) -> dict:
-        if self._picam is None:
-            return {}
-        return await asyncio.to_thread(lambda: dict(self._picam.capture_metadata()))
+        async with self._lock:  # never poke a camera that _reinit is closing and reopening
+            if self._picam is None:
+                return {}
+            return await asyncio.to_thread(lambda: json_safe(dict(self._picam.capture_metadata())))
 
 
 def make_camera(cfg: CameraConfig, state_dir: Path, events: EventBus) -> CameraBase:

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { PyramidFuser } from '../pyramidFuse'
-import { smoothDepthIndex, depthZMap, colorizeDepth, reliefShade, depthStats } from '../depthMap'
+import { smoothDepthIndex, depthZMap, colorizeDepth, reliefShade, depthStats, stepsToUm, depthLegend } from '../depthMap'
 
 // Big enough for PyramidFuser to build more than one pyramid level (it needs min(w, h) > 48);
 // below that it degenerates to a plain average with no per-pixel winner selection at all.
@@ -80,5 +80,19 @@ describe('depth-from-focus', () => {
     const idx = new Uint8Array([0, 0, 1, 0, 0])   // a lone '1' surrounded by '0's
     const out = smoothDepthIndex(idx, w, h, 1)
     expect(out[2]).toBe(0)
+  })
+
+  it('stepsToUm scales a z lookup table and depthLegend reports the right unit', () => {
+    const zsUm = stepsToUm([100, 300], 0.05)
+    expect(zsUm).toEqual([5, 15])
+    const idx = new Uint8Array([0, 1])
+    const zMap = depthZMap(idx, zsUm)
+    const stats = depthStats(zMap)
+    expect(stats).toEqual({ min: 5, max: 15 })
+    expect(depthLegend(stats, 0.05)).toEqual({ min: 5, max: 15, unit: 'µm' })
+    // no calibrated step size: honest fallback to plain steps, not a fabricated distance
+    const stepStats = depthStats(depthZMap(idx, [100, 300]))
+    expect(depthLegend(stepStats)).toEqual({ min: 100, max: 300, unit: 'steps' })
+    expect(depthLegend(stepStats, 0)).toEqual({ min: 100, max: 300, unit: 'steps' })
   })
 })

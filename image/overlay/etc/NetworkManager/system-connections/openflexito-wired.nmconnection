@@ -1,0 +1,21 @@
+[connection]
+id=openflexito-wired
+uuid=8c1f2d3e-4a5b-4c6d-8e9f-0a1b2c3d4e5f
+type=ethernet
+autoconnect=true
+autoconnect-priority=20
+
+[ethernet]
+
+[ipv4]
+# DHCP from a router when there is one; a cable straight into a laptop has no DHCP server, so after
+# the timeout fall back to a 169.254.x.x link-local address (the laptop does the same by itself) and
+# avahi keeps answering microscope.local on it.
+method=auto
+link-local=fallback
+dhcp-timeout=15
+may-fail=true
+
+[ipv6]
+method=auto
+addr-gen-mode=default

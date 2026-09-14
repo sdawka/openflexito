@@ -132,3 +132,16 @@ describe('stitching', () => {
     expect(featherWeight(99, 99, 100, 100, 10)).toBeCloseTo(0.0025)
   })
 })
+
+import { settleForMove } from '../scanPlan'
+
+describe('adaptive settle', () => {
+  it('is the minimum for short moves, grows with move length and is capped', () => {
+    expect(settleForMove(0)).toBe(150)
+    expect(settleForMove(1000)).toBe(150)
+    expect(settleForMove(6000)).toBe(300)
+    expect(settleForMove(100000)).toBe(1500)
+    expect(settleForMove(6000, 400)).toBe(400)
+    expect(settleForMove(NaN)).toBe(150)
+  })
+})

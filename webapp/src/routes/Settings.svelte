@@ -4,6 +4,11 @@
   import type { StageStatus } from '../lib/api/types'
 
   let stage = $state<StageStatus | null>(null)
+  let stillCleanBusy = $state(false)
+  async function setStillClean(enabled: boolean) {
+    stillCleanBusy = true
+    try { await device.client.call('camera.set_still_clean', { enabled }); await device.refreshStatus() } finally { stillCleanBusy = false }
+  }
   let schema = $state<{ name: string; doc: string; params: { name: string; type: string; required: boolean }[] }[]>([])
   let streamW = $state(1640), streamH = $state(1232)
 
@@ -148,6 +153,41 @@
       <div><div class="label">follow interval (ms)</div><input type="number" min="100" step="50" style="width:90px" bind:value={settings.followIntervalMs} onchange={saveSettings} /></div>
     </div>
     <p class="muted" style="font-size:12px">Models download from huggingface.co on first use (needs internet on this computer) and are cached by the browser. WebGPU is used when available.</p>
+  </div>
+
+  <div class="panel">
+    <h3>Still image quality</h3>
+    <p class="muted" style="font-size:12px;margin:0 0 8px">Stills, raws and exposure/HDR brackets are always JPEG-quality-95 / full sensor size.
+      "Clean" additionally turns off the ISP's noise reduction and sharpening for these captures (recommended: the
+      browser-side pipeline — RAW develop, focus stacking, super-resolution — does its own noise/sharpness handling
+      and does not need the camera's baked-in defaults fighting it). The live stream is never affected.</p>
+    <label style="display:flex;gap:8px;align-items:center">
+      <input type="checkbox" checked={device.status?.camera?.still_clean ?? true} disabled={stillCleanBusy || !device.connected}
+        onchange={(e) => setStillClean(e.currentTarget.checked)} /> Clean stills (no ISP denoise/sharpen)
+    </label>
+  </div>
+
+  <div class="panel">
+    <h3>Capture defaults</h3>
+    <p class="muted" style="font-size:12px;margin:0 0 8px">Defaults for the Photo panel's video recording and super-resolution modes (also editable there; changes here persist the same way).</p>
+    <div class="row">
+      <div><div class="label">video codec</div>
+        <select bind:value={settings.videoCodec} onchange={saveSettings}>
+          <option value="vp9">VP9</option><option value="av1">AV1</option><option value="vp8">VP8</option>
+        </select>
+      </div>
+      <div><div class="label">video bitrate (Mbit/s)</div><input class="mono" type="number" min="1" max="50" style="width:80px" bind:value={settings.videoBitrateMbps} onchange={saveSettings} /></div>
+      <label style="display:flex;gap:8px;align-items:center;margin-top:18px"><input type="checkbox" bind:checked={settings.videoStabilise} onchange={saveSettings} /> stabilise video</label>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <div><div class="label">super-resolution scale</div>
+        <select bind:value={settings.superresScale} onchange={saveSettings}>
+          <option value={2}>2×</option><option value={3}>3×</option>
+        </select>
+      </div>
+      <div><div class="label">super-resolution pixfrac</div><input class="mono" type="number" min="0.1" max="1" step="0.05" style="width:80px" bind:value={settings.superresPixfrac} onchange={saveSettings} /></div>
+      <label style="display:flex;gap:8px;align-items:center;margin-top:18px"><input type="checkbox" bind:checked={settings.superresSharpen} onchange={saveSettings} /> sharpen by default</label>
+    </div>
   </div>
 
   <div class="panel">

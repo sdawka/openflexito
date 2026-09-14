@@ -36,6 +36,10 @@ await step('connects and streams', async () => {
   await position()
 })
 
+await step('link indicator shows the wired fake device', async () => {
+  await page.waitForFunction(() => /Wired/.test(document.querySelector('nav')?.textContent || ''), null, { timeout: 8000 })
+})
+
 await step('all tabs render without errors', async () => {
   for (const tab of ['calibrate', 'scan', 'gallery', 'settings', 'live']) {
     await nav(tab); await page.waitForTimeout(600)
@@ -70,22 +74,44 @@ await step('photo (full resolution) lands in the gallery', async () => {
 
 await step('RAW photo develops to a 16-bit PNG in the gallery', async () => {
   await nav('live')
-  await page.selectOption('.panel:has(h3:has-text("Photo")) select', 'raw')
+  await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'raw')
   await page.click('button:has-text("Take photo")')
   await page.waitForFunction(() => /saved "RAW 10-bit/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 120000 })
     .catch(async () => { throw new Error('raw photo did not finish: ' + (await page.locator('.panel:has(h3:has-text("Photo"))').innerText()).replace(/\s+/g, ' ').slice(-160)) })
-  await page.selectOption('.panel:has(h3:has-text("Photo")) select', 'single')
+  await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'single')
   await nav('gallery'); await page.waitForTimeout(600)
   const gt = await page.locator('main').innerText()
   expect(/RAW 10-bit BGGR → 16-bit PNG/.test(gt) && /DNG kept/.test(gt) && /developed: malvar/.test(gt), 'gallery does not describe the raw item: ' + gt.replace(/\s+/g, ' ').slice(0, 200))
   expect(/RAW 10-bit[\s\S]{0,120}?3280\s*[×x]\s*2464/.test(gt), 'raw item is not listed at full sensor size')
 })
 
+await step('RAW average photo (device-side frame averaging)', async () => {
+  await nav('live')
+  await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'rawavg')
+  await page.click('button:has-text("Take photo")')
+  await page.waitForFunction(() => /saved "RAW average/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 120000 })
+    .catch(async () => { throw new Error('rawavg photo did not finish: ' + (await page.locator('.panel:has(h3:has-text("Photo"))').innerText()).replace(/\s+/g, ' ').slice(-160)) })
+  await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'single')
+  await nav('gallery'); await page.waitForTimeout(600)
+  expect(/RAW average/.test(await page.locator('main').innerText()), 'gallery does not list the RAW average item')
+})
+
+await step('HDR (RAW) photo merges a linear exposure bracket', async () => {
+  await nav('live')
+  await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'hdrraw')
+  await page.click('button:has-text("Take photo")')
+  await page.waitForFunction(() => /saved "HDR RAW/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 120000 })
+    .catch(async () => { throw new Error('hdrraw photo did not finish: ' + (await page.locator('.panel:has(h3:has-text("Photo"))').innerText()).replace(/\s+/g, ' ').slice(-160)) })
+  await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'single')
+  await nav('gallery'); await page.waitForTimeout(600)
+  expect(/HDR RAW/.test(await page.locator('main').innerText()), 'gallery does not list the HDR RAW item')
+})
+
 if (moves) await step('focus stack photo returns to the starting z', async () => {
   await nav('live')
   const z0 = (await position()).z
-  await page.selectOption('.panel:has(h3:has-text("Photo")) select', 'focus')
-  const n = page.locator('.panel:has(h3:has-text("Photo")) input[type=number]').nth(0)
+  await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'focus')
+  const n = page.locator('.panel:has(h3:has-text("Photo")) input[aria-label="focus stack slices"]')
   await n.click({ clickCount: 3 }); await n.pressSequentially('3')
   await page.click('button:has-text("Take photo")')
   await page.waitForFunction(() => /saved "Focus stack/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 90000 })
@@ -93,7 +119,7 @@ if (moves) await step('focus stack photo returns to the starting z', async () =>
   await page.waitForTimeout(500)
   expect(Math.abs((await position()).z - z0) <= 1, `z ended at ${(await position()).z}, started at ${z0}`)
   const info = await page.locator('.panel:has(h3:has-text("Photo"))').innerText()
-  await page.selectOption('.panel:has(h3:has-text("Photo")) select', 'single')
+  await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'single')
   await nav('gallery'); await page.waitForTimeout(600)
   const g = await page.locator('main').innerText()
   const m = g.match(/from each: ([\d% ]+)/)
@@ -130,6 +156,18 @@ if (moves) await step('calibration 2: stage ↔ camera mapping', async () => {
   const row = await page.locator('table.result tbody tr').first().innerText()
   const pxPerStep = parseFloat(row.split('\t')[1])
   expect(pxPerStep > 0.005 && pxPerStep < 5, `implausible pixels/step ${pxPerStep}`)
+})
+
+await step('RAW flat field: capture and clear', async () => {
+  await nav('calibrate')
+  const panel = '.panel:has(h3:has-text("RAW flat field"))'
+  await page.click(`${panel} button:has-text("Capture flat field")`)
+  await logHas(/flat field: (done|FAILED)/, 60000)
+  const log = await page.locator('pre.log').innerText()
+  expect(/flat field: done/.test(log), 'flat-field capture did not finish: ' + log.split('\n').slice(-3).join(' | '))
+  await page.waitForFunction(() => /A flat field is active/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 5000 })
+  await page.click(`${panel} button:has-text("Clear")`)
+  await page.waitForFunction(() => !/A flat field is active/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 5000 })
 })
 
 if (moves) await step('click-hold-drag pans the stage like a map', async () => {
@@ -192,8 +230,8 @@ if (moves) await step('scan 2×2 stitches into the gallery', async () => {
 
 if (moves) await step('fine focus stack centres on the focus plane and fuses several slices', async () => {
   await nav('live')
-  await page.selectOption('.panel:has(h3:has-text("Photo")) select', 'focusfine')
-  const n = page.locator('.panel:has(h3:has-text("Photo")) input[type=number]').nth(0)
+  await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'focusfine')
+  const n = page.locator('.panel:has(h3:has-text("Photo")) input[aria-label="focus stack slices"]')
   await n.click({ clickCount: 3 }); await n.pressSequentially('5')
   await page.click('button:has-text("Take photo")')
   await page.waitForFunction(() => /saved "Fine focus stack/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 180000 })
@@ -201,7 +239,7 @@ if (moves) await step('fine focus stack centres on the focus plane and fuses sev
   await page.waitForTimeout(500)
   const z = (await position()).z
   expect(Math.abs(z) < 150, `fine stack ended at z=${z}; the fake specimen is in focus at z=0`)
-  await page.selectOption('.panel:has(h3:has-text("Photo")) select', 'single')
+  await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'single')
   await nav('gallery'); await page.waitForTimeout(600)
   const g = await page.locator('main').innerText()
   const m = g.match(/fine focus stack \(pyramid\)[\s\S]{0,160}?from each: ([\d% ]+)/)
@@ -236,8 +274,10 @@ await step('live focus stack builds a composite and saves it', async () => {
   await page.click('.panel:has(h3:has-text("Focus")) .seg button:has-text("Off")')
 })
 
-await step('video recording lands in the gallery and opens in the viewer', async () => {
+await step('video recording (stabilise on) lands in the gallery and opens in the viewer', async () => {
   await nav('live')
+  const stabilise = page.locator('.panel:has(h3:has-text("Photo")) label:has-text("Stabilise") input[type=checkbox]')
+  if (!(await stabilise.isChecked())) await stabilise.check()
   await page.click('button:has-text("Record video")')
   await page.waitForFunction(() => /Stop · \d+ s/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 5000 })
   await page.waitForTimeout(2500)
@@ -249,6 +289,9 @@ await step('video recording lands in the gallery and opens in the viewer', async
   await page.waitForSelector('video.video', { timeout: 5000 })
   const dur = await page.locator('video.video').evaluate((v) => new Promise((r) => { if (v.readyState >= 1) r(v.duration); else v.onloadedmetadata = () => r(v.duration) }))
   expect(dur === Infinity || dur > 1, `video duration ${dur}`)
+  // a short clip must not silently loop (looks like a glitch): controls shown, loop off under ~3 s
+  const loops = await page.locator('video.video').evaluate((v) => v.loop)
+  expect(!loops, `a ${dur.toFixed(1)}s clip has loop enabled`)
   await page.click('button:has-text("close")')
 })
 
@@ -352,29 +395,58 @@ await step('spiral order and polygon region update the scan plan without moving 
   await page.selectOption('select:near(:text("order"))', 'snake')
 })
 
-if (moves) await step('super-resolution captures a dithered pattern and drizzles it to 2x', async () => {
+if (moves) await step('super-resolution captures a dithered pattern and drizzles it, sharpened', async () => {
   await nav('live')
-  await page.selectOption('.panel:has(h3:has-text("Photo")) select', 'superres')
-  const n = page.locator('.panel:has(h3:has-text("Photo")) input[type=number]').nth(0)
-  await n.click({ clickCount: 3 }); await n.pressSequentially('4')
+  const panel = '.panel:has(h3:has-text("Photo"))'
+  await page.selectOption(`${panel} select[aria-label="capture mode"]`, 'superres')
+  // scale 2 (not 3): a 3x drizzle of a full-resolution crop is memory-heavy and this step already
+  // covers the Advanced controls (pixfrac, extra frames) and the Sharpen toggle end to end.
+  await page.selectOption(`${panel} select:near(:text("Scale"))`, '2')
+  await page.click(`${panel} label:has-text("Sharpen") input[type=checkbox]`)
+  await page.click(`${panel} summary:has-text("Advanced")`)
+  const extra = page.locator(`${panel} label:has-text("Extra frames") input[type=number]`)
+  await extra.click({ clickCount: 3 }); await extra.pressSequentially('1')
   await page.click('button:has-text("Take photo")')
   await page.waitForFunction(() => /saved "Super-resolution/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 90000 })
     .catch(async () => { throw new Error('super-resolution did not finish: ' + (await page.locator('.panel:has(h3:has-text("Photo"))').innerText()).replace(/\s+/g, ' ').slice(-200)) })
-  await page.selectOption('.panel:has(h3:has-text("Photo")) select', 'single')
+  await page.click(`${panel} label:has-text("Sharpen") input[type=checkbox]`)   // leave unchecked for later steps
+  await page.selectOption(`${panel} select[aria-label="capture mode"]`, 'single')
   await nav('gallery'); await page.waitForTimeout(600)
   const g = await page.locator('main').innerText()
   expect(/super-resolution \d+ frames ×2/i.test(g), 'gallery does not describe the super-resolution result: ' + g.replace(/\s+/g, ' ').slice(0, 200))
 })
 
+if (moves) await step('super-resolution RAW planes (no demosaic) drizzles a 2x2 grid', async () => {
+  await nav('live')
+  const panel = '.panel:has(h3:has-text("Photo"))'
+  await page.selectOption(`${panel} select[aria-label="capture mode"]`, 'superres')
+  await page.selectOption(`${panel} select:near(:text("Scale"))`, '2')
+  await page.click(`${panel} summary:has-text("Advanced")`)
+  const extra = page.locator(`${panel} label:has-text("Extra frames") input[type=number]`)
+  await extra.click({ clickCount: 3 }); await extra.pressSequentially('0')
+  const rawBox = page.locator(`${panel} label:has-text("RAW planes") input[type=checkbox]`)
+  await rawBox.check()
+  expect(await page.locator(`${panel} label:has-text("Sharpen") input[type=checkbox]`).isDisabled(), 'Sharpen should be disabled when RAW planes is on')
+  await page.click('button:has-text("Take photo")')
+  await page.waitForFunction(() => /saved "Super-resolution RAW/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 120000 })
+    .catch(async () => { throw new Error('super-resolution RAW did not finish: ' + (await page.locator('.panel:has(h3:has-text("Photo"))').innerText()).replace(/\s+/g, ' ').slice(-200)) })
+  await rawBox.uncheck()   // leave unchecked for anyone re-running this file interactively
+  await page.selectOption(`${panel} select[aria-label="capture mode"]`, 'single')
+  await nav('gallery'); await page.waitForTimeout(600)
+  const g = await page.locator('main').innerText()
+  expect(/super-resolution \d+ frames ×2/i.test(g), 'gallery does not describe the RAW super-resolution result: ' + g.replace(/\s+/g, ' ').slice(0, 200))
+  expect(/developed: none \(drizzled Bayer planes\)/.test(g), 'gallery does not show the no-demosaic RAW chip: ' + g.replace(/\s+/g, ' ').slice(0, 200))
+})
+
 if (moves) await step('fine focus stack produces a depth map with an image/depth/relief toggle', async () => {
   await nav('live')
-  await page.selectOption('.panel:has(h3:has-text("Photo")) select', 'focusfine')
-  const n = page.locator('.panel:has(h3:has-text("Photo")) input[type=number]').nth(0)
+  await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'focusfine')
+  const n = page.locator('.panel:has(h3:has-text("Photo")) input[aria-label="focus stack slices"]')
   await n.click({ clickCount: 3 }); await n.pressSequentially('5')
   await page.click('button:has-text("Take photo")')
   await page.waitForFunction(() => /saved "Fine focus stack/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 180000 })
     .catch(async () => { throw new Error('fine stack did not finish: ' + (await page.locator('.panel:has(h3:has-text("Photo"))').innerText()).replace(/\s+/g, ' ').slice(-200)) })
-  await page.selectOption('.panel:has(h3:has-text("Photo")) select', 'single')
+  await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'single')
   await nav('gallery'); await page.waitForTimeout(600)
   expect(/depth map/.test(await page.locator('main').innerText()), 'gallery does not show a depth map chip')
   await page.locator('.card:has-text("Fine focus stack") button:has-text("Open")').first().click()

@@ -60,7 +60,46 @@ before first boot. If no known network is found 40 s after boot, the Pi opens a 
 `microscope` / `microscope` at `http://10.42.0.1/`.
 
 Status LED (green ACT): fast blink booting, slow blink no WLAN, double blink hotspot,
-solid connected, heartbeat streaming, SOS hardware error.
+solid connected, heartbeat streaming, SOS hardware error. Wired Ethernet counts as "connected"
+exactly like WiFi client mode; the hotspot only comes up when neither a cable nor WiFi is up.
+
+## Networking
+
+Three ways to reach the microscope, in order of preference:
+
+1. **Cable to your router or switch** (recommended): plug the Pi into the same network as your
+   laptop. DHCP assigns an address and `http://microscope.local/` resolves as usual; this is the
+   fast path and needs no setup.
+2. **Cable straight to your laptop** (no router): after DHCP times out the Pi falls back to
+   link-local addressing (169.254.x.x), which every OS's network stack brings up automatically on
+   the other end too. `microscope.local` still resolves over it via avahi/mDNS — no manual IP
+   entry needed.
+3. **WiFi client**: put `openflexito-wifi.txt` on the boot partition (see above) or join from
+   Settings. Convenient, but shares one radio's bandwidth with everything else on the network.
+4. **Hotspot** (`microscope` / `microscope` at `http://10.42.0.1/`): fallback only, opened 40 s
+   after boot if no known network is found. Slowest and least reliable option — move to one of the
+   above when you can.
+
+The webapp's status bar shows which of these is active (wired speed and address, WiFi network
+name, or "Hotspot") and a live-measured stream bitrate from the running MJPEG stream (no second
+connection is opened to measure it). Realistic throughput and the time to pull one uncompressed
+16 MB RAW frame (`/raw.bin`, see below) over each:
+
+| Link                        | Throughput      | ~time per RAW frame |
+|-----------------------------|-----------------|----------------------|
+| Ethernet                    | 200-300 Mbit/s  | ~0.5 s               |
+| WiFi, 5 GHz                 | 40-90 Mbit/s    | ~1.5-3 s             |
+| WiFi, 2.4 GHz                | 15-40 Mbit/s    | ~3-9 s               |
+| Hotspot                     | 10-30 Mbit/s    | ~5-14 s              |
+
+The live stream itself (820×616 MJPEG at ~18 fps, ~100 kB/frame, see "Stream mode" below) needs
+roughly 15 Mbit/s continuously, which is comfortable on Ethernet or 5 GHz WiFi but leaves little
+headroom on 2.4 GHz or the hotspot for a RAW/HDR/super-resolution capture at the same time. The
+Photo panel shows a one-line estimate and nudge toward Ethernet when the link is a hotspot or the
+measured rate is under ~30 Mbit/s.
+
+**Unverified on hardware**: the link-local fallback's timing (DHCP timeout, whether avahi answers
+promptly on a 169.254 address) and real sustained Ethernet throughput on the Pi 3B+ — see TODO.md.
 
 ## Sangaboard wiring
 
@@ -134,38 +173,92 @@ the bundled `imx219.json` tuning file comes from that project.
   lag from sensor to JPEG output is ~60 ms.
 - `/raw.bin` (3280×2464 SBGGR10 unpacked to 16 MB) takes ~14 s over WiFi; the tuning reload via a
   fresh `CameraManager` takes 1.5 s.
+- **Wired link**: the Pi 3B+ cannot act as a USB device — its one USB controller feeds the onboard hub
+  rather than a peripheral-mode port, so USB gadget/Ethernet-over-USB is a Pi Zero/4/5 trick, not
+  available here. A direct Ethernet cable is still the fast path (NetworkManager + avahi bring up
+  link-local addressing and `microscope.local` over it), well under a second per 16 MB raw frame
+  against the ~14 s WiFi figure above — see "Networking" for the connection options and throughput
+  table, and TODO.md for what is still unverified on the real Pi.
 
 ## Photos and stacks
 
 The Photo button takes a full-resolution still (3280×2464, ~1.3 s, ~1.5 MB 8-bit JPEG) into the gallery;
 the stage does not move for it. Stills freeze the exposure, gain and colour gains the live view is using
 (a configuration switch restarts libcamera's auto algorithms, so without this the still would ignore
-them). **RAW mode** fetches the sensor's 10-bit Bayer frame (`/raw.bin`, 16 MB, ~20 s in total) and
-develops it in a worker (`algo/rawdev.ts`) the way the ISP would, but losslessly: black level, the tuning
-file's 16×12 lens-shading tables (bilinear), the live white-balance gains, Malvar-He-Cutler 5×5 demosaic,
-the tuning file's colour matrix and gamma curve, into a 16-bit PNG (`png16.ts`, ~30 MB). The untouched
-mosaic is stored as a **DNG** (`dng.ts`: CFA pattern, black/white level, AsShotNeutral, ColorMatrix1
-derived from the tuning CCM) that RawTherapee, darktable and Lightroom open. Note the shading tables are
-only as good as calibration 1: with the placeholder tables the field stays vignetted. Two stacked modes run entirely in the browser (`webapp/src/lib/algo/stack.ts`):
+them). The still is captured with `switch_mode` + `capture_request`, so its own request metadata
+(exposure, analogue/digital gain, colour gains, lux, focus FoM, its `SensorTimestamp`) travels back in
+`X-Frame` instead of the last stream frame's (`api/snapshot.ts`'s `fetchSnapshotWithMeta`); the gallery
+item keeps it as `capture.meta` alongside the pixel scale in force, so a still's exposure and the moment
+it was actually taken (assertable against the stage's own move timestamps) are on record. Stills, raws
+and brackets shoot with `still_clean` (`NoiseReductionMode Off`, `Sharpness 0`, JPEG quality pinned to
+95) so the ISP's own denoise/sharpen never inflates a stack's sharpness metrics or halos its edges;
+stream and still each have explicit `FrameDurationLimits` (stream 33.3 ms–0.5 s, stills 0.1 ms–1 s)
+reported in `camera.status()`. **RAW mode** fetches the sensor's 10-bit Bayer frame (`/raw.bin`, 16 MB,
+~20 s in total) and develops it in a worker (`algo/rawdev.ts`) the way the ISP would, but losslessly:
+black level, the tuning file's 16×12 lens-shading tables (bilinear) or a measured **flat field**
+(`/flat.bin?frames=N`, per-channel gain maps from `algo/flatField.ts`, taken with the sample removed and
+preferred over the tuning ALSC tables once saved), the record's own white-balance gains, Malvar-He-Cutler
+5×5 demosaic (or RCD, `algo/demosaic.ts`, sharper on fine structure at 3-5× the cost), the record's own
+colour matrix (nearest to its colour temperature) and the tuning gamma curve via a linearly-interpolated
+LUT, into a 16-bit PNG (`png16.ts`, ~30 MB). The untouched mosaic is stored as a **DNG** (`algo/dng.ts`:
+CFA pattern, black/white level, AsShotNeutral and ColorMatrix1 correctly unbalanced by the white-balance
+gains so RawTherapee/darktable/Lightroom estimate the right illuminant, an EXIF IFD with the still's own
+exposure/gain, GainMap opcodes when a flat field is in force) that those tools open. Note the shading
+tables are only as good as calibration 1: with the placeholder tables and no flat field the field stays
+vignetted.
+
+The raw record itself is **OFRW v2** (`device/openflexito/rawfmt.py`): the original header (magic, size,
+bit depth, black level, Bayer order) plus pixels plus a JSON trailer (exposure, gains, CCM, lux, whether
+it's a flat field, `matched`) that `rawdev`/`rawWorker.ts` use instead of the live stream's values. Two
+extra modes reuse it: **`rawavg`** averages N (2-8, default 4) raw frames in one device-side mode switch
+into a 16-bit mean for a √N reduction in shot noise, and a **packed 10-bit** transfer
+(`/raw.bin?packed=1`, SBGGR10_CSI2P, 10.1 MB instead of 16.2 MB) is available for a faster fetch. An
+**exposure bracket** endpoint (`/bracket.bin?factors=..`) freezes gain and colour gains and steps only
+`ExposureTime` through the requested factors in one mode switch, each frame's metadata confirmed within 5
+% of its target before capture; `hdrraw` uses it for a true HDR merge (`algo/hdr.ts`: Debevec-style
+radiance recovery from the linear RAW brackets, then tone-mapped to a 16-bit PNG) instead of blending
+already-tone-mapped JPEGs. Two stacked modes run entirely in the browser (`webapp/src/lib/algo/stack.ts`):
 a **focus stack** captures N slices `step` z-steps apart (starting below, ending back at the starting z
 with z backlash compensation) and keeps, block by block, the slice with the highest local Laplacian
 energy; an **LED exposure stack** captures the scene at several LED levels (0.4×, 0.7×, 1×, 1.5× of the
 current brightness, clipped to the range) and fuses them with well-exposedness weights (Mertens-style,
 single scale). Both weight maps are smoothed over neighbouring blocks so seams do not show. A focus
 stack item keeps every slice (`slice/<n>`) and records how much of the result came from each; the
-gallery shows it (on the algae sample, 5 slices 40 steps apart gave 34/18/18/17/13 %). During an LED
-stack auto exposure is locked so the camera cannot cancel the LED changes.
+gallery shows it (on the algae sample, 5 slices 40 steps apart gave 34/18/18/17/13 %). Every multi-shot
+mode (focus stack, LED/exposure stack, super-resolution, scan, time-lapse) now locks AE **and** AWB for
+the whole run through one shared helper (`services/cameraLock.ts`), instead of each mode fighting or
+forgetting to freeze the camera itself, and each z move is verified against the hardware read-back
+position (retried once, the stack aborted rather than silently continuing on a short move).
 
 The quick stack's block weights are interpolated bilinearly between cells (the first version showed
-square patches) and the slices are aligned to the first by phase correlation before blending. The **fine
-focus stack** (`focusfine`) first runs a fast autofocus sweep to find the focus plane and the width of the
-sharpness peak, spreads N slices (default 9) over 1.5× that width centred on the plane, aligns each slice,
-and fuses them in a Laplacian pyramid in a worker (`algo/pyramidFuse.ts`, `workers/stackWorker.ts`:
-per-coefficient maximum local energy at every scale, averaged residual, slices streamed so only two
-pyramids are in memory). It ends back on the focus plane. **Fine stack from RAW** (`focusfineraw`) does the
+square patches) and the slices are aligned to the middle slice by phase correlation before blending
+(the previous first-slice reference softened exactly the sharper slices it should have kept; the
+alignment primitive, `algo/align.ts`'s `SliceAligner`, resamples with Lanczos-3 instead of bilinear so a
+half-pixel shift does not zero out detail at the Nyquist frequency). The **fine focus stack**
+(`focusfine`) first runs a dedicated Laplacian sweep (not the coarse JPEG-size autofocus curve, which is
+far broader than the true depth of field) to find the focus plane and the width of the sharpness peak,
+spaces N slices (default 9, a ceiling not a target) at ≈0.7× that half-width, covering it on each side
+plus one slice beyond, aligns each slice to the middle, and fuses them in a Laplacian pyramid in a worker
+(`algo/pyramidFuse.ts`, `workers/stackWorker.ts`: per-coefficient maximum local energy at every scale
+with a noise floor below which levels are averaged instead of a hard argmax, and cross-level consistency
+so a single noisy coefficient can't win against its neighbours; slices streamed so only two pyramids are
+in memory). An optional **hybrid** fusion mode additionally blends in the depth surface's own confidence
+(`hybridFuse`, wired end to end in `stackWorker.ts` but with no UI toggle yet) for Zerene-style clean
+backgrounds. It ends back on the focus plane. **Fine stack from RAW** (`focusfineraw`) does the
 same with each slice being a developed RAW frame, fused as float and saved as a 16-bit PNG, so nothing is
-quantised to 8 bits or JPEG-compressed before the merge (~30 s per slice). The LED exposure stack is the
-"HDR" counterpart (exposure fusion).
+quantised to 8 bits or JPEG-compressed before the merge (~30 s per slice). **Autofocus** itself gained a
+sub-pixel peak fit (quadratic, Gaussian or Lorentzian, whichever suits the sharpness curve's shape) and
+an optional **two-pass** mode (a coarse JPEG-size sweep locates the plane, a short fine Laplacian sweep
+around it refines it, with an optional full-resolution confirmation shot) — implemented and tested
+(`algo/autofocus.ts`) but, like hybrid fusion, not yet exposed as a UI toggle. The LED exposure stack is the
+"HDR" counterpart (exposure fusion): its fuser is now `algo/exposureFuse.ts`'s multi-scale Mertens
+(contrast, saturation and well-exposedness combined in a Laplacian pyramid), replacing a single-scale
+8×8-cell blend that had no contrast term and could pick a flatter, less sharp frame in a tied cell. The
+bracket itself can be `'led'` (the original brightness ladder), `'exposure'` (the camera's own
+`/bracket.bin` exposure bracket, gain and colour gains frozen device-side so there is no tint drift at
+all), or `'both'`; only `'exposure'`/`'both'` and the RAW-family modes currently carry the device's own
+per-frame exposure/gain metadata into the gallery item's `capture.meta`. `hdrraw` (above) is the linear,
+radiance-domain version of the same idea.
 
 Preview noise: measured directly from picamera2 at mid-grey (820×616 from the full readout, gain 1),
 libcamera's `NoiseReductionMode` Fast and HighQuality are identical on the vc4 ISP (temporal noise
@@ -191,9 +284,22 @@ so a running per-block "keep the sharpest" composite of the stream becomes an ex
 live view without moving the stage (`algo/liveStack.ts`, worker `liveStackWorker.ts`, ~8 fps at stream
 resolution: each frame is aligned to the composite by phase correlation, blocks whose Laplacian energy
 beats the stored value by 5 % replace it with feathered edges, the stored energy decays by 1 % per frame
-so the view follows real changes, and any stage motion resets it). Save stores the composite;
-**Record video** (Photo panel) records what is shown, stream or live stack, with MediaRecorder into a
-WebM in the gallery (`services/recorder.svelte.ts`), played back in the viewer.
+so the view follows real changes, and any stage motion resets it). Every 200 frames the alignment
+reference re-anchors to the composite itself instead of staying pinned to the stale first frame, so slow
+continuous drift no longer accumulates ever-larger bilinear softening. Save stores the composite.
+
+**Record video** (Photo panel) records what is shown, stream or live stack, into a WebM in the gallery
+(`services/recorder.svelte.ts`), played back in the viewer. The plain live-view path now reads the stream
+through `api/mjpegStream.ts` (`fetch` + `ReadableStream`, decoding each multipart JPEG part with
+`createImageBitmap`) instead of sampling the DOM `<img src=stream.mjpg>`, so every recorded frame is a
+complete, real device frame — the `<img>` element's own multipart decoding gives no signal for exactly
+when a new part has finished painting, so the old approach could sample a half-updated image and its
+recorded position log never quite matched what was drawn. An optional per-frame **stabiliser**
+(`algo/stabilize.ts`: `fftTrack.displacement` against a self-re-anchoring reference, a one-euro filter
+separates the smooth pan from hand/vibration jitter, the residual is the correction, clamped and drawn
+onto a slightly larger canvas so no edge is ever exposed) is skipped, and reset, while the stage is moving
+so a real move is never fought as jitter. Codec (VP9/AV1/VP8) and bitrate are user options, with a
+per-frame `{t, seq, position}` sidecar stored alongside the video.
 
 White balance is edited the way raw editors do it rather than with red/blue gain sliders: **Pick
 neutral** then click a spot in the live image that should be grey (gains solved from the linearised
@@ -248,18 +354,27 @@ exposure on it explains that AE is already in control instead of fighting it.
 
 ### Time-lapse and tracking
 
-The **Time-lapse** panel (Live sidebar, under Photo) captures frames at a fixed interval (1 s to
-hours), for a given duration or frame count, from either the stream or a full-resolution still,
-optionally autofocusing every N frames and turning the LED off between frames (`light.set`, the level
-it found on start is restored when it stops) to limit heating and photobleaching. Each frame is
-registered to the first by phase correlation (`algo/fftTrack.displacement`); the pure accounting in
-`algo/drift.ts` accumulates the drift and, once it exceeds a threshold and the camera-stage calibration
-exists, `services/timelapse.svelte.ts` issues a raw stage move (`compensate: false`) to bring the
-sample back into frame and re-templates. Every frame's measured shift is stored with it, so the
-gallery item (kind `timelapse`, frames as blobs `f0000…`) can be played back drift-free: the built-in
-viewer (`components/TimelapseViewer.svelte`) plays, pauses and scrubs the sequence with the shifts
-subtracted, and can export it as a WebM (drawing frames to a canvas and recording with MediaRecorder,
-the same approach as `services/recorder.svelte.ts`) alongside the existing folder export.
+The **Time-lapse** panel (Live sidebar, under Photo) captures frames on an absolute clock (slot *i* is
+due at start + *i* × interval, so a slow capture doesn't push every later frame's timing back — a slot
+already late when the previous capture finishes is skipped and counted, not queued), for a given
+duration or frame count, from either the stream or a full-resolution still, optionally autofocusing
+every N frames and turning the LED off between frames (`light.set`, the level it found on start is
+restored when it stops) to limit heating and photobleaching. AE/AWB are locked for the whole run
+(`services/cameraLock.ts`) with an optional periodic re-meter (release, wait for the auto algorithms,
+re-lock) for long runs where the true exposure genuinely drifts, and a live storage estimate stops the
+run with a warning once a configured byte cap is reached. Each frame is registered to the first by phase
+correlation (`algo/fftTrack.displacement`) on a downsampled crop; the pure accounting in `algo/drift.ts`
+accumulates the drift and, once it exceeds a threshold and the camera-stage calibration exists,
+`services/timelapse.svelte.ts` issues a raw stage move (`compensate: false`) to bring the sample back
+into frame and re-templates. Every frame's measured shift is stored alongside the analysis width it was
+measured at, so the gallery item (kind `timelapse`, frames as blobs `f0000…`) can be played back
+drift-free at any frame size — the shift is rescaled to the actual frame width at playback and export
+(`algo/drift.ts`'s `playbackShift`; it used to be subtracted at its raw downsampled-pixel value
+regardless of the frame's real resolution, which under-corrected stabilised playback 2-8× depending on
+whether the stream or a full-resolution still was the source). The built-in viewer
+(`components/TimelapseViewer.svelte`) plays, pauses and scrubs the sequence with the shifts subtracted,
+and can export it as a WebM (drawing frames to a canvas and recording with MediaRecorder, the same
+approach as `services/recorder.svelte.ts`) alongside the existing folder export.
 
 **Organism tracking** (`algo/tracking.ts`) detects blobs in a frame by thresholding on the frame's
 mean ± k·σ (dark objects on a bright field by default) and flood-filling connected components into a
@@ -285,7 +400,11 @@ Gallery can filter by sample name or any metadata field and, with "group by samp
 per sample with an **Export all of this sample** button that writes one subfolder per item (image/DNG/
 slices/thumbnail plus its `<name>.json` sidecar of full metadata) and an `index.csv` summarising every
 item (name, time, kind, size, z, sample fields) — the per-item **Export** button already wrote that JSON
-sidecar alongside the image files, so both paths share the same file list (`store/gallery.ts`).
+sidecar alongside the image files, so both paths share the same file list (`store/gallery.ts`). Every
+exported file stem is built by `algo/naming.ts`: `YYYYMMDD-HHMMSS_sample_label_x_y_z_blob.ext`
+(local capture time, slugified sample name and mode label, stage position, then the caller's own blob
+name), so files sort by capture time, group by sample, and still say what they are and where the stage
+was without opening them.
 
 **Macro recording and replay** captures the RPC calls the app makes to the device (`lib/api/rpc.ts`'s
 `onCall` hook) while recording is on — stage moves, jogs, light and camera-control changes — plus
@@ -299,19 +418,35 @@ all of this: Record/Stop/Save, the saved-macro list with Replay/Export/Delete, a
 
 ### Super-resolution and depth
 
-**Super-resolution mode** (`superres`) takes a square pattern of full-resolution stills (default 3×3)
-with the stage nudged between shots by however many steps the stage↔camera calibration says gives
-~0.5 px of shift at full resolution (raw moves, no backlash compensation, like the other sweeps; it
-refuses with a clear message if that calibration hasn't been run). Every frame is registered to the
-first by phase correlation with a parabolic sub-pixel refinement added to `algo/fftTrack.ts` (the
-*measured* shift is used, since backlash and residual stage error mean the commanded offsets are only
-approximate), then a worker (`workers/superresWorker.ts`) drizzles them onto a 2× grid
-(`algo/drizzle.ts`: each frame's pixel is a small square "drop" splatted at its measured sub-pixel
-position, output cells averaging whatever drops land on them) and streams progress back. A frame
-larger than 4096 px on its long side is centre-cropped first so the drizzled 2× result stays within
-canvas limits; the gallery item's `superres` field records the frame count, measured shifts, output
-scale and whether a crop was applied, and the image is named like the other modes (e.g.
-"Super-resolution 9 frames ×2").
+**Super-resolution mode** (`superres`) takes an S×S grid (2×2 or 3×3) of full-resolution stills at 1/S
+of a full-resolution pixel per hop, planned in image pixels and converted to stage steps through the
+camera-stage calibration's full 2×2 matrix (`calibration.csm.matrix`) rather than a per-axis step count,
+so the pattern lands correctly even with the stage axes' ~4° rotation from the sensor (the previous
+raster pattern repeated a phase on its third row/column and ignored the rotation). Cells are visited in
+snake order with a backlash pre-load move on every axis reversal; a frame is registered against the
+first with `algo/register.ts` (coarse downscaled estimate refined at full resolution — the same
+primitive the focus stack's aligner uses) instead of the old whole-frame-downscaled phase correlation,
+which measured sub-pixel shifts roughly 2-3× short and occasionally locked onto the wrong period
+entirely on repetitive scenes; a frame more than 0.15 px from its planned phase, or a duplicate of an
+already-accepted phase, is dropped (weight 0, reported, not silently included). The accepted frames are
+drizzled (`workers/superresWorker.ts`, `algo/drizzle.ts`: each frame's pixel is a small square "drop"
+splatted at its measured sub-pixel position, output cells averaging whatever drops land on them,
+`pixfrac` default 0.5 for a sharper reconstruction than the old 0.8) and streamed progress back; an
+optional **sharpen** pass runs Wiener deconvolution against a PSF built from the drizzle drop and the
+pixel aperture (no measured optical-blur term yet — nothing in this codebase measures the real PSF from
+a bead or knife edge). A frame larger than 4096 px on its long side is centre-cropped first so the
+drizzled result stays within canvas limits (never triggers on the IMX219's native resolution); the
+gallery item's `superres` field records frames used/total, measured shifts and confidence, output scale,
+`pixfrac` and whether sharpening or a crop was applied, and the image is named
+`Super-resolution {used}/{total} frames ×{scale}`. **Raw-plane super-resolution** (`superres` with the *RAW
+planes* option) fetches each grid frame as a 10-bit `/raw.bin` record instead of a JPEG, registers it on a
+green-plane proxy, drizzles the mosaics per CFA phase onto the finer grid with no demosaic step
+(`algo/drizzle.ts`'s `drizzleBayer`/`drizzleRawSuperres`: the classic 4-shot 1 px pattern fills every
+colour site), then applies black level, white balance, shading, CCM and the tone curve to the combined
+linear planes in the worker and saves a 16-bit PNG with an 8-bit preview. It is the mode where the
+colour planes' ~2.7× undersampling is actually recovered; ~15 s per frame over WiFi, and the worker
+falls back to a central crop when the 2× planes would not fit in memory. Sharpening is not applied in
+raw mode (the PSF model has not been checked on linear 16-bit planes).
 
 The **fine focus stack** also produces a **depth map**: `PyramidFuser` already tracks, per pixel, which
 slice's Laplacian energy won at the finest pyramid level (`depthIndex()`), which combined with each
@@ -319,22 +454,35 @@ slice's z gives a coarse depth-from-focus map (`algo/depthMap.ts`: majority-vote
 per-pixel ties, then a colour ramp and a pseudo-3D relief shading — the image's brightness modulated by
 the depth gradient, like hill-shading a digital elevation model). `focusfine` and `focusfineraw` items
 gain `depth` and `relief` preview blobs, a raw `depth.bin` (the smoothed per-pixel slice index, one byte
-per pixel — cheap to keep) and a `stack.depth` field (z range in steps, colour map used; no
-steps-to-micrometres factor exists yet in this codebase, so depth stays in steps). The gallery viewer
-shows an Image / Depth map / Relief toggle for any item that has one.
+per pixel — cheap to keep) and a `stack.depth` field (z range in steps, colour map used). `depthMap.ts`
+can now convert that z range to µm given the z stage-step size (`stepsToUm`/`depthLegend`), but the
+conversion isn't yet plumbed into the saved gallery item or its legend, so depth stays in steps on
+screen for now (see TODO.md). The gallery viewer shows an Image / Depth map / Relief toggle for any item
+that has one.
 
 ### Scanning
 
 **Autofocus per tile and a height map**: the Scan page's focus option runs the fast autofocus before
 capturing a tile, either on **every tile**, or on a coarse sub-grid — the four grid corners plus every
-Nth tile — with the tiles in between moved to a **predicted** z instead of measuring one. The surface
-through the measured points (`lib/algo/heightMap.ts`: a robust least-squares plane, or bilinear
-interpolation across the sub-grid, with a leave-one-out outlier check so one bad autofocus reading, e.g.
-dust on the coverslip, cannot warp the rest of the surface) supplies that prediction; the final z move for
-both measured and predicted tiles uses `'z'` backlash compensation, like the live autofocus's own
-approach. Every tile's z (measured or predicted) is kept in the gallery item (`scan.tiles[i].z`,
-`zMeasured`); the Viewer shows an optional colour-mapped height-map mini-map with a legend (in stage
-steps — no µm-per-step calibration exists yet) for any scan that has focus data.
+Nth tile — with the tiles in between moved to a **predicted** z instead of measuring one, and optionally
+further **locally refined** with a short ± range sweep around the predicted z rather than trusted as-is.
+The surface through the measured points (`lib/algo/heightMap.ts`: a robust least-squares plane, or
+bilinear interpolation across the sub-grid, with a leave-one-out outlier check so one bad autofocus
+reading, e.g. dust on the coverslip, cannot warp the rest of the surface) supplies that prediction; the
+final z move for both measured and predicted tiles uses `'z'` backlash compensation, like the live
+autofocus's own approach. Every tile's z (measured, refined or predicted) and its focus status are kept
+in the gallery item (`scan.tiles[i].z`, `zMeasured`, `focus`); the Viewer shows an optional colour-mapped
+height-map mini-map with a legend (in stage steps — no µm-per-step calibration wired in yet) for any scan
+that has focus data. AE/AWB are locked for the whole scan (`services/cameraLock.ts`) and each tile gets
+an **adaptive settle** proportional to how far it moved (plus a check that the stage has actually
+stopped) instead of one fixed delay for every tile regardless of distance.
+
+Tiles are stitched (`algo/stitch.ts`, `workers/stitchWorker.ts`) with a MAD-based robust position solve
+that drops outlier pairwise offsets (median + k·σ̂, a bad match from a featureless overlap can no longer
+drag the whole mosaic out of alignment), per-tile log-gain equalisation from the overlap statistics so
+exposure or vignetting differences between tiles don't show as seams, and either a normalised
+feather-weighted blend or an optional multi-band (Laplacian) blend for harder edges — replacing the old
+last-drawn-tile-wins compositing. A flat-field gain map can be divided out of every tile before blending.
 
 **Programmable scan regions**: beyond a plain rectangle, the Scan page can clip the grid to a **polygon**
 — click points on an overview (the stitched preview of the last scan, or the live view if none exists

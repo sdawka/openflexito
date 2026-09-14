@@ -46,14 +46,48 @@ export interface CameraStatus {
   tuning_customised: boolean
   fake: boolean
   last_frame: Partial<FrameMeta>
+  /** device.md §5: stills/raws/brackets get NoiseReductionMode off + Sharpness 0 when true (default true). */
+  still_clean?: boolean
+  still_jpeg_quality?: number
+  max_raw_frames?: number
+  max_bracket_frames?: number
+  frame_duration_limits_us?: { stream?: [number, number]; still?: [number, number] }
 }
 
 export type LedState = 'booting' | 'offline' | 'hotspot' | 'online' | 'streaming' | 'error' | 'off'
 
+export interface NetworkInterface {
+  interface: string
+  type: 'ethernet' | 'wifi' | 'hotspot'
+  connection: string
+  ip: string | null
+  link_local: boolean
+  speed_mbit: number | null
+}
+
+/** Additive network fields, per the net-device handoff (jobs/e88486dd/tmp/handoff/net-device.md):
+ *  `ip` prefers the Ethernet address when both Ethernet and WiFi are up; the fake device reports
+ *  `link: "ethernet"`, `interface: "eth0"`, `speed_mbit: 1000`. */
+export interface NetworkStatus {
+  state: string
+  ip: string | null
+  connections: string[]
+  /** Which path carries traffic; Ethernet with an IPv4 address beats WiFi. */
+  link?: 'ethernet' | 'wifi' | 'hotspot' | 'none' | null
+  interface?: string | null
+  /** True when `ip` is 169.254.x.x: a cable straight into a laptop with no DHCP server, still
+   *  reachable via `microscope.local` (avahi). */
+  link_local?: boolean | null
+  /** Ethernet link speed in Mbit/s from `/sys/class/net/<if>/speed`; null on WiFi/unknown. */
+  speed_mbit?: number | null
+  /** Per-interface detail for eth0/wlan0. */
+  interfaces?: NetworkInterface[]
+}
+
 export interface DeviceStatus {
   version: string
   led: LedState
-  network: { state: string; ip: string | null; connections: string[] }
+  network: NetworkStatus
   errors: Record<string, string>
   camera: CameraStatus | null
   stage: StageStatus | null

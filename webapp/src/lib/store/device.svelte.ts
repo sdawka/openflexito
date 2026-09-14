@@ -19,6 +19,10 @@ class DeviceStore {
   lastMove = $state<PositionEvent | null>(null)
   frame = $state<FrameMeta | null>(null)
   fps = $state(0)
+  /** Measured live-stream bitrate in kB/s, from `event.frame`'s own `size`/`t` (no second stream
+   *  opened just to measure it — CLAUDE.md: `api/snapshot.ts` is the only place besides the MJPEG
+   *  reader that fetches frame bytes, and this reuses metadata already flowing through the store). */
+  streamKBs = $state(0)
   light = $state<{ cc: number; pwm: number[]; channels?: { cc: number; pwm: number } }>({ cc: 0, pwm: [] })
   controls = $state<CameraControls | null>(null)
   error = $state<string | null>(null)
@@ -28,6 +32,7 @@ class DeviceStore {
   positions: PositionEvent[] = []
 
   private fpsWindow: number[] = []
+  private bitrateWindow: { t: number; size: number }[] = []
 
   constructor() {
     this.bind(this.client)
@@ -56,6 +61,15 @@ class DeviceStore {
       this.fpsWindow.push(now)
       while (this.fpsWindow.length && now - this.fpsWindow[0] > 2000) this.fpsWindow.shift()
       this.fps = this.fpsWindow.length / 2
+      if (f.stream === 'main' && typeof f.size === 'number') {
+        this.bitrateWindow.push({ t: now, size: f.size })
+        while (this.bitrateWindow.length && now - this.bitrateWindow[0].t > 3000) this.bitrateWindow.shift()
+        if (this.bitrateWindow.length > 1) {
+          const spanMs = now - this.bitrateWindow[0].t
+          const bytes = this.bitrateWindow.reduce((s, w) => s + w.size, 0)
+          this.streamKBs = spanMs > 0 ? bytes / 1024 / (spanMs / 1000) : 0
+        }
+      }
     })
     c.on('event.light', (l: { cc: number; pwm: number[]; channels?: { cc: number; pwm: number } }) => { this.light = l })
   }

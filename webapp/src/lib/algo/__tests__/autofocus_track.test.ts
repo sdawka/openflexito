@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { samplesFromSweep, quadraticPeak, countTurningPoints, fastAutofocus, stepAutofocus } from '../autofocus'
+import { samplesFromSweep, quadraticPeak, countTurningPoints, fastAutofocus, stepAutofocus, fitPeak, twoPassAutofocus } from '../autofocus'
 import { fft1d, fft2d } from '../fft'
 import { displacement, centralCrop } from '../fftTrack'
 import { effectivePositions, fitBacklash, imageToStageMatrix, pixelsToStage, invert2 } from '../csm'
@@ -55,6 +55,73 @@ describe('autofocus maths', () => {
     const io = { currentZ: () => z, async moveZ(dz: number) { z += dz }, async measure() { return 100 * Math.exp(-(((z - 210) / 400) ** 2)) } }
     const r = await stepAutofocus(io, 1000, 9)
     expect(Math.abs(r.peakZ - 210)).toBeLessThan(60)
+    expect(z).toBe(r.peakZ)
+  })
+
+  it('fitPeak: gaussian and lorentzian recover a sub-pixel peak, falling back to quadratic on non-positive samples', () => {
+    const gaussian = [-2, -1, 0, 1, 2].map((z) => ({ z: z + 5, s: 100 * Math.exp(-(((z - 0.3) / 3) ** 2)) }))
+    const g = fitPeak(gaussian, 'gaussian')!
+    expect(g.z).toBeCloseTo(5.3, 1)
+    const lorentzian = [-2, -1, 0, 1, 2].map((z) => ({ z: z + 5, s: 100 / (1 + ((z + 0.4) / 3) ** 2) }))
+    const l = fitPeak(lorentzian, 'lorentzian')!
+    expect(l.z).toBeCloseTo(4.6, 1)
+    const q = fitPeak([{ z: 0, s: -1 }, { z: 1, s: 0 }, { z: 2, s: -1 }], 'gaussian')
+    expect(q).toEqual(quadraticPeak([{ z: 0, s: -1 }, { z: 1, s: 0 }, { z: 2, s: -1 }]))
+  })
+
+  it('two-pass autofocus: coarse JPEG sweep seeds a fine Laplacian pass that lands closer to the true peak', async () => {
+    // simulated device as in the fast-autofocus test, but the "JPEG size" coarse metric is a noisy,
+    // broad proxy while the fine `measure()` is a clean, narrow Laplacian-like curve centred exactly
+    // on the true focus plane (z = 137.6): the coarse pass gets close, the fine pass gets precise.
+    let z = 0, now = 1000
+    const frames: FrameMeta[] = []
+    const io = {
+      currentZ: () => z,
+      frames: () => frames,
+      onProgress: () => {},
+      async moveZ(dz: number): Promise<MoveResult> {
+        const t0 = now, z0 = z
+        for (let k = 10; k <= Math.abs(dz); k += 10) {
+          const zz = z0 + Math.sign(dz) * k
+          const noise = Math.sin(zz * 0.7) * 150  // broad, noisy JPEG-size proxy
+          frames.push(frame(t0 + k, Math.max(0, Math.round(1000 + 5000 * Math.exp(-(((zz - 137) / 300) ** 2)) + noise))))
+        }
+        z += dz; now += Math.abs(dz) + 1
+        return { position: { x: 0, y: 0, z }, t0, t1: now - 1, start_hw: { x: 0, y: 0, z: z0 }, end_hw: { x: 0, y: 0, z }, cancelled: false }
+      },
+      async measure() { return 100 * Math.exp(-(((z - 137.6) / 30) ** 2)) },
+    }
+    const r = await twoPassAutofocus(io, { coarseDz: 2000, fineRange: 120, fineSteps: 9, fineModel: 'gaussian' })
+    expect(Math.abs(r.peakZ - 137.6)).toBeLessThan(5)
+    expect(z).toBe(r.peakZ)
+    expect(r.fineSamples.length).toBe(9)
+    expect(r.confirmed).toBe(true)
+  })
+
+  it('two-pass autofocus: a disagreeing confirmation falls back to the best fine sample', async () => {
+    let z = 0, now = 1000
+    const frames: FrameMeta[] = []
+    const io = {
+      currentZ: () => z,
+      frames: () => frames,
+      onProgress: () => {},
+      async moveZ(dz: number): Promise<MoveResult> {
+        const t0 = now, z0 = z
+        for (let k = 10; k <= Math.abs(dz); k += 10) {
+          const zz = z0 + Math.sign(dz) * k
+          frames.push(frame(t0 + k, Math.round(1000 + 5000 * Math.exp(-(((zz - 137) / 300) ** 2)))))
+        }
+        z += dz; now += Math.abs(dz) + 1
+        return { position: { x: 0, y: 0, z }, t0, t1: now - 1, start_hw: { x: 0, y: 0, z: z0 }, end_hw: { x: 0, y: 0, z }, cancelled: false }
+      },
+      async measure() { return 100 * Math.exp(-(((z - 137.6) / 30) ** 2)) },
+    }
+    // confirm() reports every fitted candidate as much worse than the best fine sample was, so the
+    // result should fall back to the best raw sample (rounded z) rather than trust the fitted peak.
+    const r = await twoPassAutofocus(io, { coarseDz: 2000, fineRange: 120, fineSteps: 9, confirm: async () => 0.01 })
+    expect(r.confirmed).toBe(false)
+    const bestSample = r.fineSamples.reduce((m, s) => (s.s > m.s ? s : m))
+    expect(r.peakZ).toBe(Math.round(bestSample.z))
     expect(z).toBe(r.peakZ)
   })
 })

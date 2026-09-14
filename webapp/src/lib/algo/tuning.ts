@@ -62,3 +62,25 @@ export function getGammaCurve(t: Tuning): number[] | undefined {
 export function setGammaCurve(t: Tuning, curve: number[]): Tuning {
   return setAlgo(t, 'rpi.contrast', { ...(findAlgo(t, 'rpi.contrast') ?? {}), gamma_curve: curve })
 }
+
+/** Colour temperature implied by a pair of white-balance gains, read off the tuning file's AWB
+ *  `ct_curve` ([ct, r, b, ct, r, b, ...] where r and b are the red/green and blue/green ratios of a
+ *  grey patch under that illuminant, i.e. 1/gain): the curve point nearest to (1/gr, 1/gb), linearly
+ *  interpolated between the two nearest knots. Undefined when the tuning has no curve. Used to pick
+ *  the CCM and ALSC tables for a RAW develop when libcamera's ColourTemperature is not available. */
+export function estimateColourTemperature(t: Tuning, gains: [number, number]): number | undefined {
+  const curve = findAlgo(t, 'rpi.awb')?.ct_curve
+  if (!Array.isArray(curve) || curve.length < 6 || !(gains[0] > 0) || !(gains[1] > 0)) return undefined
+  const r = 1 / gains[0], b = 1 / gains[1]
+  let best = Infinity, bestCt = curve[0]
+  for (let i = 0; i + 5 < curve.length; i += 3) {
+    // project (r, b) onto the segment between knots i and i+3
+    const ct0 = curve[i], r0 = curve[i + 1], b0 = curve[i + 2], ct1 = curve[i + 3], r1 = curve[i + 4], b1 = curve[i + 5]
+    const dr = r1 - r0, db = b1 - b0, len2 = dr * dr + db * db
+    const u = len2 > 0 ? Math.min(1, Math.max(0, ((r - r0) * dr + (b - b0) * db) / len2)) : 0
+    const pr = r0 + u * dr, pb = b0 + u * db
+    const d = (pr - r) ** 2 + (pb - b) ** 2
+    if (d < best) { best = d; bestCt = ct0 + u * (ct1 - ct0) }
+  }
+  return bestCt
+}

@@ -7,6 +7,7 @@
   import { exportTimelapseWebm } from '../lib/services/timelapse.svelte'
   import { tracking } from '../lib/services/tracking.svelte'
   import { tracksToCsv } from '../lib/algo/tracking'
+  import { playbackShift } from '../lib/algo/drift'
 
   let { item }: { item: GalleryItem } = $props()
   const meta = $derived(item.timelapse!)
@@ -27,7 +28,8 @@
     if (canvas.width !== bmp.width || canvas.height !== bmp.height) { canvas.width = bmp.width; canvas.height = bmp.height }
     const ctx = canvas.getContext('2d')!
     ctx.clearRect(0, 0, canvas.width, canvas.height)
-    const shift = stabilised ? meta.frames[i].shift : { dx: 0, dy: 0 }
+    // full-frame px (legacy items measured on a 410 px downsample are rescaled by playbackShift)
+    const shift = stabilised ? playbackShift(meta.frames[i], bmp.width) : { dx: 0, dy: 0 }
     ctx.drawImage(bmp, -shift.dx, -shift.dy)
     bmp.close()
   }
@@ -65,7 +67,7 @@
   <div class="bar">
     <button onclick={togglePlay}>{playing ? 'Pause' : 'Play'}</button>
     <input type="range" min="0" max={n - 1} bind:value={index} disabled={playing} />
-    <span class="mono">{index + 1}/{n}</span>
+    <span class="mono" title={meta.frames[index]?.t}>{index + 1}/{n}{meta.frames[index]?.refocused ? ' · refocused' : ''}{meta.frames[index]?.remetered ? ' · re-metered' : ''}</span>
     <label><input type="checkbox" bind:checked={stabilised} /> drift-free</label>
     <button onclick={exportVideo}>Export WebM</button>
     <button onclick={trackThis}>Track organisms</button>

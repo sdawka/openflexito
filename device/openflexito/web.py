@@ -47,6 +47,8 @@ def build_app(rpc: RpcRegistry, events: EventBus, camera: CameraBase | None, web
         app.router.add_get("/stream-lores.mjpg", stream_lores)
         app.router.add_get("/snapshot.jpg", snapshot)
         app.router.add_get("/raw.bin", raw)
+        app.router.add_get("/flat.bin", flat)
+        app.router.add_get("/bracket.bin", bracket)
 
     if webapp_dir and (webapp_dir / "index.html").is_file():
         async def index(r): return web.FileResponse(webapp_dir / "index.html")
@@ -159,24 +161,82 @@ async def mjpeg(request: web.Request, hub: FrameHub) -> web.StreamResponse:
     return resp
 
 
+def _frame_headers(meta: dict, extra: dict | None = None) -> dict:
+    return {"Cache-Control": "no-store", "X-Seq": str(meta.get("seq", "")), "X-Timestamp": str(meta.get("ts") or ""),
+            "X-Frame": json.dumps(meta, separators=(",", ":")), **(extra or {})}
+
+
 async def snapshot(request: web.Request) -> web.Response:
+    """Latest stream frame, or with `full=1` a full-resolution still. `X-Frame` carries the frame's
+    own metadata: for a still that is the still request's metadata plus `still: true`."""
     camera: CameraBase = request.app["camera"]
     full = request.query.get("full") in ("1", "true")
-    jpeg = await camera.snapshot(full=full)
+    if full:
+        try:
+            jpeg, meta = await camera.still()
+        except RuntimeError as e:
+            raise web.HTTPServiceUnavailable(text=str(e))
+        meta = {**meta, "seq": camera.main.meta.get("seq", "")}
+    else:
+        jpeg = await camera.snapshot(full=False)
+        meta = camera.main.meta
     if not jpeg:
         raise web.HTTPServiceUnavailable(text="no frame yet")
-    meta = camera.main.meta
-    return web.Response(body=jpeg, content_type="image/jpeg", headers={
-        "Cache-Control": "no-store", "X-Seq": str(meta.get("seq", "")), "X-Timestamp": str(meta.get("ts") or ""),
-        "X-Frame": json.dumps(meta, separators=(",", ":")),
-    })
+    return web.Response(body=jpeg, content_type="image/jpeg", headers=_frame_headers(meta))
+
+
+def _int_query(request: web.Request, name: str, default: int) -> int:
+    try:
+        return int(request.query.get(name, default))
+    except ValueError:
+        raise web.HTTPBadRequest(text=f"{name} must be an integer")
+
+
+async def _raw_response(request: web.Request, flat: bool, default_frames: int, filename: str) -> web.Response:
+    camera: CameraBase = request.app["camera"]
+    frames = _int_query(request, "frames", default_frames)
+    packed = request.query.get("packed") in ("1", "true")
+    try:
+        data, trailer = await camera.capture_raw(frames=frames, packed=packed, flat=flat)
+    except ValueError as e:
+        raise web.HTTPBadRequest(text=str(e))
+    except RuntimeError as e:
+        raise web.HTTPServiceUnavailable(text=str(e))
+    return web.Response(body=data, content_type="application/octet-stream",
+                        headers=_frame_headers(trailer, {"Content-Disposition": f"inline; filename={filename}"}))
 
 
 async def raw(request: web.Request) -> web.Response:
+    """OFRW v2 raw record. `frames=N` (1..max_raw_frames) averages N mosaics captured in one mode
+    switch (16-bit result); `packed=1` returns CSI2P 10-bit packing (single frame only). The JSON
+    trailer is repeated in `X-Frame`. Layout: rawfmt.py."""
+    return await _raw_response(request, flat=False, default_frames=1, filename="raw.bin")
+
+
+async def flat(request: web.Request) -> web.Response:
+    """Flat-field capture: the same multi-frame averaged raw as `/raw.bin?frames=N` (default 4) with
+    `flat: true` in the trailer; take it with the sample removed, the browser derives gain maps."""
+    return await _raw_response(request, flat=True, default_frames=4, filename="flat.bin")
+
+
+async def bracket(request: web.Request) -> web.Response:
+    """Exposure bracket: `factors=0.5,1,2` (x current exposure), `raw=1` for OFRW items instead of
+    JPEG. One mode switch, gain and colour gains locked. OFBK container (rawfmt.py); `X-Frame`
+    carries the summary (factors, exposures, per-frame metadata)."""
     camera: CameraBase = request.app["camera"]
-    data = await camera.capture_raw()
+    try:
+        factors = [float(x) for x in request.query.get("factors", "0.5,1,2").split(",") if x.strip()]
+    except ValueError:
+        raise web.HTTPBadRequest(text="factors must be comma-separated numbers")
+    raw_items = request.query.get("raw") in ("1", "true")
+    try:
+        data, summary = await camera.capture_bracket(factors, raw=raw_items)
+    except ValueError as e:
+        raise web.HTTPBadRequest(text=str(e))
+    except RuntimeError as e:
+        raise web.HTTPServiceUnavailable(text=str(e))
     return web.Response(body=data, content_type="application/octet-stream",
-                        headers={"Cache-Control": "no-store", "Content-Disposition": "inline; filename=raw.bin"})
+                        headers=_frame_headers(summary, {"Content-Disposition": "inline; filename=bracket.bin"}))
 
 
 async def fallback_page(request: web.Request) -> web.Response:
