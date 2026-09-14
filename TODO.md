@@ -39,8 +39,16 @@ returns the 16-bit mean (bit_depth 16, black 4096, white 65472, trailer with ccm
 colour gains locked; `/raw.bin?packed=1` is 10.1 MB; `still_clean` reports true in `camera.status`; network status
 reports link wifi/wlan0. RSS 252 MB after the raw work. The e2e with `E2E_MOVES=0` against the Pi passed 21 of 22 no-move steps (RAW average, HDR RAW, flat field,
 stabilised video included); the 22nd asserted a wired link and now accepts any link label. Calibration 1 ran as part of
-it with whatever was in view: re-run it with the sample removed. Still unverified: the wired link (no cable), the
-visual effect of `still_clean`, long exposures past 33 ms, and every stage-moving mode on hardware.
+it with whatever was in view: re-run it with the sample removed. **Wired link verified 2026-09-14** (cable from the Pi to the router, Pi power-cycled): `openflexito-wired` came up
+by itself with a DHCP lease (192.168.0.13) and became the default route (metric 100 vs 600 for WiFi), the hotspot
+stayed down, `microscope.local` resolved to the wired address, the app's status bar/`network` reported
+link ethernet 100 Mbit/s (the router port or cable negotiated 100BASE-T full duplex, not gigabit), and the service
+recovered its poll a few seconds after boot (one "unknown" reading in the first 10 s window). Throughput: 16 MB RAW
+in 2.7 s including the ~1.4 s capture (≈100 Mbit/s on the wire) against 9.6 s over the Pi's WiFi (13 Mbit/s measured);
+small sequential HTTP requests 41 vs 13 Mbit/s. Note the Pi answers requests to its WiFi address over the cable too
+(same subnet, default route), so only the cable's presence matters. Still unverified: the direct-cable link-local
+case (no DHCP server), the visual effect of `still_clean`, long exposures past 33 ms, and every stage-moving mode
+on hardware.
 - **picamera2 defaults for stills**: device.md hypothesis 3 — the *default* `NoiseReductionMode`/
   `FrameDurationLimits` picamera2 picks are now confirmed (2026-09-14 probe above); still pending: deploy
   this codebase's explicit `still_clean`/limits overrides and confirm they actually land in

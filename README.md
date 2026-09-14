@@ -116,6 +116,8 @@ measured rate is under ~30 Mbit/s.
 **Unverified on hardware**: the link-local fallback's timing (DHCP timeout, whether avahi answers
 promptly on a 169.254 address) and real sustained Ethernet throughput on the Pi 3B+ — see TODO.md.
 
+Verified 2026-09-14 with a cable to the router: the wired profile took a DHCP lease and the default route, the hotspot stayed down, `microscope.local` followed the wired address, and a 16 MB RAW arrived in 2.7 s including capture (≈100 Mbit/s on a 100BASE-T link) against 9.6 s over the Pi's WiFi at a measured 13 Mbit/s. The direct-cable (link-local) case is still untested.
+
 ## Sangaboard wiring
 
 The Sangaboard v0.5 HAT talks over the Pi's PL011 UART (GPIO 14/15, `/dev/ttyAMA0`,
