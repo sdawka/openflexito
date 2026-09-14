@@ -15,6 +15,9 @@ webapp/   Svelte 5 + TypeScript + Vite app served by the Pi           → npm ru
 image/    OS image: install.sh (live Pi), build.sh (sdm), overlay files
 ```
 
+
+Continuing the work on another machine: see `docs/CONTINUING.md` (state, workflow, where everything lives) and `docs/capture-overhaul/` (audit reports and agent handoffs).
+
 ## Quick start (development on a laptop, no hardware)
 
 The fake device renders a stage-coupled specimen (moves scroll it, z defocuses it), so calibration,
