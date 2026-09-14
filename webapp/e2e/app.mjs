@@ -36,8 +36,12 @@ await step('connects and streams', async () => {
   await position()
 })
 
-await step('link indicator shows the wired fake device', async () => {
-  await page.waitForFunction(() => /Wired/.test(document.querySelector('nav')?.textContent || ''), null, { timeout: 8000 })
+await step('link indicator shows the network link', async () => {
+  // any real link label; the fake device always reports a wired 1000 Mbit/s link
+  await page.waitForFunction(() => /Wired|WiFi|Hotspot/.test(document.querySelector('nav')?.textContent || ''), null, { timeout: 8000 })
+  const st = await page.evaluate(async (b) => (await (await fetch(b + '/rpc', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ method: 'system.status', params: {} }) })).json()), base)
+  const fake = !!((st.result ?? st).camera?.fake)
+  if (fake) expect(/Wired/.test(await page.locator('nav').innerText()), 'fake device should show a wired link')
 })
 
 await step('all tabs render without errors', async () => {

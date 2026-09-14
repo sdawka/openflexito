@@ -29,7 +29,18 @@ still-denoise hypothesis were both right and the explicit limits/`still_clean` i
 `switch_mode_and_capture_request` exists; NetworkManager 1.42.4; avahi publishes on all interfaces
 (`use-ipv4=yes`, no interface filter); eth0 had no cable (`carrier 0`, state unavailable) so the
 link-local fallback is still untested; the deployed `camera.py` matched the last commit, i.e. the Pi was
-one deploy behind this work and nothing below was actually exercised yet — deploy first.
+one deploy behind this work at probe time.
+
+**Deployed and exercised on the real Pi on 2026-09-14** (`image/deploy.sh`, service restarted clean, no journal
+warnings): `/snapshot.jpg?full=1` returns the still's own `X-Frame` (still true, matched true, 396 µs, gain 1.0,
+colour gains 0.866/1.352, SensorTimestamp, 3280×2464, 2.3 MB at quality 95 in 3.4 s over WiFi); `/raw.bin?frames=2`
+returns the 16-bit mean (bit_depth 16, black 4096, white 65472, trailer with ccm at 5000 K, frame timestamps) in
+9.6 s = 13 Mbit/s on the Pi's WiFi; `/bracket.bin?factors=0.5,1,2` gives exposures 189/378/775 µs with gain and
+colour gains locked; `/raw.bin?packed=1` is 10.1 MB; `still_clean` reports true in `camera.status`; network status
+reports link wifi/wlan0. RSS 252 MB after the raw work. The e2e with `E2E_MOVES=0` against the Pi passed 21 of 22 no-move steps (RAW average, HDR RAW, flat field,
+stabilised video included); the 22nd asserted a wired link and now accepts any link label. Calibration 1 ran as part of
+it with whatever was in view: re-run it with the sample removed. Still unverified: the wired link (no cable), the
+visual effect of `still_clean`, long exposures past 33 ms, and every stage-moving mode on hardware.
 - **picamera2 defaults for stills**: device.md hypothesis 3 — the *default* `NoiseReductionMode`/
   `FrameDurationLimits` picamera2 picks are now confirmed (2026-09-14 probe above); still pending: deploy
   this codebase's explicit `still_clean`/limits overrides and confirm they actually land in
