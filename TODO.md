@@ -1,12 +1,13 @@
 # TODO — where to carry on
 
-State as of 2026-09-11 (main `bfa3713` plus the uncommitted capture-quality session): the audit in
-`CAPTURE_AUDIT.md` (2026-09-10) drove five parallel agents (device wire formats; focus stack/autofocus/
-live stack; registration/super-resolution; scan/stitch/video/time-lapse; RAW/DNG/HDR) through nearly
-every Tier A/B item. `cd device && .venv/bin/pytest -q` (48 tests), `cd webapp && npm run check`
-(0 errors) and `npx vitest --run` (30 files, 237 tests) are all green; `npm run build` has not been
-re-run since the last commit in this session — do that, run the e2e suite against the fake device, then
-commit (no promotional text, never commit `image/secrets.env`).
+State as of 2026-09-14 (main, capture-quality overhaul plus UI wiring and networking both committed):
+the audit in `CAPTURE_AUDIT.md` (2026-09-10) drove several parallel agents (device wire formats; focus
+stack/autofocus/live stack; registration/super-resolution, including the later raw-plane pass; scan/
+stitch/video/time-lapse; RAW/DNG/HDR; the UI controls for all of it; wired-networking support) through
+nearly every Tier A/B item. `cd device && .venv/bin/pytest -q` (58 tests), `cd webapp && npm run check`
+(0 errors), `npx vitest --run` (30 files, 240 tests) and `npm run build` are all green; the full
+Playwright e2e (34 steps, `npm run test:e2e` against `--fake`) passes run alone — see the note under
+"Loose ends" below on why running two suites against one fake at once is erratic, not a real failure.
 
 ## Pending on the real Pi (it was offline when this was written)
 - Apply the power-button overlay live: append `dtoverlay=gpio-shutdown` to `/boot/firmware/config-openflexito.txt`
@@ -17,22 +18,25 @@ commit (no promotional text, never commit `image/secrets.env`).
   any LED level, exposure or coil state (README, "Preview noise"). Next time it is visible run the Camera
   panel's **Flicker check** and keep its four lines plus browser, display refresh rate and stream size.
 
-## Hardware verification needed (this session's changes are all unit-tested against synthetic
+## Hardware verification needed (most of this session's changes are still only unit-tested against
+synthetic scenes/the fake device — `picamera2` is not installed in `device/.venv`, so nothing camera-side
+can run for real in this dev environment; a probe below narrowed some of it from a real Pi over SSH)
 
-Confirmed on the real Pi over SSH on 2026-09-14 (read-only probe, nothing deployed yet): python3-picamera2 0.3.31 sets
-`NoiseReductionMode Fast` + `FrameDurationLimits (33333, 33333)` for video configs and `HighQuality` + `(100, 1e9)` for
-still configs, so the 33 ms exposure clamp hypothesis and the still-denoise hypothesis were both right and the explicit
-limits/`still_clean` in `camera.py` are needed; `switch_mode_and_capture_request` exists; NetworkManager 1.42.4; avahi
-publishes on all interfaces (`use-ipv4=yes`, no interface filter); eth0 had no cable (`carrier 0`, state unavailable) so
-the link-local fallback is still untested; the deployed `camera.py` matched the last commit, i.e. one deploy behind this work.
-scenes/the fake device only — `picamera2` is not installed in `device/.venv` and no real Pi was
-reachable this session)
-- **picamera2 defaults for stills**: confirm `NoiseReductionMode`, `Sharpness`, JPEG quality and
-  `FrameDurationLimits` on the real camera before trusting `still_clean`'s effect (`camera.metadata`,
-  the still config dict) — device.md hypothesis 3.
-- **`FrameDurationLimits` clamp**: verify the stream's `(33333, 500000)` minimum is clamped by the
-  3280×2464 mode's ~66.7 ms floor, and that AE now actually reaches past 66 ms on dim samples with the
-  explicit limits in place — device.md hypothesis 4.
+**Confirmed on the real Pi over SSH on 2026-09-14** (read-only probe, nothing deployed yet):
+python3-picamera2 0.3.31 sets `NoiseReductionMode Fast` + `FrameDurationLimits (33333, 33333)` for video
+configs and `HighQuality` + `(100, 1e9)` for still configs, so the 33 ms exposure clamp hypothesis and the
+still-denoise hypothesis were both right and the explicit limits/`still_clean` in `camera.py` are needed;
+`switch_mode_and_capture_request` exists; NetworkManager 1.42.4; avahi publishes on all interfaces
+(`use-ipv4=yes`, no interface filter); eth0 had no cable (`carrier 0`, state unavailable) so the
+link-local fallback is still untested; the deployed `camera.py` matched the last commit, i.e. the Pi was
+one deploy behind this work and nothing below was actually exercised yet — deploy first.
+- **picamera2 defaults for stills**: device.md hypothesis 3 — the *default* `NoiseReductionMode`/
+  `FrameDurationLimits` picamera2 picks are now confirmed (2026-09-14 probe above); still pending: deploy
+  this codebase's explicit `still_clean`/limits overrides and confirm they actually land in
+  `camera.metadata`/the still config dict once running, not just that the defaults they replace exist.
+- **`FrameDurationLimits` clamp**: device.md hypothesis 4 — still pending once deployed: verify the
+  stream's `(33333, 500000)` minimum is clamped by the 3280×2464 mode's ~66.7 ms floor, and that AE
+  actually reaches past 66 ms on dim samples with the explicit limits in place.
 - **`switch_mode` + `capture_request` behaviour**: confirm `Picamera2.switch_mode(config_dict)` followed
   by `capture_request()` and a second `switch_mode(video_config)` behaves like
   `switch_mode_and_capture_request`, that `create_still_configuration(raw=None)` really drops the raw
@@ -111,8 +115,9 @@ reachable this session)
 - "Export all of this sample" without the File System Access API downloads flat files (same as Export).
 - **Focus-stack arrival check** (`services/photo/focusStack.ts#moveZVerified`) compares the device's
   program-frame `position.z` with the target; `end_hw` is the raw hardware frame (sign/offset applied by
-  `stage.py#_to_program`) and must not be compared with program coordinates. The e2e (33 steps) passes on
-  the fake; run it alone: two suites against one fake drive the same stage and fail erratically.
+  `stage.py#_to_program`) and must not be compared with program coordinates — this is the likely cause of
+  the intermittent "stage did not reach z=..." failures seen in some e2e runs. The e2e (34 steps) passes
+  on the fake when run alone; two suites against one fake drive the same stage and fail erratically.
 
 ## Feature 5 (waiting on hardware): oblique / darkfield / differential phase contrast
 - Two side LEDs on the Sangaboard PWM outputs (J8 pins 2 and 4 are the low-side MOSFET drains, pins 1/3 = +5 V;

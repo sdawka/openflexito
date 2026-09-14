@@ -15,8 +15,20 @@ webapp/   Svelte 5 + TypeScript + Vite app served by the Pi           → npm ru
 image/    OS image: install.sh (live Pi), build.sh (sdm), overlay files
 ```
 
+## Contributing
 
-Continuing the work on another machine: see `docs/CONTINUING.md` (state, workflow, where everything lives) and `docs/capture-overhaul/` (audit reports and agent handoffs).
+Read `CLAUDE.md` first: it has the exact commands to check/test/build/run each part (`device/`,
+`webapp/`, the e2e suite, `image/`), and the coding conventions (module layering, backlash semantics,
+timestamp clock, RPC registration, Svelte 5 rules) that keep changes consistent with what's already
+here. `TODO.md` lists what's pending, above all what still needs real-hardware verification (this
+project is built and tested against a fake device far more than a real Pi). Before opening a PR: run
+the checks in `CLAUDE.md` for whatever you touched, and update `TODO.md`/`README.md` if you change
+behaviour they describe or resolve something they list as pending — stale docs are worse than none.
+
+Picking this up on a fresh machine (or after a break): `docs/CONTINUING.md` has the current state,
+the workflow that works, and where to reach the hardware; `docs/capture-overhaul/` has the audit
+reports and per-area handoffs from the most recent large session, useful for the reasoning behind
+recent design choices even if you're not continuing that specific work.
 
 ## Quick start (development on a laptop, no hardware)
 
@@ -508,7 +520,22 @@ The service runs unprivileged with `NoNewPrivileges`, so privileged actions (cle
 power off) are request files in `/var/lib/openflexito/requests/` handled by the root-side
 `openflexito-maint.path` unit. No sudo.
 
-## Status (2026-09-06)
+## Current status (2026-09-14)
+
+`cd device && .venv/bin/pytest -q` (58 tests), `cd webapp && npm run check` (0 errors), `npx vitest --run`
+(30 files, 240 tests) and `npm run build` are all green; the full Playwright e2e (34 steps against
+`--fake`, `cd webapp && npm run test:e2e`) passes when run alone. The capture-quality overhaul (still
+metadata, RAW averaging/packing/flat field, exposure and HDR RAW brackets, fixed sub-pixel registration
+and JPEG/raw-plane super-resolution, focus-stack/autofocus fixes, video stabilisation, wired-network
+support) and its UI are done and tested against the fake device; **none of it has been verified on real
+hardware yet** — see `TODO.md` for the exact pending list (a 2026-09-14 SSH probe of the real Pi narrowed
+some of it, but the updated code was not deployed at probe time). `docs/CONTINUING.md` and
+`docs/capture-overhaul/` have the full story and per-area handoffs if you're picking this up fresh.
+
+The section below is the last hardware-verified milestone (2026-09-06, before the overhaul); it is kept
+for the bugs it documents, not as the current feature list.
+
+## Status: early milestone (2026-09-06)
 
 Verified on hardware (Pi 3B+, Sangaboard v0.5.5, Pi Camera v2) from the built image:
 - image: `build-mac.sh` → flash → first boot configures WiFi/user/SSH and reboots → second boot
