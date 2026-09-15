@@ -32,9 +32,9 @@ async def cors_middleware(request: web.Request, handler):
 
 
 def build_app(rpc: RpcRegistry, events: EventBus, camera: CameraBase | None, webapp_dir: Path | None,
-              status_provider) -> web.Application:
+              status_provider, power=None) -> web.Application:
     app = web.Application(middlewares=[cors_middleware])
-    app["rpc"], app["events"], app["camera"], app["status"] = rpc, events, camera, status_provider
+    app["rpc"], app["events"], app["camera"], app["status"], app["power"] = rpc, events, camera, status_provider, power
 
     app.router.add_get("/health", health)
     app.router.add_get("/rpc/schema", rpc_schema)
@@ -131,7 +131,15 @@ async def websocket(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+def _require_power(request: web.Request) -> None:
+    """The image endpoints refuse with 503 while the device is in standby (power.py)."""
+    power = request.app["power"]
+    if power is not None and not power.on:
+        raise web.HTTPServiceUnavailable(text="device is in standby")
+
+
 async def mjpeg(request: web.Request, hub: FrameHub) -> web.StreamResponse:
+    _require_power(request)
     resp = web.StreamResponse(status=200, headers={
         "Content-Type": f"multipart/x-mixed-replace; boundary={BOUNDARY}",
         "Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache", "Connection": "close",
@@ -169,6 +177,7 @@ def _frame_headers(meta: dict, extra: dict | None = None) -> dict:
 async def snapshot(request: web.Request) -> web.Response:
     """Latest stream frame, or with `full=1` a full-resolution still. `X-Frame` carries the frame's
     own metadata: for a still that is the still request's metadata plus `still: true`."""
+    _require_power(request)
     camera: CameraBase = request.app["camera"]
     full = request.query.get("full") in ("1", "true")
     if full:
@@ -193,6 +202,7 @@ def _int_query(request: web.Request, name: str, default: int) -> int:
 
 
 async def _raw_response(request: web.Request, flat: bool, default_frames: int, filename: str) -> web.Response:
+    _require_power(request)
     camera: CameraBase = request.app["camera"]
     frames = _int_query(request, "frames", default_frames)
     packed = request.query.get("packed") in ("1", "true")
@@ -223,6 +233,7 @@ async def bracket(request: web.Request) -> web.Response:
     """Exposure bracket: `factors=0.5,1,2` (x current exposure), `raw=1` for OFRW items instead of
     JPEG. One mode switch, gain and colour gains locked. OFBK container (rawfmt.py); `X-Frame`
     carries the summary (factors, exposures, per-frame metadata)."""
+    _require_power(request)
     camera: CameraBase = request.app["camera"]
     try:
         factors = [float(x) for x in request.query.get("factors", "0.5,1,2").split(",") if x.strip()]

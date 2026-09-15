@@ -17,6 +17,7 @@ from .events import EventBus
 from .leds import LedController
 from . import logbuf
 from .netwatch import network_state, wifi_join, wifi_scan
+from .power import PowerController
 from .rpc import RpcRegistry
 from .sangaboard import Sangaboard, SangaboardError
 from .stage import Stage
@@ -39,6 +40,7 @@ class Device:
         self._status_dirty = asyncio.Event()
         self.events.on_change = lambda n: self.status(changed=True)
         self.leds.set_state("booting")
+        self.power = PowerController(self)
 
     # ---- hardware bring-up -------------------------------------------------------------------
 
@@ -83,9 +85,12 @@ class Device:
             "camera": self.camera.status() if self.camera else None,
             "stage": self.stage.status() if self.stage else None,
             "stream_clients": clients,
+            "power": self.power.status(),
         }
 
     def _compute_led_state(self) -> str:
+        if not self.power.on:
+            return "off"
         if self.errors:
             return "error"
         clients = self.camera.main.clients + self.camera.lores.clients if self.camera else 0
@@ -149,20 +154,26 @@ class Device:
         r.register("system.logs", system_logs)
         r.register("system.clear_logs", system_clear_logs)
 
+        r.register("power.get", self.power.get, "Current power state: on (bool), since (ns).")
+        r.register("power.set", self.power.set, "Switch standby on or off.")
+        r.register("power.toggle", self.power.toggle, "Flip standby (what a physical power button calls).")
+
+        g = self.power.guard  # camera/stage RPCs refuse with a clear error while in standby
+
         if st is not None:
-            r.register("stage.status", st.status, "Position, backlash, inversion, firmware.")
-            r.register("stage.position", lambda: st.position, "Current position in program frame (steps).")
-            r.register("stage.move_rel", st.move_rel, "Relative move in steps; compensate=false skips backlash handling.")
-            r.register("stage.move_to", st.move_to, "Absolute move in program frame; omitted axes stay.")
-            r.register("stage.jog", st.jog, "Newest-wins relative move without backlash compensation (cancels a running jog).")
-            r.register("stage.stop", st.stop, "Abort the current move.")
-            r.register("stage.release", st.release, "De-energise motor coils now.")
-            r.register("stage.set_release_after", st.set_release_after, "Idle seconds before coils are released automatically (0 = hold for ever).")
-            r.register("stage.zero", st.zero, "Set the current position as 0 0 0.")
-            r.register("stage.restore_position", lambda: st.restore_position(), "Re-apply the last saved position after a board power cycle.")
-            r.register("stage.set_backlash", st.set_backlash, "Set backlash steps per axis.")
-            r.register("stage.set_inverted", st.set_inverted, "Set axis inversion (hardware -> program frame).")
-            r.register("stage.set_step_time", lambda us: _thread(st.board.set_step_time, int(us)), "Set minimum step delay in microseconds.")
+            r.register("stage.status", g(st.status), "Position, backlash, inversion, firmware.")
+            r.register("stage.position", g(lambda: st.position), "Current position in program frame (steps).")
+            r.register("stage.move_rel", g(st.move_rel), "Relative move in steps; compensate=false skips backlash handling.")
+            r.register("stage.move_to", g(st.move_to), "Absolute move in program frame; omitted axes stay.")
+            r.register("stage.jog", g(st.jog), "Newest-wins relative move without backlash compensation (cancels a running jog).")
+            r.register("stage.stop", g(st.stop), "Abort the current move.")
+            r.register("stage.release", g(st.release), "De-energise motor coils now.")
+            r.register("stage.set_release_after", g(st.set_release_after), "Idle seconds before coils are released automatically (0 = hold for ever).")
+            r.register("stage.zero", g(st.zero), "Set the current position as 0 0 0.")
+            r.register("stage.restore_position", g(lambda: st.restore_position()), "Re-apply the last saved position after a board power cycle.")
+            r.register("stage.set_backlash", g(st.set_backlash), "Set backlash steps per axis.")
+            r.register("stage.set_inverted", g(st.set_inverted), "Set axis inversion (hardware -> program frame).")
+            r.register("stage.set_step_time", g(lambda us: _thread(st.board.set_step_time, int(us))), "Set minimum step delay in microseconds.")
 
             async def light_set(cc: float | None = None, pwm: list[float] | None = None) -> dict:
                 """Set illumination: cc = constant-current LED 0..1, pwm = list of PWM channel values 0..1."""
@@ -186,16 +197,16 @@ class Device:
             r.register("light.get", self._light_dict, "Last set illumination values plus the board's channel counts.")
 
         if cam is not None:
-            r.register("camera.status", cam.status, "Sensor, stream size, controls, client count.")
-            r.register("camera.get_controls", cam.get_controls, "Persistent libcamera controls.")
-            r.register("camera.set_controls", cam.set_controls,
+            r.register("camera.status", g(cam.status), "Sensor, stream size, controls, client count.")
+            r.register("camera.get_controls", g(cam.get_controls), "Persistent libcamera controls.")
+            r.register("camera.set_controls", g(cam.set_controls),
                        "Set controls: ExposureTime (us), AnalogueGain, ColourGains [r,b], AeEnable, AwbEnable, Brightness, Contrast, Saturation, Sharpness.")
-            r.register("camera.get_tuning", cam.get_tuning, "Current libcamera tuning JSON.")
-            r.register("camera.set_tuning", cam.set_tuning, "Replace the tuning JSON and restart the camera.")
-            r.register("camera.reset_tuning", cam.reset_tuning, "Restore the bundled tuning file.")
-            r.register("camera.set_stream_size", cam.set_stream_size, "Change stream resolution (width, height).")
-            r.register("camera.metadata", cam.capture_metadata, "Latest libcamera request metadata.")
-            r.register("camera.set_still_clean", cam.set_still_clean,
+            r.register("camera.get_tuning", g(cam.get_tuning), "Current libcamera tuning JSON.")
+            r.register("camera.set_tuning", g(cam.set_tuning), "Replace the tuning JSON and restart the camera.")
+            r.register("camera.reset_tuning", g(cam.reset_tuning), "Restore the bundled tuning file.")
+            r.register("camera.set_stream_size", g(cam.set_stream_size), "Change stream resolution (width, height).")
+            r.register("camera.metadata", g(cam.capture_metadata), "Latest libcamera request metadata.")
+            r.register("camera.set_still_clean", g(cam.set_still_clean),
                        "Stills only (full-res JPEG, RAW, brackets): ISP denoise off and Sharpness 0 when enabled.")
 
     def _light_dict(self) -> dict:
@@ -230,15 +241,18 @@ class Device:
         self.register_rpc()
         if self.camera:
             self.camera.bind(loop)
-            try:
-                await self.camera.start()
-            except Exception as e:  # noqa: BLE001
-                self.errors["camera"] = str(e)
-                log.exception("camera start failed")
+            if self.power.on:
+                try:
+                    await self.camera.start()
+                except Exception as e:  # noqa: BLE001
+                    self.errors["camera"] = str(e)
+                    log.exception("camera start failed")
+        if self.stage and not self.power.on:
+            await self.stage.release()
         if self.stage and self.stage.lost_position():
             log.warning("board position reset detected; call stage.restore_position to re-apply %s", self.stage._saved_hw)
 
-        app = build_app(self.rpc, self.events, self.camera, self.cfg.webapp_dir, self.status)
+        app = build_app(self.rpc, self.events, self.camera, self.cfg.webapp_dir, self.status, power=self.power)
         runner = web.AppRunner(app, access_log=None)
         await runner.setup()
         site = web.TCPSite(runner, self.cfg.host, self.cfg.port)
