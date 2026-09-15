@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { device } from './lib/store/device.svelte'
+  import { activity } from './lib/services/activity.svelte'
   import StatusBar from './components/StatusBar.svelte'
   import PowerButton from './components/PowerButton.svelte'
   import Live from './routes/Live.svelte'
@@ -25,6 +26,7 @@
   }
   onMount(() => {
     device.connect()
+    activity.start()   // visibilitychange + 60s heartbeat for the device's auto-standby idle timer
     const onHash = () => { route = parse(location.hash) }
     window.addEventListener('hashchange', onHash)
     return () => window.removeEventListener('hashchange', onHash)
@@ -54,7 +56,11 @@
     {#if standby}
       <div class="standby">
         <p>Standby</p>
-        <p class="muted">Camera, stage and lighting are off. The microscope stays reachable.</p>
+        {#if device.status?.power?.reason === 'idle'}
+          <p class="muted">Went to standby automatically after {device.idleMinutes} minutes idle. The microscope stays reachable.</p>
+        {:else}
+          <p class="muted">Camera, stage and lighting are off. The microscope stays reachable.</p>
+        {/if}
         <button class="primary wake" onclick={() => device.setPower(true)}>Tap to wake</button>
       </div>
     {:else}

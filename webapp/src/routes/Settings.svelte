@@ -5,6 +5,11 @@
 
   let stage = $state<StageStatus | null>(null)
   let stillCleanBusy = $state(false)
+  let idleBusy = $state(false)
+  async function setIdle(minutes: number) {
+    idleBusy = true
+    try { await device.setIdleMinutes(minutes) } finally { idleBusy = false }
+  }
   async function setStillClean(enabled: boolean) {
     stillCleanBusy = true
     try { await device.client.call('camera.set_still_clean', { enabled }); await device.refreshStatus() } finally { stillCleanBusy = false }
@@ -90,6 +95,20 @@
         stage {device.status.stage?.board ?? 'none'} {device.status.stage?.firmware ?? ''} on {device.status.stage?.port ?? ''}
       </p>
     {/if}
+  </div>
+
+  <div class="panel">
+    <h3>Power</h3>
+    <p class="muted" style="font-size:12px;margin:0 0 8px">Auto standby switches the camera, stage and lighting off after this much inactivity (any stage
+      move, capture, camera/light control, or a browser tab actively watching or recording resets the timer — see the power
+      button in the top bar). The webapp stays reachable and can wake it again.</p>
+    <div class="row">
+      <label style="margin:0">Auto standby after
+        <input class="mono" type="number" min="0" step="1" style="width:70px" value={device.idleMinutes} disabled={idleBusy || !device.connected}
+          onchange={(e) => setIdle(+e.currentTarget.value)} /> minutes
+        <span class="muted">(0 = never)</span>
+      </label>
+    </div>
   </div>
 
   <div class="panel">

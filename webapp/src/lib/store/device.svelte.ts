@@ -30,6 +30,12 @@ class DeviceStore {
   /** Standby state. Missing `status.power` (older device) reads as on. */
   get powerOn(): boolean { return this.status?.power?.on ?? true }
 
+  /** Seconds until auto standby, or -1 when disabled/off/unknown. Kept fresh by any power.* reply,
+   *  including services/activity.svelte.ts's heartbeat — that's the most frequent source. */
+  get idleIn(): number { return this.status?.power?.idle_in ?? -1 }
+  /** Auto-standby timeout in minutes; the device's own default (until status arrives) is 10. */
+  get idleMinutes(): number { return this.status?.power?.idle_minutes ?? 10 }
+
   /** Ring buffers used by browser-side algorithms (autofocus). Not reactive on purpose. */
   frames: FrameMeta[] = []
   positions: PositionEvent[] = []
@@ -153,6 +159,13 @@ class DeviceStore {
     return this.client.call<StageStatus>('stage.status')
   }
 
+  /** Merges a power.* reply into status.power. Used for both the on/off actions below and by
+   *  services/activity.svelte.ts's heartbeat, which is the most frequent source of a fresh `idle_in`
+   *  — a spread merge so it never clobbers fields (e.g. `idle_minutes`) that reply doesn't carry. */
+  applyPower(p: PowerStatus): void {
+    if (this.status) this.status = { ...this.status, power: { ...this.status.power, ...p } }
+  }
+
   private powerSeq = 0
 
   /** Applies optimistically so the standby screen (App.svelte) flips immediately, then reconciles
@@ -161,10 +174,10 @@ class DeviceStore {
   async setPower(on: boolean): Promise<void> {
     const seq = ++this.powerSeq
     const prev = this.status?.power
-    if (this.status) this.status = { ...this.status, power: { on, since: prev?.since ?? Date.now() } }
+    if (this.status) this.status = { ...this.status, power: { ...prev, on, since: prev?.since ?? Date.now(), reason: 'request' } }
     try {
       const r = await this.client.call<PowerStatus>('power.set', { on })
-      if (seq === this.powerSeq && this.status) this.status = { ...this.status, power: r }
+      if (seq === this.powerSeq) this.applyPower(r)
     } catch (e) {
       if (seq === this.powerSeq && this.status) this.status = { ...this.status, power: prev }
       this.error = (e as Error).message
@@ -174,6 +187,19 @@ class DeviceStore {
 
   async togglePower(): Promise<void> {
     return this.setPower(!this.powerOn)
+  }
+
+  private idleSeq = 0
+
+  async setIdleMinutes(minutes: number): Promise<void> {
+    const seq = ++this.idleSeq
+    try {
+      const r = await this.client.call<PowerStatus>('power.set_idle', { minutes })
+      if (seq === this.idleSeq) this.applyPower(r)
+    } catch (e) {
+      this.error = (e as Error).message
+      throw e
+    }
   }
 
   private guard<T>(p: Promise<T>): Promise<T> {

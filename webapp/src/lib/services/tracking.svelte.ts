@@ -8,6 +8,7 @@ import { toGray } from '../algo/sharpness'
 import { getBlob, type GalleryItem } from '../store/gallery'
 import { ai } from './aiService.svelte'
 import { liveStack } from './liveStack.svelte'
+import { activity } from './activity.svelte'
 
 const FPS = 5
 
@@ -26,12 +27,14 @@ class TrackingService {
   private timer: ReturnType<typeof setInterval> | undefined
   private startT = 0
   private busy = false
+  private releaseActivity: (() => void) | null = null
 
   start(): void {
     if (this.active) return
     this.tracker = new BlobTracker(this.maxDisplacementPx, 3)
     this.tracks = []
     this.active = true
+    this.releaseActivity = activity.hold('organism tracking')
     this.startT = performance.now()
     this.status = 'tracking…'
     this.timer = setInterval(() => { void this.tick() }, 1000 / FPS)
@@ -41,6 +44,7 @@ class TrackingService {
     this.active = false
     clearInterval(this.timer)
     this.status = ''
+    this.releaseActivity?.(); this.releaseActivity = null
   }
 
   private async tick(): Promise<void> {
@@ -80,17 +84,22 @@ class TrackingService {
     this.stop()
     this.tracker = new BlobTracker(this.maxDisplacementPx, 3)
     this.tracks = []
-    for (let i = 0; i < meta.frames.length; i++) {
-      const blob = await getBlob(item.id, `f${String(i).padStart(4, '0')}`)
-      if (!blob) continue
-      const bmp = await createImageBitmap(blob)
-      const c = new OffscreenCanvas(bmp.width, bmp.height)
-      const ctx = c.getContext('2d')!
-      ctx.drawImage(bmp, 0, 0)
-      bmp.close()
-      this.frameWidth = bmp.width; this.frameHeight = bmp.height
-      const blobs = detectBlobs(toGray(ctx.getImageData(0, 0, c.width, c.height)))
-      this.tracks = [...this.tracker.step((i * meta.intervalMs) / 1000, blobs)]
+    const release = activity.hold('organism tracking (time-lapse replay)')
+    try {
+      for (let i = 0; i < meta.frames.length; i++) {
+        const blob = await getBlob(item.id, `f${String(i).padStart(4, '0')}`)
+        if (!blob) continue
+        const bmp = await createImageBitmap(blob)
+        const c = new OffscreenCanvas(bmp.width, bmp.height)
+        const ctx = c.getContext('2d')!
+        ctx.drawImage(bmp, 0, 0)
+        bmp.close()
+        this.frameWidth = bmp.width; this.frameHeight = bmp.height
+        const blobs = detectBlobs(toGray(ctx.getImageData(0, 0, c.width, c.height)))
+        this.tracks = [...this.tracker.step((i * meta.intervalMs) / 1000, blobs)]
+      }
+    } finally {
+      release()
     }
     return this.tracks
   }
