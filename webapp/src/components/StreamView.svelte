@@ -6,7 +6,13 @@
    *  cursor (`onpan`, total displacement in natural image pixels, `done` on release); a plain
    *  click (no drag) centres that point (`onclickimage`); shift-drag selects a region
    *  (`onselectregion`). While a pan is in progress `panOffset` (natural px the stage has not yet
-   *  caught up with) translates the image so it sticks to the cursor. */
+   *  caught up with) translates the image so it sticks to the cursor.
+   *
+   *  Touch has no shift key and no hover, so a long-press (no shift key needed) is the
+   *  touch-reachable equivalent of shift-drag: hold still for `LONG_PRESS_MS` and the gesture
+   *  turns from a pan into a select-drag. A second finger touching down aborts whatever gesture
+   *  is in progress (without firing a move or click) so a two-finger gesture never reaches the
+   *  stage. */
   import { device } from '../lib/store/device.svelte'
   import { settings } from '../lib/store/settings.svelte'
   import { liveStack } from '../lib/services/liveStack.svelte'
@@ -44,6 +50,12 @@
   // pan gesture: client-pixel start point and whether the pointer moved past the click threshold
   let pan = $state<{ cx: number; cy: number; moved: boolean; frac: { x: number; y: number } } | null>(null)
   const CLICK_PX = 4
+  const LONG_PRESS_MS = 450
+  let longPressTimer: ReturnType<typeof setTimeout> | undefined
+  const touches = new Set<number>()   // active touch pointerIds, to detect a second finger
+  function clearLongPress(): void { if (longPressTimer !== undefined) { clearTimeout(longPressTimer); longPressTimer = undefined } }
+  /** A second finger touched down: drop whatever gesture was starting, fire nothing. */
+  function abortGesture(): void { clearLongPress(); drag = null; pan = null }
   const src = $derived(device.url(settings.showLores ? '/stream-lores.mjpg' : '/stream.mjpg') + '?n=' + nonce)
 
   // Re-arm the <img> whenever the device (re)connects. Only `device.connected` is a dependency:
@@ -93,11 +105,23 @@
 
   function down(e: PointerEvent) {
     if (e.button !== 0) return
+    if (e.pointerType === 'touch') {
+      touches.add(e.pointerId)
+      if (touches.size > 1) { abortGesture(); return }   // second finger: no gesture starts
+    }
     const p = toFrac(e); if (!p) return
     ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
     if (measuring) return   // wait for `up` (a plain click), no drag/pan while measuring
     if (e.shiftKey) { drag = { x0: p.x, y0: p.y, x1: p.x, y1: p.y }; return }
     pan = { cx: e.clientX, cy: e.clientY, moved: false, frac: p }
+    if (e.pointerType === 'touch') {
+      // touch has no shift key: a hold-still turns the pan into the same drag-select shift-drag gives
+      longPressTimer = setTimeout(() => {
+        if (!pan || pan.moved) return
+        drag = { x0: pan.frac.x, y0: pan.frac.y, x1: pan.frac.x, y1: pan.frac.y }
+        pan = null
+      }, LONG_PRESS_MS)
+    }
   }
   function panEvent(e: PointerEvent, done: boolean): Pan | null {
     if (!pan || !img || !geo) return null
@@ -105,15 +129,20 @@
     return { dx: (e.clientX - pan.cx) * k, dy: (e.clientY - pan.cy) * k, w: img.naturalWidth, h: img.naturalHeight, done }
   }
   function move(e: PointerEvent) {
+    if (e.pointerType === 'touch' && touches.size > 1) return   // multi-touch: never drives the stage
     if (measuring) { measureHover = toFrac(e); return }
     if (drag) { const p = toFrac(e); if (p) drag = { ...drag, x1: p.x, y1: p.y }; return }
     if (pan) {
       if (!pan.moved && Math.hypot(e.clientX - pan.cx, e.clientY - pan.cy) < CLICK_PX) return
+      clearLongPress()   // a real drag started: no longer a candidate for long-press-to-select
       pan.moved = true
       const ev = panEvent(e, false); if (ev) onpan?.(ev)
     }
   }
   function up(e: PointerEvent) {
+    if (e.pointerType === 'touch') touches.delete(e.pointerId)
+    if (e.pointerType === 'touch' && touches.size >= 1) return   // a finger of a multi-touch gesture lifted, others still down
+    clearLongPress()
     if (measuring) {
       const p = toFrac(e); if (p && img) onmeasureclick?.({ x: p.x, y: p.y, w: img.naturalWidth, h: img.naturalHeight })
       return
@@ -134,6 +163,8 @@
     onclickimage?.({ x: p.x, y: p.y, w: img.naturalWidth, h: img.naturalHeight })
   }
   function cancel(e: PointerEvent) {
+    if (e.pointerType === 'touch') touches.delete(e.pointerId)
+    clearLongPress()
     drag = null
     if (pan?.moved) { const ev = panEvent(e, true); if (ev) onpan?.(ev) }
     pan = null

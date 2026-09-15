@@ -52,4 +52,9 @@
   th, td { text-align: right; padding: 2px 4px; }
   th:first-child, td:first-child { text-align: left; }
   .chk { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+
+  @media (max-width: 720px) {
+    .tbl { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    table { min-width: 100%; white-space: nowrap; }
+  }
 </style>

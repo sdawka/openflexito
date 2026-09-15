@@ -6,7 +6,11 @@
    *  whatever zoom level OSD is currently showing. Measurement here shares the same tool state as the
    *  live view (`lib/services/measureService.svelte.ts`) so both feed one results list / CSV export.
    *  Optionally shows the item's sample metadata with an inline editor (Gallery passes `item` and
-   *  `onSampleChange`; other callers, e.g. Live's search-hit preview, omit them). */
+   *  `onSampleChange`; other callers, e.g. Live's search-hit preview, omit them).
+   *
+   *  Pinch-to-zoom and single-finger drag-to-pan come from OpenSeadragon's own touch handling;
+   *  double-tap resets to fit instead of OSD's default zoom-in (see the `canvas-double-click`
+   *  handler below), mouse wheel/drag/double-click keep their existing desktop behaviour. */
   import { onMount } from 'svelte'
   import OpenSeadragon from 'openseadragon'
   import { getBlob, type GalleryItem } from '../lib/store/gallery'
@@ -88,6 +92,16 @@
     viewer.addHandler('open', refreshZoom)
     viewer.addHandler('animation', refreshZoom)
     viewer.addHandler('resize', refreshZoom)
+    // touch has pinch-to-zoom and single-finger drag-to-pan for free (OSD's touch defaults);
+    // double-tap defaults to zoom-in, but a reset reads better on a small screen — override it for
+    // touch only, mouse keeps its existing double-click-to-zoom behaviour.
+    viewer.addHandler('canvas-double-click', (evt: any) => {
+      if (measure.active) return
+      if ((evt.originalEvent as PointerEvent | undefined)?.pointerType === 'touch') {
+        evt.preventDefaultAction = true
+        viewer!.viewport.goHome()
+      }
+    })
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'm' || e.key === 'M') { measure.toggle(); syncGestures() }
       else if (e.key === 'Escape') { if (measure.active) { measure.cancel(); syncGestures() } else onclose() }
@@ -234,7 +248,7 @@
 
 <style>
   .overlay { position: fixed; inset: 0; background: #000; z-index: 50; }
-  .osd { width: 100%; height: 100%; position: relative; }
+  .osd { width: 100%; height: 100%; position: relative; touch-action: none; }
   .osd.measuring { cursor: crosshair; }
   .video { width: 100%; height: 100%; object-fit: contain; background: #000; }
   .close { position: absolute; top: 12px; right: 12px; z-index: 51; }

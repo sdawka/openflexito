@@ -37,10 +37,10 @@
       </select>
     </div>
   </div>
-  <div class="row" style="margin-top:10px">
-    <input class="mono" type="number" style="width:70px" bind:value={goto.x} placeholder="x" title="x" />
-    <input class="mono" type="number" style="width:70px" bind:value={goto.y} placeholder="y" title="y" />
-    <input class="mono" type="number" style="width:70px" bind:value={goto.z} placeholder="z" title="z" />
+  <div class="row goto-row" style="margin-top:10px">
+    <input class="mono" type="number" bind:value={goto.x} placeholder="x" title="x" />
+    <input class="mono" type="number" bind:value={goto.y} placeholder="y" title="y" />
+    <input class="mono" type="number" bind:value={goto.z} placeholder="z" title="z" />
     <button onclick={() => device.moveTo(goto).catch(() => {})} title="absolute move to x y z (steps)">Go to</button>
     <button onclick={() => (goto = { ...device.position })} title="copy the current position into the fields">Here</button>
   </div>
@@ -54,6 +54,22 @@
 <style>
   .grid { display: flex; gap: 12px; align-items: stretch; }
   .pad { display: grid; grid-template-columns: repeat(3, 40px); grid-auto-rows: 40px; gap: 4px; }
-  .pad button, .zcol button { width: 40px; height: 40px; padding: 0; font-size: 14px; }
+  .pad button, .zcol button { width: 40px; height: 40px; padding: 0; font-size: 14px; touch-action: manipulation; }
   .zcol { display: flex; flex-direction: column; gap: 4px; justify-content: center; }
+
+  @media (max-width: 720px) {
+    .grid { flex-direction: column; }
+    .pad { grid-template-columns: repeat(3, 1fr); }
+    .pad button, .zcol button { width: auto; height: auto; padding: 8px 4px; }
+  }
+
+  @media (pointer: coarse) {
+    .pad button, .zcol button { min-width: 44px; min-height: 44px; }
+  }
+
+  .goto-row input { min-width: 64px; }
+  @media (max-width: 720px) {
+    .goto-row { flex-wrap: wrap; }
+    .goto-row input { flex: 1; min-width: 64px; }
+  }
 </style>

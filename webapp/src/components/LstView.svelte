@@ -19,11 +19,21 @@
   }
 </script>
 
-<div class="row" style="margin-top:10px">
+<div class="row lst-row" style="margin-top:10px">
   {#each [['luminance', lst.luminance], ['Cr (G/R)', lst.cr], ['Cb (G/B)', lst.cb]] as [name, table]}
-    <div>
+    <div class="lst-item">
       <div class="label">{name} <span class="mono">{Math.min(...(table as number[])).toFixed(2)}–{Math.max(...(table as number[])).toFixed(2)}</span></div>
-      <canvas width="160" height="120" use:heat={table as number[]}></canvas>
+      <canvas width="160" height="120" use:heat={table as number[]} class="lst-canvas"></canvas>
     </div>
   {/each}
 </div>
+
+<style>
+  .lst-row { gap: 8px; }
+  .lst-item { flex: 1; min-width: 120px; }
+  .lst-canvas { width: 100%; height: auto; }
+
+  @media (max-width: 720px) {
+    .lst-item { flex: 1 1 calc(50% - 4px); }
+  }
+</style>

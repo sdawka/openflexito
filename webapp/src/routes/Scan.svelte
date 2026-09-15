@@ -318,4 +318,5 @@
 
 <style>
   .wrap { padding: 16px; display: flex; flex-direction: column; gap: 12px; max-width: 1000px; }
+  @media (max-width: 720px) { .wrap { padding: 10px; } }
 </style>

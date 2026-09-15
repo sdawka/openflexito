@@ -116,4 +116,9 @@
 <style>
   .chk { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
   .warn { color: #e0a030; }
+
+  @media (max-width: 720px) {
+    .chk { flex-wrap: wrap; }
+    .chk input[type=number] { min-width: 64px; }
+  }
 </style>

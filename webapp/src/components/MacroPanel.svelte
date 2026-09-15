@@ -95,4 +95,9 @@
   .step { font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); background: var(--panel2); }
   .step.done { opacity: .55; }
   .step.on { border-color: var(--accent); color: var(--text); }
+
+  @media (max-width: 720px) {
+    .macro-row { flex-direction: column; align-items: flex-start; }
+    .mini input[type=number] { min-width: 64px; }
+  }
 </style>

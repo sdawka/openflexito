@@ -238,5 +238,6 @@
 <style>
   .logs { max-height: 360px; overflow: auto; font-size: 11px; white-space: pre-wrap; margin: 8px 0 0; background: var(--panel2); padding: 8px; border-radius: 6px; }
   .wrap { padding: 16px; display: flex; flex-direction: column; gap: 12px; max-width: 900px; }
-  .methods { font-size: 12px; display: flex; flex-direction: column; gap: 4px; }
+  .methods { font-size: 12px; display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }
+  @media (max-width: 720px) { .wrap { padding: 10px; } }
 </style>
