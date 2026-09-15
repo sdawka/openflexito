@@ -42,4 +42,8 @@
   svg { position: absolute; inset: 0; width: 100%; height: 100%; }
   polygon { fill: rgba(79, 140, 255, .25); stroke: var(--accent); stroke-width: 0.004; vector-effect: non-scaling-stroke; }
   circle { fill: var(--accent); }
+
+  @media (max-width: 720px) {
+    .poly-canvas { max-width: 100%; }
+  }
 </style>

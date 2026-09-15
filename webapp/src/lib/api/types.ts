@@ -84,6 +84,13 @@ export interface NetworkStatus {
   interfaces?: NetworkInterface[]
 }
 
+/** Standby state (device/openflexito/power.py `PowerController`): `since` is ns CLOCK_BOOTTIME of
+ *  the last change. Older devices omit this key entirely — treat that as powered on. */
+export interface PowerStatus {
+  on: boolean
+  since: number
+}
+
 export interface DeviceStatus {
   version: string
   led: LedState
@@ -92,6 +99,7 @@ export interface DeviceStatus {
   camera: CameraStatus | null
   stage: StageStatus | null
   stream_clients: number
+  power?: PowerStatus
 }
 
 export interface RpcMethodDoc {

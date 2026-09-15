@@ -177,6 +177,10 @@
   .when { color: var(--muted); font-size: 11px; white-space: nowrap; }
   .small { font-size: 11px; }
   .actions { margin-top: 4px; }
-  .group-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin: 4px 0 8px; }
+  .group-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin: 4px 0 8px; flex-wrap: wrap; }
   .group-head h4 { margin: 0; font-size: 13px; }
+  @media (max-width: 720px) {
+    .wrap { padding: 10px; }
+    .grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+  }
 </style>

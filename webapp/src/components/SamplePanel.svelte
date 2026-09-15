@@ -57,4 +57,8 @@
   .grid input, .grid textarea { font-size: 13px; }
   .small { font-size: 11px; }
   .blurb { margin: 8px 0 0; font-size: 12px; color: var(--muted); line-height: 1.4; }
+
+  @media (max-width: 720px) {
+    .grid { grid-template-columns: 1fr; gap: 6px 8px; }
+  }
 </style>

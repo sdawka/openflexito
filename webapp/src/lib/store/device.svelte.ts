@@ -2,7 +2,7 @@
 
 import { RpcClient } from '../api/rpc'
 import type {
-  CameraControls, DeviceStatus, FrameMeta, MoveResult, PositionEvent, StageStatus, Vec3,
+  CameraControls, DeviceStatus, FrameMeta, MoveResult, PositionEvent, PowerStatus, StageStatus, Vec3,
 } from '../api/types'
 import { settings } from './settings.svelte'
 
@@ -26,6 +26,9 @@ class DeviceStore {
   light = $state<{ cc: number; pwm: number[]; channels?: { cc: number; pwm: number } }>({ cc: 0, pwm: [] })
   controls = $state<CameraControls | null>(null)
   error = $state<string | null>(null)
+
+  /** Standby state. Missing `status.power` (older device) reads as on. */
+  get powerOn(): boolean { return this.status?.power?.on ?? true }
 
   /** Ring buffers used by browser-side algorithms (autofocus). Not reactive on purpose. */
   frames: FrameMeta[] = []
@@ -148,6 +151,29 @@ class DeviceStore {
 
   async stageStatus(): Promise<StageStatus> {
     return this.client.call<StageStatus>('stage.status')
+  }
+
+  private powerSeq = 0
+
+  /** Applies optimistically so the standby screen (App.svelte) flips immediately, then reconciles
+   *  with the device's own reply; a failure (or a newer call finishing first) rolls the optimistic
+   *  value back. */
+  async setPower(on: boolean): Promise<void> {
+    const seq = ++this.powerSeq
+    const prev = this.status?.power
+    if (this.status) this.status = { ...this.status, power: { on, since: prev?.since ?? Date.now() } }
+    try {
+      const r = await this.client.call<PowerStatus>('power.set', { on })
+      if (seq === this.powerSeq && this.status) this.status = { ...this.status, power: r }
+    } catch (e) {
+      if (seq === this.powerSeq && this.status) this.status = { ...this.status, power: prev }
+      this.error = (e as Error).message
+      throw e
+    }
+  }
+
+  async togglePower(): Promise<void> {
+    return this.setPower(!this.powerOn)
   }
 
   private guard<T>(p: Promise<T>): Promise<T> {

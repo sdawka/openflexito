@@ -90,4 +90,8 @@
   .wbrow .end { font-size: 11px; width: 3.6em; text-align: center; }
   .wbrow .temp { background: linear-gradient(90deg, #6fa8ff, #777 50%, #ffb84d); height: 6px; border-radius: 3px; }
   .wbrow .tint { background: linear-gradient(90deg, #7ed37e, #777 50%, #e57ad8); height: 6px; border-radius: 3px; }
+
+  @media (max-width: 720px) {
+    .wbrow .end { font-size: 10px; width: 2.8em; }
+  }
 </style>

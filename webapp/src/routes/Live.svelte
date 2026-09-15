@@ -281,5 +281,13 @@
   .hit { position: relative; padding: 0; aspect-ratio: 1; overflow: hidden; background: #000; }
   .hit img { width: 100%; height: 100%; object-fit: cover; }
   .hit span { position: absolute; right: 2px; bottom: 2px; font-size: 10px; background: rgba(0,0,0,.6); padding: 0 3px; border-radius: 3px; }
-  @media (max-width: 800px) { .live { grid-template-columns: 1fr; grid-template-rows: 55vh 1fr; } aside { border-left: 0; } }
+  @media (max-width: 720px) {
+    /* the stream sizes to the (4:3, whatever stream_size is picked in Settings) frame itself
+       instead of a viewport fraction, so there's no dead letterbox space above/below it; capped
+       so a future portrait sensor can't push the controls off-screen */
+    .live { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+    .stream { width: 100%; aspect-ratio: 4 / 3; max-height: 60vh; }
+    aside { border-left: 0; padding-bottom: calc(10px + var(--tabbar-h, 0px)); }
+    .hits { grid-template-columns: repeat(3, 1fr); }
+  }
 </style>

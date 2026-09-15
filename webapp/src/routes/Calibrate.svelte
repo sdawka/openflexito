@@ -240,13 +240,15 @@
         <button onclick={() => saveCsm(null)} disabled={!!busy}>Clear</button>{/if}
     </div>
     {#if csm}
-      <table class="mono small result">
-        <thead><tr><th>axis</th><th>pixels / step</th><th>direction (px per step, x y)</th><th>backlash</th></tr></thead>
-        <tbody>
-          <tr><td>x</td><td>{pxPerStep(csm.calX.pixelsPerStep).toFixed(4)}</td><td>{csm.calX.pixelsPerStep.map((v) => v.toFixed(4)).join(', ')}</td><td>{csm.calX.backlash} steps</td></tr>
-          <tr><td>y</td><td>{pxPerStep(csm.calY.pixelsPerStep).toFixed(4)}</td><td>{csm.calY.pixelsPerStep.map((v) => v.toFixed(4)).join(', ')}</td><td>{csm.calY.backlash} steps</td></tr>
-        </tbody>
-      </table>
+      <div class="scroll-x">
+        <table class="mono small result">
+          <thead><tr><th>axis</th><th>pixels / step</th><th>direction (px per step, x y)</th><th>backlash</th></tr></thead>
+          <tbody>
+            <tr><td>x</td><td>{pxPerStep(csm.calX.pixelsPerStep).toFixed(4)}</td><td>{csm.calX.pixelsPerStep.map((v) => v.toFixed(4)).join(', ')}</td><td>{csm.calX.backlash} steps</td></tr>
+            <tr><td>y</td><td>{pxPerStep(csm.calY.pixelsPerStep).toFixed(4)}</td><td>{csm.calY.pixelsPerStep.map((v) => v.toFixed(4)).join(', ')}</td><td>{csm.calY.backlash} steps</td></tr>
+          </tbody>
+        </table>
+      </div>
       <p class="muted small">Stored for {settings.deviceUrl || 'this device'} in this browser. Stage backlash currently used by the microscope:
         {device.status?.stage?.backlash ? `x ${device.status.stage.backlash.x}, y ${device.status.stage.backlash.y}, z ${device.status.stage.backlash.z}` : '…'}.</p>
     {/if}
@@ -299,5 +301,10 @@
   .result { border-collapse: collapse; margin-top: 10px; }
   .result th, .result td { text-align: left; padding: 3px 12px 3px 0; border-bottom: 1px solid var(--border); }
   .log { max-height: 220px; overflow: auto; font-size: 12px; margin: 8px 0 0; white-space: pre-wrap; }
-  @media (max-width: 800px) { .two, .cards { grid-template-columns: 1fr; } }
+  @media (max-width: 720px) {
+    .two, .cards { grid-template-columns: 1fr; }
+    .steps li { grid-template-columns: 24px 1fr; }
+    .steps li > .row { grid-column: 1 / -1; }
+    .preview img { aspect-ratio: 4/3; }
+  }
 </style>

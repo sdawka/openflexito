@@ -255,4 +255,10 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
   .small { font-size: 11px; }
   .adv { margin-top: 6px; }
   .adv summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+
+  @media (max-width: 720px) {
+    .params { flex-direction: column; align-items: stretch; gap: 6px; }
+    .params label { flex-direction: row; align-items: center; gap: 8px; }
+    .params input, .params select { min-width: 64px; flex: 1; }
+  }
 </style>

@@ -88,4 +88,8 @@
   .results li { display: flex; justify-content: space-between; align-items: center; font-size: 12px; background: var(--panel2); border-radius: 4px; padding: 3px 6px; }
   .small { padding: 0 6px; font-size: 11px; line-height: 1.6; }
   .compact { padding: 8px; }
+
+  @media (max-width: 720px) {
+    .results li { flex-direction: column; align-items: flex-start; gap: 4px; }
+  }
 </style>

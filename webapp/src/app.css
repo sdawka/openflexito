@@ -3,6 +3,7 @@
   --text: #e6e8ee; --muted: #8b93a7; --accent: #4f8cff; --ok: #3ccf7a; --warn: #f5b942; --err: #ff5d6c;
   font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; font-size: 14px;
   color-scheme: dark;
+  --tabbar-h: 0px;   /* height the fixed mobile tab bar steals from the bottom of the viewport */
 }
 * { box-sizing: border-box; }
 html, body, #app { height: 100%; margin: 0; }
@@ -62,3 +63,21 @@ kbd { display: inline-block; padding: 0 5px; border: 1px solid var(--border); bo
 .sharebar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: var(--panel2); margin: 4px 0 2px; }
 .sharebar span { display: block; height: 100%; }
 .stack-row { display: flex; gap: 2px; align-items: flex-end; }
+
+/* ---- shared responsive helpers (mobile-and-power brief: only this file sets these breakpoints) ---- */
+/* Multi-column desktop layouts that should collapse to one column on narrow screens. */
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+/* Wide content (tables, long mono rows) scrolls sideways in its own box instead of the page. */
+.scroll-x { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+@media (max-width: 720px) {
+  :root { --tabbar-h: calc(48px + env(safe-area-inset-bottom)); }
+  .cols { grid-template-columns: 1fr; }
+  .panel { padding: 10px; }
+  input, select { font-size: 16px; }   /* iOS zooms the page on focus below 16px */
+}
+
+@media (pointer: coarse) {
+  button, .seg button, input, select { min-height: 44px; }
+  input[type=range] { min-height: 28px; }   /* the track itself stays slim; the element's hit area grows via padding elsewhere */
+}

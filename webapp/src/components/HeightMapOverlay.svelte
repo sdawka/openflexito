@@ -46,4 +46,8 @@
   .hm-cell { border-radius: 2px; }
   .hm-legend { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 11px; color: #ddd; }
   .hm-bar { flex: 1; height: 8px; border-radius: 4px; background: linear-gradient(to right, hsl(220 80% 50%), hsl(0 80% 50%)); }
+
+  @media (max-width: 720px) {
+    .hm-grid { width: 120px; height: 90px; }
+  }
 </style>
