@@ -89,6 +89,13 @@ export interface NetworkStatus {
 export interface PowerStatus {
   on: boolean
   since: number
+  /** Auto-standby timeout in minutes (`power.set_idle`); 0 disables it. Defaults to 10 on the device. */
+  idle_minutes?: number
+  /** Seconds until auto standby, or -1 when disabled or already off. Refreshed by `power.get/set/
+   *  toggle/activity` replies and by `system.status`; not necessarily live-ticking between those. */
+  idle_in?: number
+  /** Why the last on/off change happened: "request" (manual toggle/tap) or "idle" (auto-standby timer). */
+  reason?: string
 }
 
 export interface DeviceStatus {

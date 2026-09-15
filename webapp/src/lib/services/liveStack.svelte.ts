@@ -5,6 +5,7 @@ import { saveSnapshot, type GalleryItem } from '../store/gallery'
 import type { LiveStackMessage } from '../workers/liveStackWorker'
 import type { LiveStackStats } from '../algo/liveStack'
 import type { PositionEvent } from '../api/types'
+import { activity } from './activity.svelte'
 
 class LiveStack {
   active = $state(false)
@@ -26,12 +27,14 @@ class LiveStack {
   private settleUntil = 0
   private settleTs = 0
   private lastComposite: { data: Uint8ClampedArray; width: number; height: number } | null = null
+  private releaseActivity: (() => void) | null = null
 
   start(mode: 'stack' | 'average' = 'stack'): void {
     if (this.active && this.mode === mode) return
     if (this.active) this.stop()
     this.mode = mode
     this.active = true
+    this.releaseActivity = activity.hold('live focus stack')
     this.lastMoveEvent = device.lastMove; this.settleUntil = 0; this.settleTs = 0
     this.worker = new Worker(new URL('../workers/liveStackWorker.ts', import.meta.url), { type: 'module' })
     this.worker.onmessage = async (ev) => {
@@ -53,6 +56,7 @@ class LiveStack {
     this.worker?.terminate(); this.worker = null
     this.composite?.close(); this.composite = null
     this.stats = null; this.size = null; this.inflight = false; this.dropNext = false; this.lastComposite = null
+    this.releaseActivity?.(); this.releaseActivity = null
   }
 
   reset(): void {

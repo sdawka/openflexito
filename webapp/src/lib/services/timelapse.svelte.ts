@@ -26,6 +26,7 @@ import { getBlob, saveTimelapse, saveVideo, type GalleryItem, type TimelapseFram
 import { runAutofocus } from './autofocusService'
 import { lockCamera, type CameraLock } from './cameraLock'
 import { Recorder } from './recorder.svelte'
+import { activity } from './activity.svelte'
 
 export interface TimelapseConfig {
   intervalMs: number
@@ -112,11 +113,15 @@ class TimelapseService {
   private bestSharpness = 0
   private lock: CameraLock | null = null
   private inflight: Promise<void> | null = null
+  private releaseActivity: (() => void) | null = null
 
   async start(cfg: TimelapseConfig): Promise<void> {
     if (this.active) return
     this.cfg = cfg
     this.active = true
+    // Held for the whole run, including the gaps between frames (no device RPC happens then): released
+    // in `finish()`, which every stop path (normal completion, storage cap, explicit stop()) goes through.
+    this.releaseActivity = activity.hold('time-lapse')
     this.cancelled = false
     this.captured = 0; this.total = cfg.frames; this.corrections = 0; this.driftPx = 0; this.skipped = 0; this.refocuses = 0
     this.bytesStored = 0; this.estimateBytes = estimateFrameBytes(cfg.source, cfg.format) * cfg.frames
@@ -263,25 +268,29 @@ class TimelapseService {
     if (!this.active) return null
     this.active = false
     clearTimeout(this.timer)
-    // Stop pressed mid-capture: let that frame finish (it switches the LED off at its end and pushes
-    // its frame) before restoring the light and saving, otherwise the LED ended up off and the frame lost
-    await this.inflight?.catch(() => {})
-    if (this.cfg?.ledOff && this.savedLight) await device.setLight(this.savedLight.cc, this.savedLight.pwm).catch((e) => { this.status = `could not restore the light: ${(e as Error).message}` })
-    const locked = this.lock?.locked ?? { ae: false, awb: false }
-    await this.lock?.release((m) => (this.warning = m))
-    this.lock = null
-    if (!this.frames.length) { this.status = ''; return null }
-    this.status = 'saving…'
-    const cfg = this.cfg!
-    const item = await saveTimelapse(this.frames.map((f) => f.blob), this.frames.map((f) => f.meta), {
-      intervalMs: cfg.intervalMs, source: cfg.source, driftCorrected: !!this.drift,
-      format: cfg.format, locked, remeterEveryN: cfg.remeterEveryN, refocusDropPct: cfg.refocusDropPct, skipped: this.skipped, startedAt: this.startedIso,
-    })
-    this.lastItem = item
-    this.status = `saved "${item.name}" (${this.frames.length} frames, ${fmtBytes(this.bytesStored)}${this.skipped ? `, ${this.skipped} skipped` : ''}${this.refocuses ? `, ${this.refocuses} refocus` : ''})`
-    this.frames = []
-    setTimeout(() => { if (this.status.startsWith('saved')) this.status = '' }, 8000)
-    return item
+    try {
+      // Stop pressed mid-capture: let that frame finish (it switches the LED off at its end and pushes
+      // its frame) before restoring the light and saving, otherwise the LED ended up off and the frame lost
+      await this.inflight?.catch(() => {})
+      if (this.cfg?.ledOff && this.savedLight) await device.setLight(this.savedLight.cc, this.savedLight.pwm).catch((e) => { this.status = `could not restore the light: ${(e as Error).message}` })
+      const locked = this.lock?.locked ?? { ae: false, awb: false }
+      await this.lock?.release((m) => (this.warning = m))
+      this.lock = null
+      if (!this.frames.length) { this.status = ''; return null }
+      this.status = 'saving…'
+      const cfg = this.cfg!
+      const item = await saveTimelapse(this.frames.map((f) => f.blob), this.frames.map((f) => f.meta), {
+        intervalMs: cfg.intervalMs, source: cfg.source, driftCorrected: !!this.drift,
+        format: cfg.format, locked, remeterEveryN: cfg.remeterEveryN, refocusDropPct: cfg.refocusDropPct, skipped: this.skipped, startedAt: this.startedIso,
+      })
+      this.lastItem = item
+      this.status = `saved "${item.name}" (${this.frames.length} frames, ${fmtBytes(this.bytesStored)}${this.skipped ? `, ${this.skipped} skipped` : ''}${this.refocuses ? `, ${this.refocuses} refocus` : ''})`
+      this.frames = []
+      setTimeout(() => { if (this.status.startsWith('saved')) this.status = '' }, 8000)
+      return item
+    } finally {
+      this.releaseActivity?.(); this.releaseActivity = null
+    }
   }
 }
 
@@ -311,20 +320,25 @@ export async function exportTimelapseWebm(item: GalleryItem, opts: { fps?: numbe
   const chunks: Blob[] = []
   rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data) }
   const done = new Promise<void>((resolve) => (rec.onstop = () => resolve()))
-  rec.start()
-  for (let i = 0; i < meta.frames.length; i++) {
-    const blob = await getBlob(item.id, `f${String(i).padStart(4, '0')}`)
-    if (!blob) continue
-    const bmp = await createImageBitmap(blob)
-    const shift = stabilised ? playbackShift(meta.frames[i], bmp.width) : { dx: 0, dy: 0 }
-    ctx.clearRect(0, 0, w, h)
-    ctx.drawImage(bmp, -shift.dx, -shift.dy)
-    bmp.close()
-    track.requestFrame?.()
-    await new Promise((r) => setTimeout(r, 1000 / fps))
+  const release = activity.hold('time-lapse export')
+  try {
+    rec.start()
+    for (let i = 0; i < meta.frames.length; i++) {
+      const blob = await getBlob(item.id, `f${String(i).padStart(4, '0')}`)
+      if (!blob) continue
+      const bmp = await createImageBitmap(blob)
+      const shift = stabilised ? playbackShift(meta.frames[i], bmp.width) : { dx: 0, dy: 0 }
+      ctx.clearRect(0, 0, w, h)
+      ctx.drawImage(bmp, -shift.dx, -shift.dy)
+      bmp.close()
+      track.requestFrame?.()
+      await new Promise((r) => setTimeout(r, 1000 / fps))
+    }
+    rec.stop()
+    await done
+    const blob = new Blob(chunks, { type: rec.mimeType || 'video/webm' })
+    return await saveVideo(blob, null, { durationS: meta.frames.length / fps, fps, source: 'time-lapse export', width: w, height: h })
+  } finally {
+    release()
   }
-  rec.stop()
-  await done
-  const blob = new Blob(chunks, { type: rec.mimeType || 'video/webm' })
-  return saveVideo(blob, null, { durationS: meta.frames.length / fps, fps, source: 'time-lapse export', width: w, height: h })
 }

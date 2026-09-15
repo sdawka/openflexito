@@ -154,15 +154,19 @@ class Device:
         r.register("system.logs", system_logs)
         r.register("system.clear_logs", system_clear_logs)
 
-        r.register("power.get", self.power.get, "Current power state: on (bool), since (ns).")
+        r.register("power.get", self.power.get, "Current power state: on, since, idle_minutes, idle_in.")
         r.register("power.set", self.power.set, "Switch standby on or off.")
         r.register("power.toggle", self.power.toggle, "Flip standby (what a physical power button calls).")
+        r.register("power.activity", self.power.activity,
+                   "WS heartbeat: declare this connection active/inactive so it can hold off auto standby.")
+        r.register("power.set_idle", self.power.set_idle, "Set the auto-standby timeout in minutes (0 disables it).")
 
-        g = self.power.guard  # camera/stage RPCs refuse with a clear error while in standby
+        g = self.power.guard  # camera/stage RPCs refuse with a clear error while in standby; mutating
+                               # ones (the default) also count as activity for the idle timer
 
         if st is not None:
-            r.register("stage.status", g(st.status), "Position, backlash, inversion, firmware.")
-            r.register("stage.position", g(lambda: st.position), "Current position in program frame (steps).")
+            r.register("stage.status", g(st.status, mutating=False), "Position, backlash, inversion, firmware.")
+            r.register("stage.position", g(lambda: st.position, mutating=False), "Current position in program frame (steps).")
             r.register("stage.move_rel", g(st.move_rel), "Relative move in steps; compensate=false skips backlash handling.")
             r.register("stage.move_to", g(st.move_to), "Absolute move in program frame; omitted axes stay.")
             r.register("stage.jog", g(st.jog), "Newest-wins relative move without backlash compensation (cancels a running jog).")
@@ -193,19 +197,19 @@ class Device:
             except SangaboardError as e:
                 log.warning("led_channels? failed: %s", e)
                 self._light_channels = {"cc": 1, "pwm": 0}
-            r.register("light.set", light_set)
+            r.register("light.set", g(light_set), "Set illumination (counts as activity; refused while in standby).")
             r.register("light.get", self._light_dict, "Last set illumination values plus the board's channel counts.")
 
         if cam is not None:
-            r.register("camera.status", g(cam.status), "Sensor, stream size, controls, client count.")
-            r.register("camera.get_controls", g(cam.get_controls), "Persistent libcamera controls.")
+            r.register("camera.status", g(cam.status, mutating=False), "Sensor, stream size, controls, client count.")
+            r.register("camera.get_controls", g(cam.get_controls, mutating=False), "Persistent libcamera controls.")
             r.register("camera.set_controls", g(cam.set_controls),
                        "Set controls: ExposureTime (us), AnalogueGain, ColourGains [r,b], AeEnable, AwbEnable, Brightness, Contrast, Saturation, Sharpness.")
-            r.register("camera.get_tuning", g(cam.get_tuning), "Current libcamera tuning JSON.")
+            r.register("camera.get_tuning", g(cam.get_tuning, mutating=False), "Current libcamera tuning JSON.")
             r.register("camera.set_tuning", g(cam.set_tuning), "Replace the tuning JSON and restart the camera.")
             r.register("camera.reset_tuning", g(cam.reset_tuning), "Restore the bundled tuning file.")
             r.register("camera.set_stream_size", g(cam.set_stream_size), "Change stream resolution (width, height).")
-            r.register("camera.metadata", g(cam.capture_metadata), "Latest libcamera request metadata.")
+            r.register("camera.metadata", g(cam.capture_metadata, mutating=False), "Latest libcamera request metadata.")
             r.register("camera.set_still_clean", g(cam.set_still_clean),
                        "Stills only (full-res JPEG, RAW, brackets): ISP denoise off and Sharpness 0 when enabled.")
 
@@ -260,6 +264,7 @@ class Device:
         log.info("openflexito %s listening on http://%s:%s", __version__, self.cfg.host or "[::]", self.cfg.port)
 
         status_task = asyncio.ensure_future(self.status_loop())
+        idle_task = asyncio.ensure_future(self.power.idle.run())
         stop = asyncio.Event()
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
@@ -269,6 +274,7 @@ class Device:
         await stop.wait()
         log.info("shutting down")
         status_task.cancel()
+        idle_task.cancel()
         self.leds.set_state("off")
         if self.camera:
             await self.camera.stop()

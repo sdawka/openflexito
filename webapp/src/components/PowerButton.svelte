@@ -6,6 +6,16 @@
 
   let busy = $state(false)
 
+  // A quiet "sleeps in Ng min" hint once the auto-standby countdown (device.idleIn, kept fresh by
+  // lib/services/activity.svelte.ts's heartbeat) is close; not shown at all otherwise, so it never
+  // competes with the button on a phone.
+  const soonMin = $derived.by(() => {
+    if (!device.powerOn || device.idleIn < 0 || device.idleIn > 120) return null
+    return Math.max(1, Math.ceil(device.idleIn / 60))
+  })
+
+  const title = $derived(!device.powerOn ? 'Wake microscope' : soonMin != null ? `Switch to standby (auto standby in ${soonMin} min)` : 'Switch to standby')
+
   async function toggle(): Promise<void> {
     if (busy) return
     const turningOff = device.powerOn
@@ -20,7 +30,7 @@
   class="power-btn"
   class:off={!device.powerOn}
   aria-label="power"
-  title={device.powerOn ? 'Switch to standby' : 'Wake microscope'}
+  title={title}
   disabled={busy || !device.connected}
   onclick={toggle}
 >
@@ -32,11 +42,16 @@
       <path d="M7 6.5a8 8 0 1 0 10 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
     </svg>
   {/if}
+  {#if soonMin != null}
+    <!-- Quiet countdown badge: an overlay, not a flex sibling, so it costs no extra width in the
+         one-row mobile top bar (App.svelte) — just numerals, the title attribute has the full text. -->
+    <span class="soon" aria-hidden="true">{soonMin}</span>
+  {/if}
 </button>
 
 <style>
   .power-btn {
-    display: inline-flex; align-items: center; justify-content: center;
+    position: relative; display: inline-flex; align-items: center; justify-content: center;
     width: 32px; height: 32px; padding: 0; border-radius: 50%; flex: none;
     color: var(--ok);
   }
@@ -47,6 +62,11 @@
     animation: spin .8s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+  .soon {
+    position: absolute; top: -4px; right: -4px; min-width: 14px; height: 14px; padding: 0 3px;
+    border-radius: 999px; background: var(--warn); color: #201a08; font-size: 10px; font-weight: 700;
+    line-height: 14px; text-align: center;
+  }
 
   @media (pointer: coarse) {
     .power-btn { width: 44px; height: 44px; }

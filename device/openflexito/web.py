@@ -12,6 +12,7 @@ from aiohttp import WSMsgType, web
 
 from .camera import CameraBase, FrameHub
 from .events import EventBus
+from .power import CURRENT_CONN
 from .rpc import PARSE_ERROR, RpcRegistry
 
 log = logging.getLogger(__name__)
@@ -92,6 +93,7 @@ async def rpc_http(request: web.Request) -> web.Response:
 async def websocket(request: web.Request) -> web.WebSocketResponse:
     rpc: RpcRegistry = request.app["rpc"]
     events: EventBus = request.app["events"]
+    power = request.app["power"]
     ws = web.WebSocketResponse(heartbeat=20, max_msg_size=4 * 1024 * 1024)
     await ws.prepare(request)
     queue = events.subscribe()
@@ -120,7 +122,13 @@ async def websocket(request: web.Request) -> web.WebSocketResponse:
                                                   "error": {"code": PARSE_ERROR, "message": "invalid JSON"}}))
                     continue
                 items = data if isinstance(data, list) else [data]
-                responses = [r for r in await asyncio.gather(*(rpc.handle(i) for i in items)) if r is not None]
+                # tells power.activity() (an RPC, with no connection identity of its own) which
+                # WebSocket is calling, so its heartbeat hold is tracked per connection
+                token = CURRENT_CONN.set(ws)
+                try:
+                    responses = [r for r in await asyncio.gather(*(rpc.handle(i) for i in items)) if r is not None]
+                finally:
+                    CURRENT_CONN.reset(token)
                 if responses:
                     await ws.send_str(json.dumps(responses if isinstance(data, list) else responses[0]))
             elif msg.type in (WSMsgType.ERROR, WSMsgType.CLOSE):
@@ -128,6 +136,8 @@ async def websocket(request: web.Request) -> web.WebSocketResponse:
     finally:
         pump_task.cancel()
         events.unsubscribe(queue)
+        if power is not None:
+            power.idle.on_disconnect(ws)  # drop this connection's heartbeat hold, if any
     return ws
 
 
@@ -136,6 +146,15 @@ def _require_power(request: web.Request) -> None:
     power = request.app["power"]
     if power is not None and not power.on:
         raise web.HTTPServiceUnavailable(text="device is in standby")
+
+
+def _bump_activity(request: web.Request) -> None:
+    """A still/raw/bracket fetch is a discrete user action (unlike the mere existence of an MJPEG
+    stream connection, which does not count - power.py's module docstring) so it resets the
+    auto-standby idle timer."""
+    power = request.app["power"]
+    if power is not None:
+        power.idle.bump()
 
 
 async def mjpeg(request: web.Request, hub: FrameHub) -> web.StreamResponse:
@@ -178,6 +197,7 @@ async def snapshot(request: web.Request) -> web.Response:
     """Latest stream frame, or with `full=1` a full-resolution still. `X-Frame` carries the frame's
     own metadata: for a still that is the still request's metadata plus `still: true`."""
     _require_power(request)
+    _bump_activity(request)
     camera: CameraBase = request.app["camera"]
     full = request.query.get("full") in ("1", "true")
     if full:
@@ -203,6 +223,7 @@ def _int_query(request: web.Request, name: str, default: int) -> int:
 
 async def _raw_response(request: web.Request, flat: bool, default_frames: int, filename: str) -> web.Response:
     _require_power(request)
+    _bump_activity(request)
     camera: CameraBase = request.app["camera"]
     frames = _int_query(request, "frames", default_frames)
     packed = request.query.get("packed") in ("1", "true")
@@ -234,6 +255,7 @@ async def bracket(request: web.Request) -> web.Response:
     JPEG. One mode switch, gain and colour gains locked. OFBK container (rawfmt.py); `X-Frame`
     carries the summary (factors, exposures, per-frame metadata)."""
     _require_power(request)
+    _bump_activity(request)
     camera: CameraBase = request.app["camera"]
     try:
         factors = [float(x) for x in request.query.get("factors", "0.5,1,2").split(",") if x.strip()]

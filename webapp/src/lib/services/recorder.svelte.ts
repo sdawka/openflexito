@@ -23,6 +23,7 @@ import type { FrameMeta } from '../api/types'
 import { MjpegStream, type MjpegFrame } from '../api/mjpegStream'
 import { Stabilizer, defaultStabilizeOptions } from '../algo/stabilize'
 import { toGray } from '../algo/sharpness'
+import { activity } from './activity.svelte'
 
 export type FrameSource = () => { image: CanvasImageSource; width: number; height: number } | null
 
@@ -71,6 +72,7 @@ export class Recorder {
   private log: VideoFrameLog[] = []
   private mimeUsed = ''
   private bitrateMbpsUsed = 12
+  private releaseActivity: (() => void) | null = null
 
   static supported(m: string): boolean { return typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(m) }
 
@@ -233,32 +235,39 @@ export class Recorder {
     this.startedAt = performance.now(); this.seconds = 0
     this.clock = setInterval(() => (this.seconds = Math.round((performance.now() - this.startedAt) / 1000)), 500)
     this.recording = true; this.status = ''
+    this.releaseActivity?.()
+    this.releaseActivity = activity.hold('video recording')
   }
 
-  /** Stop and save to the gallery. */
+  /** Stop and save to the gallery. Releases the activity hold taken in `finishStart` no matter how
+   *  recording ends (normal stop, stream error, unmount) so a hold can never pin the device awake. */
   async stop(): Promise<GalleryItem | null> {
-    if (!this.rec || !this.recording) return null
+    if (!this.rec || !this.recording) { this.releaseActivity?.(); this.releaseActivity = null; return null }
     this.recording = false
     this.off?.(); this.off = null
     this.mjpeg?.stop(); this.mjpeg = null
     clearInterval(this.clock)
-    const rec = this.rec
-    const done = new Promise<void>((r) => (rec.onstop = () => r()))
-    rec.stop(); await done
-    const durationS = (performance.now() - this.startedAt) / 1000
-    const blob = new Blob(this.chunks, { type: rec.mimeType || this.mimeUsed || 'video/webm' })
-    const thumb = this.thumb ?? (await new Promise<Blob | null>((r) => this.canvas!.toBlob(r, 'image/jpeg', 0.8)))
-    const log = this.log
-    this.rec = null; this.thumb = null; this.chunks = []; this.log = []; this.stabilizer = null
-    this.status = 'saving…'
-    const fps = durationS > 0 ? Math.round((log.length / durationS) * 10) / 10 : 0
-    const item = await saveVideo(blob, thumb, {
-      durationS, fps, source: this.label, width: this.canvas!.width, height: this.canvas!.height, position: { ...device.position },
-      codec: Recorder.codecOf(this.mimeUsed), bitrateBps: Math.round(this.bitrateMbpsUsed * 1e6), frames: log,
-    })
-    this.status = `saved "${item.name}" (${durationS.toFixed(0)} s, ${log.length} frames, ${(blob.size / 1048576).toFixed(1)} MB)`
-    setTimeout(() => (this.status = ''), 5000)
-    return item
+    try {
+      const rec = this.rec
+      const done = new Promise<void>((r) => (rec.onstop = () => r()))
+      rec.stop(); await done
+      const durationS = (performance.now() - this.startedAt) / 1000
+      const blob = new Blob(this.chunks, { type: rec.mimeType || this.mimeUsed || 'video/webm' })
+      const thumb = this.thumb ?? (await new Promise<Blob | null>((r) => this.canvas!.toBlob(r, 'image/jpeg', 0.8)))
+      const log = this.log
+      this.rec = null; this.thumb = null; this.chunks = []; this.log = []; this.stabilizer = null
+      this.status = 'saving…'
+      const fps = durationS > 0 ? Math.round((log.length / durationS) * 10) / 10 : 0
+      const item = await saveVideo(blob, thumb, {
+        durationS, fps, source: this.label, width: this.canvas!.width, height: this.canvas!.height, position: { ...device.position },
+        codec: Recorder.codecOf(this.mimeUsed), bitrateBps: Math.round(this.bitrateMbpsUsed * 1e6), frames: log,
+      })
+      this.status = `saved "${item.name}" (${durationS.toFixed(0)} s, ${log.length} frames, ${(blob.size / 1048576).toFixed(1)} MB)`
+      setTimeout(() => (this.status = ''), 5000)
+      return item
+    } finally {
+      this.releaseActivity?.(); this.releaseActivity = null
+    }
   }
 }
 
