@@ -48,13 +48,15 @@
   // Fine-stack items carry a depth map: switch the shown blob between image / 'depth' / 'relief'.
   const hasDepth = $derived(!!item?.stack?.depth && !isVideo && !isTimelapse)
   let mode = $state<'image' | 'depth' | 'relief'>('image')
-  /** Depth-map legend: convert the stored z-step min/max to µm at display time using Settings'
-   *  current stage z µm/step (`algo/depthMap.ts#stepsToUm`/`depthLegend`), regardless of whether the
-   *  item's own `stack.depth.unit` was persisted — the stored min/max are always z steps. */
+  /** Depth-map legend: convert the stored z-step min/max to µm using the item's own persisted
+   *  `stack.depth.umPerStep` (the stage's z µm/step *at capture time*) where present, so the legend
+   *  keeps reading in the same scale even if Settings' `stageStepUm.z` is recalibrated afterwards.
+   *  Only items saved before that field existed fall back to Settings' *current* value — the honest
+   *  cost of not having recorded it (`algo/depthMap.ts#stepsToUm`/`depthLegend`). */
   const depthLegendInfo = $derived.by(() => {
     const d = item?.stack?.depth
     if (!d) return null
-    const umPerStep = settings.stageStepUm?.z
+    const umPerStep = d.umPerStep ?? settings.stageStepUm?.z
     const [min, max] = umPerStep && umPerStep > 0 ? stepsToUm([d.minZ, d.maxZ], umPerStep) : [d.minZ, d.maxZ]
     return depthLegend({ min, max }, umPerStep)
   })

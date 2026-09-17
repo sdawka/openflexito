@@ -19,6 +19,7 @@
   import { stitchInWorker } from '../lib/services/stitchService'
   import { predictHeightMap, rejectOutliers, isSubGridCell, type HeightSample } from '../lib/algo/heightMap'
   import { newId, putBlob, putItem, makeThumb, type GalleryItem } from '../lib/store/gallery'
+  import { settings } from '../lib/store/settings.svelte'
   import PolygonOverview from '../components/PolygonOverview.svelte'
 
   type TileFocus = NonNullable<NonNullable<GalleryItem['scan']>['tiles'][number]['focus']>
@@ -113,6 +114,9 @@
         focus: { mode: focusMode, step: focusMode === 'interpolate' ? subgridStep : undefined, method: focusMode === 'interpolate' ? 'bilinear' : undefined },
         region: { mode: regionMode, order: orderMode },
         focusFailures: 0,
+        // z µm/step at scan time, if calibrated — persisted so HeightMapOverlay's legend keeps its
+        // scale even if the stage is recalibrated later (see gallery.ts#GalleryItem.scan.zUmPerStep)
+        zUmPerStep: settings.stageStepUm?.z,
       },
     }
     const blobs: { blob: Blob; x: number; y: number; width: number; height: number }[] = []

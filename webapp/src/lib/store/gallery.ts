@@ -36,10 +36,14 @@ export interface GalleryItem {
     slices: number; stepZ: number; zs: number[]; contributions: number[]; method?: 'blocks' | 'pyramid'; centreZ?: number; span?: number; shifts?: { dx: number; dy: number }[]; source?: 'jpeg' | 'raw'
     /** depth-from-focus map derived alongside a pyramid fusion: blobs 'depth' (colour-mapped PNG),
      *  'relief' (pseudo-3D shaded preview) and 'depth.bin' (raw per-pixel winning-slice index, 8-bit).
-     *  `minZ`/`maxZ` are always in z steps regardless of `unit` (additive, informational only — the
-     *  Viewer converts to µm at display time from Settings' current `stageStepUm.z` via
-     *  `algo/depthMap.ts#stepsToUm`, so an absent/'steps' unit here does not lose information). */
-    depth?: { minZ: number; maxZ: number; colorMap: 'ramp'; unit?: 'steps' | 'µm' }
+     *  `minZ`/`maxZ` are always in z steps; `umPerStep` (additive) is the stage's z µm/step *at capture
+     *  time* (Settings' `stageStepUm.z`, if it was calibrated then) — persisted so the item's legend
+     *  keeps reading in the same µm scale even if the operator recalibrates the stage later. `unit` is
+     *  redundant with `umPerStep` being present/absent but kept for cheap display without doing the
+     *  conversion. Items saved before this field existed have neither: `Viewer.svelte`/
+     *  `HeightMapOverlay.svelte` fall back to Settings' *current* `stageStepUm.z` for those, which can
+     *  mislabel them if the calibration has since changed — the honest cost of not having recorded it. */
+    depth?: { minZ: number; maxZ: number; colorMap: 'ramp'; unit?: 'steps' | 'µm'; umPerStep?: number }
   }
   /** pixel-shift super-resolution: N sub-pixel-shifted stills fused by drizzle onto a finer grid;
    *  `used` is how many of `frames` passed registration confidence + phase-validity checks and
@@ -92,6 +96,10 @@ export interface GalleryItem {
     /** how autofocus was used during this scan, and its region/order settings, for the gallery's height-map overlay */
     focus?: { mode: 'none' | 'every' | 'interpolate'; step?: number; method?: 'plane' | 'bilinear' }
     region?: { mode: 'rect' | 'polygon'; order: 'raster' | 'snake' | 'spiral' }
+    /** stage z µm/step (Settings' `stageStepUm.z`) *at scan time*, if it was calibrated then (additive).
+     *  Persisted so `HeightMapOverlay.svelte`'s legend keeps its µm scale even if the operator
+     *  recalibrates the stage afterwards; older scans without it fall back to Settings' current value. */
+    zUmPerStep?: number
   }
   /** what was on the stage, copied from `store/sample.svelte.ts` at capture time (if it was filled in). */
   sample?: SampleRecord

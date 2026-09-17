@@ -1,9 +1,13 @@
 <script lang="ts">
-  /** Small colour-mapped grid + legend of a scan's per-tile focused z (steps), toggled in the
-   *  Viewer. Not zoom-linked to the OpenSeadragon image below it — it is a mini-map, not a tracing
-   *  overlay — which keeps it simple and independent of the zoom/pan state. */
+  /** Small colour-mapped grid + legend of a scan's per-tile focused z, toggled in the Viewer. Not
+   *  zoom-linked to the OpenSeadragon image below it — it is a mini-map, not a tracing overlay —
+   *  which keeps it simple and independent of the zoom/pan state. Labelled in µm using the scan's
+   *  own persisted `zUmPerStep` (µm/step at scan time) where present, so relabelling stays correct
+   *  even if the stage is recalibrated afterwards; older scans without it fall back to Settings'
+   *  current `stageStepUm.z`, or plain steps if that isn't set either. */
   import type { GalleryItem } from '../lib/store/gallery'
-  import { heightColor } from '../lib/algo/heightMap'
+  import { heightColor, heightLegend } from '../lib/algo/heightMap'
+  import { settings } from '../lib/store/settings.svelte'
 
   let { item }: { item: GalleryItem } = $props()
   let show = $state(false)
@@ -14,7 +18,13 @@
   const zs = $derived(tiles.map((t) => t.z).filter((z): z is number => z !== undefined))
   const zMin = $derived(zs.length ? Math.min(...zs) : 0)
   const zMax = $derived(zs.length ? Math.max(...zs) : 0)
+  const umPerStep = $derived(item.scan?.zUmPerStep ?? settings.stageStepUm?.z)
+  const legend = $derived(heightLegend(zMin, zMax, umPerStep))
   const cellOf = $derived((col: number, row: number) => tiles.find((t) => t.col === col && t.row === row))
+  const fmtZ = (z: number): string => {
+    const v = umPerStep && umPerStep > 0 ? z * umPerStep : z
+    return `${v.toFixed(legend.unit === 'µm' ? 2 : 0)} ${legend.unit}`
+  }
 </script>
 
 {#if zs.length}
@@ -25,15 +35,15 @@
         {#each Array.from({ length: rows }) as _, row}
           {#each Array.from({ length: cols }) as __, col}
             {@const t = cellOf(col, row)}
-            <div class="hm-cell" title={t?.z !== undefined ? `col ${col} row ${row}: z ${t.z} steps${t.zMeasured ? ' (measured)' : ' (predicted)'}` : 'no focus data'}
+            <div class="hm-cell" title={t?.z !== undefined ? `col ${col} row ${row}: z ${fmtZ(t.z)}${t.zMeasured ? ' (measured)' : ' (predicted)'}` : 'no focus data'}
                  style="background:{t?.z !== undefined ? heightColor(t.z, zMin, zMax) : 'transparent'}"></div>
           {/each}
         {/each}
       </div>
       <div class="hm-legend">
-        <span>{zMin} steps</span>
+        <span>{legend.min.toFixed(legend.unit === 'µm' ? 2 : 0)} {legend.unit}</span>
         <span class="hm-bar"></span>
-        <span>{zMax} steps</span>
+        <span>{legend.max.toFixed(legend.unit === 'µm' ? 2 : 0)} {legend.unit}</span>
       </div>
     </div>
   {/if}

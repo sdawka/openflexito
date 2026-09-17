@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mertensFuse, mertensWeight, rgbaToPlanes } from '../exposureFuse'
+import { mertensFuse, mertensWeight, rgbaToPlanes, gaussianPyramid, laplacianPyramid, collapseLaplacian, maxPyramidLevels, type Plane } from '../exposureFuse'
 import { exposureFuse as blockExposureFuse, type Rgba } from '../stack'
 
 function makeRgba(fn: (x: number, y: number) => [number, number, number], w: number, h: number): Rgba {
@@ -85,5 +85,122 @@ describe('mertensFuse (multi-scale)', () => {
     const wGood = mertensWeight(goodImg), wClipped = mertensWeight(clippedImg)
     const mid = 4 * w + 4
     expect(wGood[mid]).toBeGreaterThan(wClipped[mid])
+  })
+})
+
+describe('pyramid helpers with small images', () => {
+  function makePlane(w: number, h: number, value: number): Plane {
+    const data = new Float32Array(w * h)
+    for (let i = 0; i < data.length; i++) data[i] = value
+    return { data, width: w, height: h }
+  }
+
+  it('maxPyramidLevels correctly limits pyramid depth for 1xN images', () => {
+    // 1x1: can't pyramid at all
+    expect(maxPyramidLevels(1, 1)).toBe(1)
+    // 1x100: w < 3 so pyrDown stops immediately, only 1 level
+    const max1x100 = maxPyramidLevels(1, 100)
+    expect(max1x100).toBe(1)
+    let p = makePlane(1, 100, 0.5)
+    const pyr1x100 = gaussianPyramid(p, 10)
+    expect(pyr1x100.length).toBe(1)  // pyrDown returns input unchanged
+    expect(pyr1x100[0].width).toBe(1)
+    expect(pyr1x100[0].height).toBe(100)
+  })
+
+  it('maxPyramidLevels correctly limits pyramid depth for Nx1 images', () => {
+    // 100x1: h < 3 so pyrDown stops immediately, only 1 level
+    const max100x1 = maxPyramidLevels(100, 1)
+    expect(max100x1).toBe(1)
+    let p = makePlane(100, 1, 0.5)
+    const pyr100x1 = gaussianPyramid(p, 10)
+    expect(pyr100x1.length).toBe(1)  // pyrDown returns input unchanged
+    expect(pyr100x1[0].width).toBe(100)
+    expect(pyr100x1[0].height).toBe(1)
+  })
+
+  it('gaussianPyramid clamps levels for 1x1 images without crashing', () => {
+    const p = makePlane(1, 1, 0.5)
+    // Request 5 levels but should only get 1
+    const pyr = gaussianPyramid(p, 5)
+    expect(pyr.length).toBe(1)
+    expect(pyr[0].width).toBe(1)
+    expect(pyr[0].height).toBe(1)
+  })
+
+  it('gaussianPyramid clamps levels for 1xN images without crashing', () => {
+    const p = makePlane(1, 100, 0.5)
+    // Request 10 levels but should be clamped based on height
+    const pyr = gaussianPyramid(p, 10)
+    expect(pyr.length).toBeLessThan(10)
+    // All levels should have width=1
+    for (const level of pyr) expect(level.width).toBe(1)
+    // Heights should be monotonically non-increasing
+    for (let i = 1; i < pyr.length; i++) {
+      expect(pyr[i].height).toBeLessThanOrEqual(pyr[i - 1].height)
+    }
+  })
+
+  it('laplacianPyramid works correctly with clamped levels for 1xN images', () => {
+    const p = makePlane(1, 100, 0.5)
+    // Request more levels than possible
+    const lap = laplacianPyramid(p, 10)
+    expect(lap.length).toBeLessThan(10)
+    // All levels should have width=1
+    for (const level of lap) expect(level.width).toBe(1)
+  })
+
+  it('laplacianPyramid reconstruction matches original for normal image (regression test)', () => {
+    // Normal 32x32 image with some pattern
+    const w = 32, h = 32
+    const p = makePlane(w, h, 0.5)
+    const pyr = laplacianPyramid(p, 5)
+    const reconstructed = collapseLaplacian(pyr)
+
+    // Compare pixel-by-pixel with high precision since we're dealing with floats
+    expect(reconstructed.width).toBe(w)
+    expect(reconstructed.height).toBe(h)
+    expect(reconstructed.data.length).toBe(w * h)
+
+    // Check that reconstruction is close (within float precision)
+    for (let i = 0; i < reconstructed.data.length; i++) {
+      expect(reconstructed.data[i]).toBeCloseTo(p.data[i], 5)
+    }
+  })
+
+  it('laplacianPyramid reconstruction matches original for 1x1 image', () => {
+    const p = makePlane(1, 1, 0.5)
+    const pyr = laplacianPyramid(p, 3)
+    const reconstructed = collapseLaplacian(pyr)
+
+    expect(reconstructed.width).toBe(1)
+    expect(reconstructed.height).toBe(1)
+    expect(reconstructed.data[0]).toBeCloseTo(p.data[0], 5)
+  })
+
+  it('laplacianPyramid handles 1xN image without crashing (single level, no filtering)', () => {
+    const w = 1, h = 100
+    const p = makePlane(w, h, 0.5)
+    const pyr = laplacianPyramid(p, 10)  // Request more, but pyrDown stops at dimensions < 3
+    const reconstructed = collapseLaplacian(pyr)
+
+    expect(reconstructed.width).toBe(w)
+    expect(reconstructed.height).toBe(h)
+    // Single-level pyramid: just returns the original data unchanged
+    expect(pyr.length).toBe(1)
+    expect(reconstructed.data[0]).toBe(p.data[0])
+  })
+
+  it('laplacianPyramid handles Nx1 image without crashing (single level, no filtering)', () => {
+    const w = 100, h = 1
+    const p = makePlane(w, h, 0.5)
+    const pyr = laplacianPyramid(p, 10)  // Request more, but pyrDown stops at dimensions < 3
+    const reconstructed = collapseLaplacian(pyr)
+
+    expect(reconstructed.width).toBe(w)
+    expect(reconstructed.height).toBe(h)
+    // Single-level pyramid: just returns the original data unchanged
+    expect(pyr.length).toBe(1)
+    expect(reconstructed.data[0]).toBe(p.data[0])
   })
 })

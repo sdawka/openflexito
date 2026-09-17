@@ -3,6 +3,8 @@
  *  autofocus at the sub-grid points. Pure maths, no device I/O — see `services/autofocusService`
  *  for the actual autofocus call and `routes/Scan.svelte` for how this is wired into a scan. */
 
+import { stepsToUm } from './depthMap'
+
 export interface HeightSample { col: number; row: number; z: number }
 
 export interface Plane { a: number; b: number; c: number }   // z = a*col + b*row + c
@@ -148,9 +150,26 @@ export function isSubGridCell(col: number, row: number, cols: number, rows: numb
   return subGridIndices(cols, step).includes(col) && subGridIndices(rows, step).includes(row)
 }
 
-/** Colour for a height-map legend/overlay: a blue (low) -> red (high) ramp over the z range. */
+/** Colour for a height-map legend/overlay: a blue (low) -> red (high) ramp over the z range. Always
+ *  fed raw z steps (unit-agnostic, like `heightLegend` below) — colour position is a ratio, not a
+ *  measurement, so it doesn't matter which unit z is in as long as zMin/zMax are the same unit. */
 export function heightColor(z: number, zMin: number, zMax: number): string {
   const t = zMax > zMin ? Math.min(1, Math.max(0, (z - zMin) / (zMax - zMin))) : 0.5
   const hue = 220 - 220 * t   // 220 (blue) -> 0 (red)
   return `hsl(${hue.toFixed(0)} 80% 50%)`
+}
+
+export interface HeightLegend { min: number; max: number; unit: 'µm' | 'steps' }
+
+/** Legend for a scan height-map's z range: µm if a z µm/step factor is supplied, plain z steps
+ *  otherwise. Mirrors `algo/depthMap.ts#depthLegend` — pass the scan's own persisted
+ *  `GalleryItem.scan.zUmPerStep` where present (µm/step *at scan time*) so the legend keeps its scale
+ *  even if the stage calibration changes later; only fall back to Settings' current `stageStepUm.z`
+ *  for scans saved before that field existed. */
+export function heightLegend(zMin: number, zMax: number, umPerStep?: number): HeightLegend {
+  if (umPerStep && umPerStep > 0) {
+    const [min, max] = stepsToUm([zMin, zMax], umPerStep)
+    return { min, max, unit: 'µm' }
+  }
+  return { min: zMin, max: zMax, unit: 'steps' }
 }

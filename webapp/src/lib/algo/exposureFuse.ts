@@ -46,9 +46,12 @@ export function planesToInterleaved(p: RgbPlanes): Float32Array {
 
 const mirror = (i: number, n: number) => (i < 0 ? -i : i >= n ? 2 * n - 2 - i : i)
 
-/** 5-tap [1 4 6 4 1]/16 blur then decimate by two (ceil sizes). */
+/** 5-tap [1 4 6 4 1]/16 blur then decimate by two (ceil sizes).
+ *  For dimensions < 3, the 5-tap kernel can't access valid neighbors; return the image unchanged. */
 export function pyrDown(p: Plane): Plane {
   const { data: src, width: w, height: h } = p
+  // Guard: 5-tap kernel needs at least 3 pixels in a dimension to have valid neighbors
+  if (w < 3 || h < 3) return p
   const w2 = Math.max(1, Math.ceil(w / 2)), h2 = Math.max(1, Math.ceil(h / 2))
   const tmp = new Float32Array(w2 * h)   // horizontal pass, decimated in x
   for (let y = 0; y < h; y++) {
@@ -87,23 +90,44 @@ export function defaultLevels(w: number, h: number): number {
   return n
 }
 
+/** Maximum meaningful pyramid levels where both dimensions stay >= 1 after successive halvings.
+ *  Stops when either dimension is < 3, since pyrDown's 5-tap kernel needs 3+ pixels per dimension. */
+export function maxPyramidLevels(w: number, h: number): number {
+  let levels = 1, w_cur = w, h_cur = h
+  for (let i = 0; i < 32; i++) {  // safeguard against infinite loops
+    // Stop if either dimension is too small for pyrDown's 5-tap kernel
+    if (w_cur < 3 || h_cur < 3) break
+    if (w_cur === 1 && h_cur === 1) break  // both at minimum, can't pyramid further meaningfully
+    const w_next = Math.max(1, Math.ceil(w_cur / 2))
+    const h_next = Math.max(1, Math.ceil(h_cur / 2))
+    w_cur = w_next
+    h_cur = h_next
+    levels++
+  }
+  return levels
+}
+
 export function gaussianPyramid(p: Plane, levels: number): Plane[] {
+  // Clamp levels so neither dimension pyramids below 1
+  const maxLevels = maxPyramidLevels(p.width, p.height)
+  const clampedLevels = Math.min(levels, maxLevels)
   const out = [p]
-  for (let l = 1; l < levels; l++) out.push(pyrDown(out[l - 1]))
+  for (let l = 1; l < clampedLevels; l++) out.push(pyrDown(out[l - 1]))
   return out
 }
 
 /** Laplacian pyramid: levels 0..n-2 are band-pass residuals, the last is the coarse Gaussian. */
 export function laplacianPyramid(p: Plane, levels: number): Plane[] {
   const g = gaussianPyramid(p, levels)
+  const actualLevels = g.length  // gaussianPyramid may have clamped the requested levels
   const out: Plane[] = []
-  for (let l = 0; l < levels - 1; l++) {
+  for (let l = 0; l < actualLevels - 1; l++) {
     const up = pyrUp(g[l + 1], g[l].width, g[l].height)
     const d = new Float32Array(g[l].data.length)
     for (let i = 0; i < d.length; i++) d[i] = g[l].data[i] - up.data[i]
     out.push({ data: d, width: g[l].width, height: g[l].height })
   }
-  out.push(g[levels - 1])
+  out.push(g[actualLevels - 1])
   return out
 }
 
@@ -147,6 +171,8 @@ export function mertensFusePlanes(images: RgbPlanes[], o: MertensOptions = {}): 
   if (images.length === 1) return images[0]
   const { width: w, height: h } = images[0]
   for (const im of images) if (im.width !== w || im.height !== h) throw new Error('mertensFusePlanes: images differ in size')
+  // Guard: if either dimension is 1, the mirror function in mertensWeight will fail; skip multi-scale fusion
+  if (w === 1 || h === 1) return images[0]
   const levels = o.levels ?? defaultLevels(w, h)
   // normalised weights
   const weights = images.map((im) => mertensWeight(im, o))
@@ -162,7 +188,9 @@ export function mertensFusePlanes(images: RgbPlanes[], o: MertensOptions = {}): 
     images.forEach((im, k) => {
       const lap = laplacianPyramid({ data: im[key], width: w, height: h }, levels)
       if (!acc) acc = lap.map((p) => ({ data: new Float32Array(p.data.length), width: p.width, height: p.height }))
-      for (let l = 0; l < levels; l++) {
+      // Use actual pyramid length which may be clamped
+      const actualLevels = lap.length
+      for (let l = 0; l < actualLevels; l++) {
         const a = acc[l].data, L = lap[l].data, W = weightPyrs[k][l].data
         for (let i = 0; i < a.length; i++) a[i] += L[i] * W[i]
       }

@@ -25,7 +25,8 @@ import { settings } from '../../store/settings.svelte'
 import { smoothDepthIndex, depthZMap, colorizeDepth, reliefShade, stepsToUm, depthLegend } from '../../algo/depthMap'
 import { withCameraLock } from '../cameraLock'
 import type { MoveResult } from '../../algo/types'
-import { captureFull, decode, encode, encodeRgba8, encodeRgba8Png, settle, type Say, type PhotoMeta } from './common'
+import type { StillFrameMeta } from '../../api/snapshot'
+import { captureFullWithMeta, captureField, decode, encode, encodeRgba8, encodeRgba8Png, settle, type Say, type PhotoMeta } from './common'
 
 export interface FocusStackOptions {
   slices?: number         // focus: number of z slices (odd, centred on the current z); focusfine: the maximum
@@ -40,7 +41,7 @@ export interface FocusStackOptions {
  *  offset applied; `end_hw` is the raw hardware frame and is not comparable) against the intended
  *  cumulative target and checks `cancelled`; retried once (the residual distance) and aborted if it
  *  still misses, instead of recording whatever z the stage happened to stop at. */
-async function moveZVerified(dz: number, compensate: false | 'z', say: Say, label: string, tolerance = 1): Promise<number> {
+export async function moveZVerified(dz: number, compensate: false | 'z', say: Say, label: string, tolerance = 1): Promise<number> {
   const target = device.position.z + dz
   let remaining = dz
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -69,7 +70,7 @@ function zUmPerStep(): number | undefined {
 export async function takeFocusStack(o: FocusStackOptions, say: Say, meta: PhotoMeta): Promise<GalleryItem> {
   const slices = Math.max(2, Math.round(o.slices ?? 5)), step = Math.max(1, Math.round(o.stepZ ?? 50))
   const startZ = device.position.z
-  const frames: Rgba[] = [], sliceBlobs: Blob[] = [], zs: number[] = []
+  const frames: Rgba[] = [], sliceBlobs: Blob[] = [], zs: number[] = [], metas: (StillFrameMeta | null)[] = []
   await withCameraLock(async () => {
     try {
       say(`focus stack: moving to the first of ${slices} slices`)
@@ -78,8 +79,8 @@ export async function takeFocusStack(o: FocusStackOptions, say: Say, meta: Photo
         const z = i ? await moveZVerified(step, false, say, 'focus stack') : device.position.z
         await settle(150); await waitForFrames(2, 1500)
         say(`focus stack: capturing slice ${i + 1}/${slices} at z=${z}`)
-        const blob = await captureFull()
-        sliceBlobs.push(blob); zs.push(z)
+        const { blob, meta: frameMeta } = await captureFullWithMeta()
+        sliceBlobs.push(blob); zs.push(z); metas.push(frameMeta)
         frames.push(await decode(blob))
       }
     } finally {
@@ -103,7 +104,13 @@ export async function takeFocusStack(o: FocusStackOptions, say: Say, meta: Photo
   sliceBlobs.forEach((b, i) => { extraBlobs[`slice/${i}`] = b })
   return saveSnapshot(await encode(image), {
     ...meta, name: `Focus stack ${slices}×${step}`,
-    extra: { stack: { slices, stepZ: step, zs, contributions, method: 'blocks' } }, extraBlobs,
+    extra: {
+      stack: { slices, stepZ: step, zs, contributions, method: 'blocks' },
+      // metadata of the reference slice (same one the alignment/fusion is anchored to), not any
+      // particular slice's own exposure — a stack has no single "the" still, this is the closest fit
+      capture: captureField(metas[reference]),
+    },
+    extraBlobs,
   })
 }
 
@@ -150,6 +157,7 @@ export async function takeFineFocusStack(o: FocusStackOptions, say: Say, meta: P
   let span = step * (slices - 1)
   say(`fine stack: focus plane z=${centreZ}, half-width ${Math.round(halfWidth)} steps → ${slices} slices ${step} apart (${span} total, capped at ${maxSlices})`)
   const frames: { blob: Blob; z: number }[] = []
+  const metas: (StillFrameMeta | null)[] = []
   let width = 0, height = 0
   const gains = liveGains(), params = source === 'raw' ? await tuningParams() : {}
   const worker = new Worker(new URL('../../workers/stackWorker.ts', import.meta.url), { type: 'module' })
@@ -181,8 +189,8 @@ export async function takeFineFocusStack(o: FocusStackOptions, say: Say, meta: P
           progressHook = (m) => say(`fine stack: ${m}`)
           post({ type: 'add', index: i, data: dev.rgb16 }, [dev.rgb16.buffer])
         } else {
-          const blob = await captureFull()
-          frames.push({ blob, z })
+          const { blob, meta: frameMeta } = await captureFullWithMeta()
+          frames.push({ blob, z }); metas.push(frameMeta)
           const img = await decode(blob)
           if (!i) { width = img.width; height = img.height; post({ type: 'init', width, height, depth: 8, count: slices, reference: 'middle', method: o.method }) }
           progressHook = (m) => say(`fine stack: ${m}`)
@@ -206,8 +214,8 @@ export async function takeFineFocusStack(o: FocusStackOptions, say: Say, meta: P
   // depth-from-focus: which slice won each pixel, smoothed, turned into a z map (steps — the saved
   // gallery schema and its viewer assume that unit) and a colour/relief preview. Where the stage's z
   // distance-per-step is calibrated (Settings' `stageStepUm.z`) we also log a µm reading for the
-  // operator (`stepsToUm`/`depthLegend`); persisting µm into the gallery item itself needs a small
-  // schema addition (`stack.depth.unit`) that's outside this file's ownership — see handoff notes.
+  // operator (`stepsToUm`/`depthLegend`) and persist it into `stack.depth.umPerStep` so the item keeps
+  // its capture-time µm scale even if the stage is recalibrated later (gallery.ts, Viewer.svelte).
   say('fine stack: extracting depth map…')
   const depthIndex = smoothDepthIndex(r.depthIndex, r.width, r.height)
   const zMap = depthZMap(depthIndex, zs)
@@ -225,7 +233,7 @@ export async function takeFineFocusStack(o: FocusStackOptions, say: Say, meta: P
   // progress log (o.method) that hybrid blending actually ran
   const stack = {
     slices, stepZ: step, zs, contributions: r.contributions, method: 'pyramid' as const, centreZ, span, shifts: r.shifts, source,
-    depth: { minZ: depthColor.stats.min, maxZ: depthColor.stats.max, colorMap: 'ramp' as const },
+    depth: { minZ: depthColor.stats.min, maxZ: depthColor.stats.max, colorMap: 'ramp' as const, ...(umPerStep ? { umPerStep } : {}) },
   }
   if (r.data instanceof Uint16Array) {
     say('fine stack: encoding 16-bit PNG…')
@@ -237,9 +245,12 @@ export async function takeFineFocusStack(o: FocusStackOptions, say: Say, meta: P
     })
   }
   const image = await encodeRgba8({ data: r.data, width: r.width, height: r.height }, 0.95)
+  // metadata of the reference slice ('middle', same as the worker's alignment/fusion reference) — a
+  // stack has no single "the" still, this is the closest fit
+  const reference = chooseReference(metas.length)
   return saveSnapshot(image, {
     ...meta, position: { ...meta.position, z: centreZ }, name: `Fine focus stack ${slices}×${step}`,
-    extra: { stack }, extraBlobs,
+    extra: { stack, capture: captureField(metas[reference]) }, extraBlobs,
   })
 }
 

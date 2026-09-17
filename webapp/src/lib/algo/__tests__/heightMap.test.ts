@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { fitPlane, planeZ, rejectOutliers, buildSubGrid, bilinearZ, predictHeightMap, heightColor, subGridIndices, isSubGridCell, type HeightSample } from '../heightMap'
+import { fitPlane, planeZ, rejectOutliers, buildSubGrid, bilinearZ, predictHeightMap, heightColor, heightLegend, subGridIndices, isSubGridCell, type HeightSample } from '../heightMap'
 
 describe('height map: plane fit', () => {
   it('recovers an exact plane from noiseless samples', () => {
@@ -126,5 +126,16 @@ describe('height map: legend colour', () => {
 
   it('does not divide by zero when the range is flat', () => {
     expect(() => heightColor(5, 5, 5)).not.toThrow()
+  })
+})
+
+describe('height map: legend units', () => {
+  it('converts to µm given a z µm/step factor', () => {
+    expect(heightLegend(100, 300, 0.05)).toEqual({ min: 5, max: 15, unit: 'µm' })
+  })
+
+  it('reports plain steps when no factor (or a non-positive one) is given', () => {
+    expect(heightLegend(100, 300)).toEqual({ min: 100, max: 300, unit: 'steps' })
+    expect(heightLegend(100, 300, 0)).toEqual({ min: 100, max: 300, unit: 'steps' })
   })
 })

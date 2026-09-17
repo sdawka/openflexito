@@ -26,6 +26,8 @@ class DeviceStore {
   light = $state<{ cc: number; pwm: number[]; channels?: { cc: number; pwm: number } }>({ cc: 0, pwm: [] })
   controls = $state<CameraControls | null>(null)
   error = $state<string | null>(null)
+  /** Stored call hook for macro recording; reapplied to new clients on reconnect. */
+  private callHook: ((method: string, params: unknown) => void) | null = null
 
   /** Standby state. Missing `status.power` (older device) reads as on. */
   get powerOn(): boolean { return this.status?.power?.on ?? true }
@@ -81,6 +83,8 @@ class DeviceStore {
       }
     })
     c.on('event.light', (l: { cc: number; pwm: number[]; channels?: { cc: number; pwm: number } }) => { this.light = l })
+    // Reapply stored call hook (for macro recording) to the new client
+    if (this.callHook) c.onCall(this.callHook)
   }
 
   connect(): void {
@@ -108,6 +112,13 @@ class DeviceStore {
 
   url(path: string): string {
     return this.client.httpUrl(path)
+  }
+
+  /** Set a call hook for macro recording; the hook is reapplied to new clients on reconnect.
+   *  Pass null to remove the hook. */
+  setCallHook(fn: ((method: string, params: unknown) => void) | null): void {
+    this.callHook = fn
+    this.client.onCall(fn)
   }
 
   // ---- actions -------------------------------------------------------------------------------

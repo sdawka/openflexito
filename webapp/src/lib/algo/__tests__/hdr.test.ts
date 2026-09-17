@@ -88,6 +88,36 @@ describe('tone mapping', () => {
     expect(mapped.every((v) => v >= 0 && v <= 1 && Number.isFinite(v))).toBe(true)
   })
 
+  it('toneMapMertens handles 1xN (1-row) images safely (skips pyramid fusion for tiny dimensions)', () => {
+    const w = 1, h = 100
+    const radiance = makeLinear((x, y) => { const v = y < 50 ? 0.01 : 0.5; return [v, v, v] }, w, h)
+    // For 1xN images, mertensFusePlanes skips the pyramid fusion, so the result should be well-defined
+    const mapped = toneMapMertens(radiance, w, h, [-2, 0, 2])
+    expect(mapped.length).toBe(w * h * 3)
+    // Should be finite and in range (may not be perfectly tone-mapped but shouldn't have NaN)
+    expect(mapped.every((v) => Number.isFinite(v))).toBe(true)
+  })
+
+  it('toneMapMertens handles Nx1 (1-column) images safely (skips pyramid fusion for tiny dimensions)', () => {
+    const w = 100, h = 1
+    const radiance = makeLinear((x) => { const v = x < 50 ? 0.01 : 0.5; return [v, v, v] }, w, h)
+    // For Nx1 images, mertensFusePlanes skips the pyramid fusion, so the result should be well-defined
+    const mapped = toneMapMertens(radiance, w, h, [-2, 0, 2])
+    expect(mapped.length).toBe(w * h * 3)
+    // Should be finite and in range (may not be perfectly tone-mapped but shouldn't have NaN)
+    expect(mapped.every((v) => Number.isFinite(v))).toBe(true)
+  })
+
+  it('toneMapMertens handles 1x1 image safely (skips pyramid fusion for tiny dimensions)', () => {
+    const w = 1, h = 1
+    const radiance = makeLinear(() => [0.5, 0.5, 0.5], w, h)
+    // For 1x1 images, mertensFusePlanes skips the pyramid fusion, so the result should be well-defined
+    const mapped = toneMapMertens(radiance, w, h, [-2, 0, 2])
+    expect(mapped.length).toBe(3)
+    // Should be finite (may not be perfectly tone-mapped but shouldn't have NaN)
+    expect(mapped.every((v) => Number.isFinite(v))).toBe(true)
+  })
+
   it('dynamicRangeStops reports roughly log2(hi/lo) between the percentile bounds', () => {
     const n = 10000
     const radiance = new Float32Array(n * 3)

@@ -97,6 +97,53 @@ export async function rawAveragePhoto(say: Say, meta: PhotoMeta, frames = 4): Pr
   return saveRawResult(result, gains, meta, `RAW average ×${n}`)
 }
 
+/** Resolve one bracket item's *requested* factor without trusting its position in the container: the
+ *  device always writes each item's own `index` (its position among the frames it actually captured,
+ *  device/openflexito/camera.py `_bracket_sync`'s `enumerate(zip(factors, exposures))`), so a bracket
+ *  that arrived reordered — or only partially completed, fewer items than `factors` — still looks its
+ *  factor up by that index rather than by array position `i`. Falls back to `i` only when `index` is
+ *  missing or out of range. */
+function bracketFactor(meta: Record<string, unknown>, i: number, factors: number[]): number | null {
+  const rawIndex = meta.index
+  const idx = typeof rawIndex === 'number' && Number.isInteger(rawIndex) && rawIndex >= 0 && rawIndex < factors.length ? rawIndex : i
+  const f = typeof meta.factor === 'number' ? meta.factor : factors[idx]
+  return typeof f === 'number' ? f : null
+}
+
+/** Resolve each bracket item's exposure for the HDR merge (`HdrFrame.exposure`, `algo/hdr.ts`).
+ *  Correct-by-construction rather than index-trusting: each item's OWN `meta.exposure` is the real
+ *  `ExposureTime` libcamera reported *for that captured frame* (device/openflexito/rawfmt.py
+ *  `frame_meta` — read straight from the frame's metadata, not from what was requested), so it is
+ *  preferred over the *requested* factor for every item where the whole bracket has it. A bracket
+ *  reordered or truncated by a future/other device still pairs correctly either way: the real
+ *  per-frame value doesn't depend on position at all, and the factor fallback (`bracketFactor`) looks
+ *  up the requested factor by the item's own `index`, not its position in the array.
+ *
+ *  The whole bracket commits to ONE consistent unit rather than mixing them per item — `mergeHdr` only
+ *  weighs frames relative to each other, so a µs value on one frame and a bare ratio on another would
+ *  silently corrupt the merge:
+ *    1. every item has its own real `meta.exposure` (µs) -> use those directly (best case).
+ *    2. else the summary carries `base_exposure` (µs, the exposure the reference/factor-1 frame
+ *       actually ran at) -> each item's real exposure when it has one, else `base_exposure * factor`
+ *       (still µs, just estimated for that one item).
+ *    3. else the bare requested factor for every item (a self-consistent ratio on its own, just not
+ *       calibrated against a real exposure).
+ *  An item with nothing usable under the chosen unit resolves to null so the caller drops it instead
+ *  of silently mispairing an exposure with the wrong plane. */
+export function resolveHdrExposures(items: { meta: Record<string, unknown> }[], factors: number[], summary: Record<string, unknown> | null): (number | null)[] {
+  const real = items.map((it) => { const e = it.meta.exposure; return typeof e === 'number' && e > 0 ? e : null })
+  if (real.every((e) => e != null)) return real
+  const base = typeof summary?.base_exposure === 'number' && summary.base_exposure > 0 ? summary.base_exposure : null
+  if (base != null) {
+    return items.map((it, i) => {
+      if (real[i] != null) return real[i]
+      const f = bracketFactor(it.meta, i, factors)
+      return f != null ? base * f : null
+    })
+  }
+  return items.map((it, i) => bracketFactor(it.meta, i, factors))
+}
+
 /** `mode: 'hdrraw'` — true HDR from a linear RAW exposure bracket (device.md §3 `/bracket.bin?raw=1`):
  *  Debevec-weighted radiance merge (`algo/hdr.ts`), global Reinhard tone map, 16-bit PNG. Unlike the
  *  LED/exposure Mertens stack (`exposureStack.ts`) this is a real dynamic-range extension: the merged
@@ -109,17 +156,21 @@ export async function hdrRawPhoto(say: Say, meta: PhotoMeta, factors = [0.25, 1,
   if (items.length < 2) throw new Error('HDR RAW: the device returned fewer than two exposures')
   const gains = liveGains(), params = await tuningParams()
   const flatField = currentFlatField()
+  const exposures = resolveHdrExposures(items, factors, summary)
   say('HDR RAW: developing each exposure to linear RGB…')
   let width = 0, height = 0
-  const frames: HdrFrame[] = items.map((it, i) => {
+  const frames: HdrFrame[] = []
+  items.forEach((it, i) => {
+    const exposure = exposures[i]
+    if (exposure == null) { say(`HDR RAW: item ${i} has no usable exposure metadata, dropping it from the merge`); return }
     const raw = parseRaw(it.data.buffer as ArrayBuffer, it.data.byteOffset, it.data.byteLength)
     // highlights are the whole point of an HDR merge, so no highlight desaturation here: 'clip'
     // marks a channel's true saturation and mergeHdr's hat weight already discounts it.
     const lin = developLinear(raw, { gains: (raw.meta?.colour_gains as [number, number] | undefined) ?? gains, ccm: (raw.meta?.ccm as number[] | undefined) ?? params.ccm, lsc: params.lsc, flatField, highlights: 'clip' })
-    if (!i) { width = lin.width; height = lin.height }
-    const factor = typeof (it.meta as Record<string, unknown>)?.factor === 'number' ? (it.meta as Record<string, number>).factor : factors[i] ?? 1
-    return { data: lin.data, exposure: factor }
+    if (!frames.length) { width = lin.width; height = lin.height }
+    frames.push({ data: lin.data, exposure })
   })
+  if (frames.length < 2) throw new Error('HDR RAW: fewer than two frames had usable exposure metadata')
   say('HDR RAW: merging radiance…')
   const radiance = mergeHdr(frames, width, height)
   say(`HDR RAW: merged (${dynamicRangeStops(radiance).toFixed(1)} stops), tone mapping…`)

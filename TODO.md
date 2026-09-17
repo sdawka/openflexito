@@ -75,10 +75,10 @@ on hardware.
   hand-shake/stage-vibration frequency content — scan.md open point.
 - **Focus breathing**: measure how much the image scales with z on the real optics to decide whether
   `algo/align.ts`'s off-by-default similarity (scale+translation) alignment is worth turning on — CAPTURE_AUDIT.md §5, focus.md open point.
-- **Flat-field workflow**: `captureFlatField` (`services/photo/rawPhoto.ts`) downloads `/flat.bin`,
-  derives gain maps and saves them, but has no UI yet and has never been run against a real sample-removed
-  field; once wired, check it against a known-vignetted scene and that it correctly out-competes the
-  tuning file's placeholder ALSC tables.
+- **Flat-field workflow**: the UI exists (Calibrate.svelte's "RAW flat field" panel, commit bbb7bc9,
+  with an e2e step "RAW flat field: capture and clear") and `captureFlatField` (`services/photo/rawPhoto.ts`)
+  derives and saves the gain maps. Still unverified on hardware: run it against a real sample-removed
+  field and check it out-competes the tuning file's placeholder ALSC tables on a known-vignetted scene.
 - **Wired networking** (README "Networking", `device/openflexito/netwatch.py`): the `link`/`interface`/
   `link_local`/`speed_mbit`/`interfaces` fields and the `openflexito-wired` NM profile are unit-tested
   and exercised on the fake device only (which reports a fixed `link: "ethernet"`, `speed_mbit: 1000`).
@@ -103,40 +103,51 @@ on hardware.
   vitest environment (plain node, no jsdom), so importing the worker module throws. It was sanity-checked
   by hand (streaming vs. full-buffer vs. hybrid paths agree) but not committed as a test; worth a
   jsdom/worker-capable test target if this project adds one.
-- **`toneMapMertens` (`algo/hdr.ts`) breaks on a 1×N or N×1 image.** The Laplacian-pyramid helpers it
-  shares with `exposureFuse.ts` assume both dimensions can be halved sensibly. No capture mode currently
-  produces a 1-pixel-tall image, so this is latent, not a live bug — add a guard (clamp `levels` so
-  neither dimension pyramids below 1) if `hdr.ts` is reused somewhere new.
+- ~~`toneMapMertens` breaks on a 1×N or N×1 image~~ — **fixed 2026-09-16.** The clamp lives in the shared
+  helper (`algo/exposureFuse.ts`): `pyrDown` returns unchanged below 3 px (the 5-tap kernel needs 3), a new
+  `maxPyramidLevels` clamps the level count, `laplacianPyramid` iterates the actual pyramid length, and
+  `mertensFusePlanes` short-circuits when a dimension is 1. Covered for 1×N/N×1/1×1 plus a 32×32 regression
+  assertion that normal output is byte-identical to before.
 - **Super-resolution's `sharpen` PSF has no measured optical-blur term** — only the drizzle drop and
   pixel aperture, since nothing in this codebase measures the real PSF (a bead or knife-edge target)
   yet. Wire in a measured sigma once that exists.
-- **Depth-map/height-map units**: `algo/depthMap.ts`'s `stepsToUm`/`depthLegend` convert z steps to µm
-  given `settings.stageStepUm`, and `Viewer.svelte` shows the depth-map legend in µm at display time from the current setting;
-  `GalleryItem.stack.depth` still has no persisted `unit`/µm-per-step field, so an item viewed after the
-  setting changes re-labels itself; same for `algo/heightMap.ts`'s scan height-map legend.
-- **`hdrRawPhoto`'s exposure-per-frame lookup** trusts the device bracket summary's `item.meta.factor`
-  when present, else falls back to `factors[i]` by array index — unverified against a device that
-  reorders or partially completes a bracket (device.md doesn't document reordering, so believed safe).
+- ~~Depth-map/height-map units~~ — **fixed 2026-09-16.** `GalleryItem.stack.depth.umPerStep` and
+  `GalleryItem.scan.zUmPerStep` (both additive, `store/gallery.ts`) persist the stage's z µm/step at capture
+  time; written by `services/photo/focusStack.ts` and `routes/Scan.svelte`, read by `Viewer.svelte` and
+  `HeightMapOverlay.svelte` as `persisted ?? settings.stageStepUm.z ?? steps`. `algo/heightMap.ts` gained
+  `heightLegend()` (it had no unit conversion at all), so the scan height map labels in µm too. Items saved
+  before the field existed still fall back to the current setting — the old mislabelling risk, for old items only.
+- ~~`hdrRawPhoto`'s exposure-per-frame lookup trusts `factors[i]` by array index~~ — **fixed 2026-09-16.**
+  Device guarantee established by reading the source: `camera.py:674-691` captures the bracket in a single
+  sequential loop (no reordering possible) and `web.py:253-272` turns any failure into a 400/503 rather than
+  returning a partial container — so today's device is safe, but the browser was trusting that implicitly.
+  `resolveHdrExposures` (pure, exported, 8 tests) now prefers each frame's own libcamera-reported
+  `meta.exposure`, then `summary.base_exposure × factor`, then the bare factor — one consistent unit for the
+  whole bracket, factors looked up by the item's own `meta.index` rather than array position, and any item
+  that resolves to nothing is dropped with a warning instead of being paired with a wrong exposure.
 - **DNG `DateTimeOriginal`** uses wall-clock time at develop time, not the still's own `CLOCK_BOOTTIME`
   timestamp (no RPC exposes the device's boot epoch to convert it) — fine for a develop right after
   capture, would drift for a raw buffer cached and developed later.
-- **`capture.meta` (still request metadata) is populated for `single`, RAW/HDR-family and exposure-bracket
-  captures**; LED-only `'led'` brackets, focus-stack slices and scan tiles still use `captureFull()` — switch
-  them to `captureFullWithMeta()` (`services/photo/common.ts`) for full D6 coverage.
+- **`capture.meta`**: done 2026-09-16 for focus-stack slices (`takeFocusStack` + `takeFineFocusStack`'s jpeg
+  branch, recording the reference slice's metadata — the raw branch already uses the OFRW trailer) and LED-only
+  `'led'` brackets (`exposureStack.ts#ledFrames`, representative = the LED level nearest the starting brightness).
+  **Still open: scan tiles** — tile capture is in `routes/Scan.svelte` and calls `fetchSnapshot` directly, not
+  `common.ts#captureFull`; wire it to `fetchSnapshotWithMeta` for full D6 coverage.
 - **RCD demosaic (`algo/demosaic.ts`) is ~3-5× Malvar's cost** on an 8 MP frame in pure TS (no measured
   hardware number yet); already off the main thread in `rawWorker.ts`, a WASM port stays Tier C.
-- Depth map (`algo/depthMap.ts`) and scan height map (`algo/heightMap.ts`) still report z in steps on
-  screen until the unit-field wiring above is done.
-- Macro recording hooks the single RPC client; if `device.reconnect()` swaps clients mid-recording the
-  `onCall` hook is not rebound (`services/macro.svelte.ts`).
+- ~~Macro recording's `onCall` hook is not rebound when `device.reconnect()` swaps clients~~ — **fixed
+  2026-09-16.** The hook now lives on the stable `DeviceStore` (`store/device.svelte.ts#setCallHook`) and
+  `bind()` reapplies it to every new client, so it survives any number of reconnects.
 - Time-lapse WebM export and "track a saved time-lapse" have no e2e step.
 - Polygon scan region is aligned to the planned grid box, not to the overview image's exact geometry.
 - "Export all of this sample" without the File System Access API downloads flat files (same as Export).
-- **Focus-stack arrival check** (`services/photo/focusStack.ts#moveZVerified`) compares the device's
-  program-frame `position.z` with the target; `end_hw` is the raw hardware frame (sign/offset applied by
-  `stage.py#_to_program`) and must not be compared with program coordinates — this is the likely cause of
-  the intermittent "stage did not reach z=..." failures seen in some e2e runs. The e2e (34 steps) passes
-  on the fake when run alone; two suites against one fake drive the same stage and fail erratically.
+- **Focus-stack arrival check**: investigated 2026-09-16 — **there is no frame-mismatch bug.**
+  `moveZVerified` reads `move.position.z` (program frame) against a program-frame target and never touches
+  `end_hw`; `stage.py#_to_program` is `sign*(hw + offset)`, so `got - start == dz` up to physical slop.
+  A regression test (`services/photo/__tests__/focusStack.test.ts`) pins this with a fixture whose program
+  and `end_hw` numbers are deliberately unrelated, so a future "fix" toward `end_hw` fails loudly. The
+  intermittent "stage did not reach z=..." failures are therefore the two-suites-one-fake race (or WS event
+  lag under load), not a coordinate-frame error — the e2e (34 steps) passes on the fake when run alone.
 
 ## Feature 5 (waiting on hardware): oblique / darkfield / differential phase contrast
 - Two side LEDs on the Sangaboard PWM outputs (J8 pins 2 and 4 are the low-side MOSFET drains, pins 1/3 = +5 V;

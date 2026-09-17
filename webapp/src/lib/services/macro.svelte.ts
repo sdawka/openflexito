@@ -43,7 +43,7 @@ class MacroService {
     this.steps = []
     this.startedAt = performance.now()
     this.recording = true
-    device.client.onCall((method, params) => {
+    device.setCallHook((method, params) => {
       if (!RECORD_METHODS.has(method)) return
       this.steps = [...this.steps, {
         kind: 'call', method, params: (params as Record<string, unknown>) ?? {},
@@ -62,7 +62,7 @@ class MacroService {
   stop(): void {
     if (!this.recording) return
     this.recording = false
-    device.client.onCall(null)
+    device.setCallHook(null)
   }
 
   async save(name: string): Promise<Macro | null> {
