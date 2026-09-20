@@ -33,10 +33,38 @@ export interface Settings {
   videoCodec: string
   videoBitrateMbps: number
   videoStabilise: boolean
+  /** additive WP5 video fields: `videoCodec` above keeps its legacy vp9/av1/vp8 values for old
+   *  settings blobs, `videoCodecPref` ('h264' | 'vp9' | 'av1' | 'auto') is what the WebCodecs/
+   *  mediabunny recorder actually reads (`services/videoEncoder.ts#VideoCodecPref`). */
+  videoCodecPref: string
+  videoContainer: 'mp4' | 'webm'
+  videoQuality: 'high' | 'medium' | 'low'
+  videoKeyframeS: number
+  /** bake `services/deflickerProcessor.ts` into recordings by default */
+  videoDeflicker: boolean
+  /** run the deflicker processor on the live view too (off by default: most users never see a
+   *  flicker worth the per-frame cost) */
+  deflickerLive: boolean
   /** Super-resolution defaults (`services/photo/superres.ts#SuperresOptions`). */
   superresScale: 2 | 3
   superresPixfrac: number
   superresSharpen: boolean
+  /** WP4 live denoise (`services/denoiseProcessor.ts`, frame chain order 100): off by default (a
+   *  per-frame temporal blend costs real time even at ~1 ms). `liveDenoiseRecord` additionally bakes
+   *  it into `record`-target frames (the recorder); `liveDenoiseAlpha` is the `TemporalDenoiser`
+   *  blend weight toward history (see `algo/temporalDenoise.ts`'s module doc for the confidence gate). */
+  liveDenoise: boolean
+  liveDenoiseRecord: boolean
+  liveDenoiseAlpha: number
+  /** Gallery Enhance panel: preview downsample width (`workers/enhanceWorker.ts`) before "Apply" runs
+   *  the full-resolution pipeline. */
+  enhancePreviewWidth: number
+  /** WP2 look/LUT (`services/lookProcessor.ts`, frame chain order 900 - last, colour). The rest of the
+   *  active look (selected LUT, strength, adjustments) lives in `store/look.svelte.ts`'s own persisted
+   *  state; these two flags live here because they're read by the frame-chain `enabled()` gate and by
+   *  `Viewer.svelte`'s gallery display, both of which already depend on `settings`. */
+  lookBakeIntoRecording: boolean
+  lookApplyInGallery: boolean
 }
 
 const defaults: Settings = {
@@ -52,7 +80,10 @@ const defaults: Settings = {
   stageStepUm: { x: 0.088, y: 0.088, z: 0.050 },
   showScaleBar: true,
   videoCodec: 'vp9', videoBitrateMbps: 12, videoStabilise: true,
+  videoCodecPref: 'auto', videoContainer: 'mp4', videoQuality: 'high', videoKeyframeS: 2, videoDeflicker: false, deflickerLive: false,
   superresScale: 2, superresPixfrac: 0.5, superresSharpen: false,
+  liveDenoise: false, liveDenoiseRecord: false, liveDenoiseAlpha: 0.7, enhancePreviewWidth: 1024,
+  lookBakeIntoRecording: false, lookApplyInGallery: true,
 }
 
 function load(): Settings {

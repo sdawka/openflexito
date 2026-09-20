@@ -6,7 +6,7 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
   import { settings, saveSettings } from '../lib/store/settings.svelte'
   import { takePhoto, type PhotoMode } from '../lib/services/photoService'
   import type { BracketKind } from '../lib/services/photo/exposureStack'
-  import { recorder, Recorder, type VideoCodec } from '../lib/services/recorder.svelte'
+  import { recorder, Recorder, type VideoCodec, type VideoContainer, type VideoQuality } from '../lib/services/recorder.svelte'
   import { liveStack } from '../lib/services/liveStack.svelte'
   import { macroService } from '../lib/services/macro.svelte'
 
@@ -28,9 +28,12 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
   let superresRaw = $state(false)
   let busy = $state(false)
   let status = $state<{ kind: 'busy' | 'ok' | 'err'; text: string } | null>(null)
-  let vidCodec = $state<VideoCodec>(settings.videoCodec as VideoCodec)
-  let vidBitrate = $state(settings.videoBitrateMbps)
+  let vidCodec = $state<VideoCodec>(settings.videoCodecPref as VideoCodec)
+  let vidContainer = $state<VideoContainer>(settings.videoContainer)
+  let vidQuality = $state<Exclude<VideoQuality, object>>(settings.videoQuality)
+  let vidKeyframeS = $state(settings.videoKeyframeS)
   let vidStabilise = $state(settings.videoStabilise)
+  let vidDeflicker = $state(settings.videoDeflicker)
   const codecSupport = Recorder.codecSupport()
 
   /** Parse a comma/space-separated list of positive numbers; falls back to `fallback` if empty/invalid. */
@@ -102,7 +105,7 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
   function toggleRecord() {
     if (recorder.recording) { void recorder.stop().then((i) => { if (i) status = { kind: 'ok', text: `saved "${i.name}"` } }); return }
     const useStack = liveStack.active && !!liveStack.composite
-    const opts = { codec: vidCodec, bitrateMbps: vidBitrate, stabilize: vidStabilise }
+    const opts = { container: vidContainer, codec: vidCodec, quality: vidQuality, keyframeS: vidKeyframeS, stabilize: vidStabilise, deflicker: vidDeflicker }
     if (useStack) {
       // the live stack is already a temporally smoothed composite (not a raw <img>), so it keeps
       // using the polled FrameSource path; stabilisation is for the raw stream's jitter.
@@ -121,7 +124,11 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
     a.href = URL.createObjectURL(blob); a.download = `photo-${new Date().toISOString().replace(/[:.]/g, '-')}.jpg`; a.click()
     setTimeout(() => URL.revokeObjectURL(a.href), 5000)
   }
-  function saveVideoDefaults() { settings.videoCodec = vidCodec; settings.videoBitrateMbps = vidBitrate; settings.videoStabilise = vidStabilise; saveSettings() }
+  function saveVideoDefaults() {
+    settings.videoCodecPref = vidCodec; settings.videoContainer = vidContainer; settings.videoQuality = vidQuality
+    settings.videoKeyframeS = vidKeyframeS; settings.videoStabilise = vidStabilise; settings.videoDeflicker = vidDeflicker
+    saveSettings()
+  }
   function saveSuperresDefaults() { settings.superresScale = superresScale; settings.superresPixfrac = superresPixfrac; settings.superresSharpen = superresSharpen; saveSettings() }
 </script>
 
@@ -133,7 +140,7 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
     <button onclick={download} disabled={busy} title="download a full-resolution JPEG without saving it to the gallery">↓</button>
   </div>
   <div class="row" style="margin-top:8px">
-    <button class="rec" class:on={recorder.recording} onclick={toggleRecord} disabled={!device.connected} title="record the live view (or the live focus stack when it is on) as WebM into the gallery">
+    <button class="rec" class:on={recorder.recording} onclick={toggleRecord} disabled={!device.connected} title="record the live view (or the live focus stack when it is on) into the gallery">
       <span class="dot"></span>{recorder.recording ? `Stop · ${recorder.seconds} s` : 'Record video'}
     </button>
     {#if recorder.recording}<span class="muted small">recording {liveStack.active && liveStack.composite ? (liveStack.mode === 'average' ? 'the smoothed view' : 'the live stack') : 'the live view'} · {recorder.frames} frames</span>{/if}
@@ -141,16 +148,33 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
   </div>
   {#if !recorder.recording}
     <div class="params" style="margin-top:6px">
-      <label>Codec
-        <select bind:value={vidCodec} disabled={busy} onchange={saveVideoDefaults}>
-          <option value="vp9">VP9</option>
-          <option value="av1" disabled={!codecSupport.av1}>AV1{codecSupport.av1 ? '' : ' (unsupported)'}</option>
-          <option value="vp8">VP8</option>
+      <label>Container
+        <select bind:value={vidContainer} disabled={busy} onchange={saveVideoDefaults}>
+          <option value="mp4">MP4</option>
+          <option value="webm">WebM</option>
         </select>
       </label>
-      <label>Bitrate (Mbit/s) <input type="number" min="1" max="50" step="1" style="width:5em" bind:value={vidBitrate} disabled={busy} onchange={saveVideoDefaults} /></label>
+      <label>Codec
+        <select bind:value={vidCodec} disabled={busy} onchange={saveVideoDefaults}>
+          <option value="auto">Auto</option>
+          <option value="h264" disabled={!codecSupport.h264}>H.264{codecSupport.h264 ? '' : ' (unsupported)'}</option>
+          <option value="vp9" disabled={!codecSupport.vp9}>VP9{codecSupport.vp9 ? '' : ' (unsupported)'}</option>
+          <option value="av1" disabled={!codecSupport.av1}>AV1{codecSupport.av1 ? '' : ' (unsupported)'}</option>
+        </select>
+      </label>
+      <label>Quality
+        <select bind:value={vidQuality} disabled={busy} onchange={saveVideoDefaults}>
+          <option value="high">High</option>
+          <option value="medium">Medium</option>
+          <option value="low">Low</option>
+        </select>
+      </label>
+      <label>Keyframe (s) <input type="number" min="0.5" max="10" step="0.5" style="width:5em" bind:value={vidKeyframeS} disabled={busy} onchange={saveVideoDefaults} /></label>
       <label style="flex-direction:row;align-items:center;gap:6px" title="removes hand/vibration jitter from the live view with a small crop margin; not needed for the live stack, which is already smoothed">
         <input type="checkbox" bind:checked={vidStabilise} disabled={busy} onchange={saveVideoDefaults} /> Stabilise
+      </label>
+      <label style="flex-direction:row;align-items:center;gap:6px" title="normalises per-frame brightness (LED driver / mains flicker) before encoding">
+        <input type="checkbox" bind:checked={vidDeflicker} disabled={busy} onchange={saveVideoDefaults} /> Deflicker
       </label>
     </div>
   {/if}

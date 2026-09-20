@@ -162,7 +162,7 @@
 </div>
 {#if viewing}
   {@const v = viewing}
-  <Viewer blob={v.blob} width={v.item.width} item={v.item} onSampleChange={(s) => onSampleChange(v.item, s)} onclose={() => (viewing = null)} />
+  <Viewer blob={v.blob} width={v.item.width} item={v.item} onSampleChange={(s) => onSampleChange(v.item, s)} onclose={() => { viewing = null; void refresh() }} />
 {/if}
 
 <style>

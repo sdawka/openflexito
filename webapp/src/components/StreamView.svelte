@@ -17,6 +17,9 @@
   import { settings } from '../lib/store/settings.svelte'
   import { liveStack } from '../lib/services/liveStack.svelte'
   import { scaleForWidth, niceScaleBarLength, type Pt } from '../lib/algo/measure'
+  import '../lib/services/lookProcessor'
+  import { frameChain, isRgbaFrame, type FrameInput } from '../lib/services/frameChain'
+  import { MjpegStream, type MjpegFrame } from '../lib/api/mjpegStream'
 
   export interface Box { x: number; y: number; w: number; h: number; label?: string; score?: number; kind?: 'detect' | 'follow' | 'select' }
   export interface Pan { dx: number; dy: number; w: number; h: number; done: boolean }
@@ -75,6 +78,39 @@
     if (!bmp) { c.getContext('2d')!.clearRect(0, 0, c.width, c.height); return }   // reset (stage moved): show the live image again
     if (c.width !== bmp.width || c.height !== bmp.height) { c.width = bmp.width; c.height = bmp.height }
     c.getContext('2d')!.drawImage(bmp, 0, 0)
+  })
+
+  // --- look / frame-chain processing overlay (services/lookProcessor.ts registers the LUT stage) ---
+  // A second /stream.mjpg client fetched directly (not through the <img>'s own multipart decoding) so
+  // every frame is delivered exactly once, fully decoded (see api/mjpegStream.ts's doc comment on why
+  // sampling the <img> tears); the device's FrameHub fans out to any number of concurrent clients
+  // (device/openflexito/web.py `hub.clients`), so running this alongside the plain <img> stream is fine.
+  // The <img> itself stays alive throughout for liveStack.source and the geometry/metadata it provides.
+  let procCanvas: HTMLCanvasElement | undefined = $state()
+  const procActive = $derived(frameChain.active('view'))
+
+  function drawFrameInput(c: HTMLCanvasElement, out: FrameInput): void {
+    if (isRgbaFrame(out)) {
+      if (c.width !== out.width || c.height !== out.height) { c.width = out.width; c.height = out.height }
+      c.getContext('2d')!.putImageData(new ImageData(out.data as Uint8ClampedArray<ArrayBuffer>, out.width, out.height), 0, 0)
+    } else {
+      const w = (out as HTMLCanvasElement | OffscreenCanvas).width, h = (out as HTMLCanvasElement | OffscreenCanvas).height
+      if (c.width !== w || c.height !== h) { c.width = w; c.height = h }
+      c.getContext('2d')!.drawImage(out as CanvasImageSource, 0, 0)
+    }
+  }
+
+  $effect(() => {
+    if (!procActive) return
+    frameChain.reset()
+    const stream = new MjpegStream()
+    const url = device.url(settings.showLores ? '/stream-lores.mjpg' : '/stream.mjpg')
+    void stream.start(url, (frame: MjpegFrame) => {
+      const out = frameChain.run('view', frame.bitmap, frame.ts ?? performance.now() * 1e6)
+      if (procCanvas) drawFrameInput(procCanvas, out)
+      frame.bitmap.close()
+    }, () => { /* the plain <img> stream already surfaces connection loss; this is a second, best-effort feed */ })
+    return () => stream.stop()
   })
 
   /** Rectangle the image content occupies inside the element (object-fit: contain). */
@@ -176,8 +212,9 @@
   {#if error}
     <div class="err">stream unavailable <button onclick={() => { error = false; nonce++ }}>retry</button></div>
   {/if}
-  <img bind:this={img} {src} alt="microscope live view" draggable="false" crossorigin="anonymous" style:transform={shift} class:ghost={liveStack.active && !!liveStack.composite} onerror={() => (error = true)} />
+  <img bind:this={img} {src} alt="microscope live view" draggable="false" crossorigin="anonymous" style:transform={shift} class:ghost={(liveStack.active && !!liveStack.composite) || procActive} onerror={() => (error = true)} />
   {#if liveStack.active}<canvas bind:this={compCanvas} class="composite" style:transform={shift}></canvas>{/if}
+  {#if procActive}<canvas bind:this={procCanvas} class="processed" style:transform={shift}></canvas>{/if}
   {#if geo}
     <svg class="overlay" style="left:{geo.ox}px;top:{geo.oy}px;width:{geo.w}px;height:{geo.h}px" viewBox="0 0 1 1" preserveAspectRatio="none">
       {#each boxes as b}
@@ -234,6 +271,7 @@
   img { max-width: 100%; max-height: 100%; object-fit: contain; user-select: none; pointer-events: none; will-change: transform; grid-area: 1 / 1; }
   img.ghost { opacity: 0; }
   .composite { max-width: 100%; max-height: 100%; object-fit: contain; pointer-events: none; grid-area: 1 / 1; }
+  .processed { max-width: 100%; max-height: 100%; object-fit: contain; pointer-events: none; grid-area: 1 / 1; }
   .overlay { position: absolute; pointer-events: none; }
   .overlay rect { fill: none; stroke-width: 2px; }
   .overlay rect.detect { stroke: var(--warn); }

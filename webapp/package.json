@@ -27,6 +27,7 @@
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
     "@types/openseadragon": "^5.0.2",
+    "mediabunny": "^1.58.1",
     "openseadragon": "^6.1.0"
   }
 }

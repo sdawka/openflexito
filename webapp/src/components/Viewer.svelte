@@ -23,6 +23,10 @@
   import HeightMapOverlay from './HeightMapOverlay.svelte'
   import { settings } from '../lib/store/settings.svelte'
   import { stepsToUm, depthLegend } from '../lib/algo/depthMap'
+  import EnhancePanel from './EnhancePanel.svelte'
+  import { enhance } from '../lib/services/enhance.svelte'
+  import { look } from '../lib/store/look.svelte'
+  import { applyLookRgba, type Look } from '../lib/algo/lut'
 
   let { blob = null, width, item, onclose, onSampleChange }: { blob?: Blob | null; width?: number; item?: GalleryItem; onclose: () => void; onSampleChange?: (s: SampleRecord) => void } = $props()
   let el: HTMLDivElement | undefined = $state()
@@ -72,9 +76,52 @@
     const wanted = mode, id = item!.id
     getBlob(id, wanted).then((b) => { if (b) viewBlob = b })
   })
+  // Apply the active look (LUT + adjustments) to the shown gallery image, when the user has opted in
+  // (settings.lookApplyInGallery) and it isn't a video/time-lapse (those are handled by their own
+  // players; TimelapseViewer runs the look on playback itself). Re-runs whenever the source blob or the
+  // look changes; a stale in-flight decode is discarded (`lookedFor` guard) rather than raced.
+  let lookedBlob = $state<Blob | null>(null)
+  let lookedFor: Blob | null = null
+  async function applyLookToBlob(src: Blob, l: Look): Promise<Blob> {
+    const bmp = await createImageBitmap(src)
+    const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height
+    const ctx = c.getContext('2d', { willReadFrequently: true })!
+    ctx.drawImage(bmp, 0, 0)
+    bmp.close()
+    const id = ctx.getImageData(0, 0, c.width, c.height)
+    applyLookRgba(id.data, id.data, l)
+    ctx.putImageData(id, 0, 0)
+    return new Promise<Blob>((resolve, reject) => c.toBlob((b) => b ? resolve(b) : reject(new Error('toBlob failed')), 'image/jpeg', 0.95))
+  }
+  $effect(() => {
+    const src = viewBlob, cur = look.current
+    if (!settings.lookApplyInGallery || !cur || isVideo || isTimelapse || !src) { lookedBlob = null; lookedFor = null; return }
+    if (src === lookedFor) return
+    lookedFor = src
+    applyLookToBlob(src, cur).then((b) => { if (lookedFor === src) lookedBlob = b }).catch(() => { if (lookedFor === src) lookedBlob = null })
+  })
+  const finalBlob = $derived(lookedBlob ?? viewBlob)
+
+  // Enhance panel (WP4): the Enhance toggle opens `EnhancePanel`, which owns `services/enhance.svelte.ts`'s
+  // debounced live preview for `item`. While open, its preview bitmap takes precedence over the plain/looked
+  // display here so the OSD view reflects what "Apply" would save (the look is composed *inside* the pipeline
+  // via `EnhancePanel`'s own "apply current look" checkbox, not by re-running `applyLookToBlob` on top of it).
+  const isSnapshot = $derived(item?.kind === 'snapshot' && !isVideo && !isTimelapse)
+  let enhanceOpen = $state(false)
+  let enhancePreviewBlob = $state<Blob | null>(null)
+  $effect(() => {
+    if (!enhanceOpen) { enhancePreviewBlob = null; return }
+    const bmp = enhance.preview
+    if (!bmp) return
+    const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height
+    c.getContext('2d')!.drawImage(bmp, 0, 0)
+    c.toBlob((b) => { if (enhanceOpen && b) enhancePreviewBlob = b }, 'image/jpeg', 0.9)
+  })
+  const displayBlob = $derived(enhanceOpen && enhancePreviewBlob ? enhancePreviewBlob : finalBlob)
+
   let shown: Blob | null = null
   $effect(() => {
-    const b = viewBlob
+    const b = displayBlob
     if (!viewer || !b || b === shown) return
     shown = b
     const url = URL.createObjectURL(b)
@@ -168,6 +215,9 @@
   {#if item && (item.capture || item.superres || item.stack || item.video)}
     <button class="details-toggle" style={item && onSampleChange ? 'left:140px' : ''} onclick={() => (detailsOpen = !detailsOpen)}>{detailsOpen ? '✕' : 'ℹ'} details</button>
   {/if}
+  {#if isSnapshot && item}
+    <button class="enhance-toggle" onclick={() => (enhanceOpen = !enhanceOpen)}>{enhanceOpen ? '✕ enhance' : '✨ enhance'}</button>
+  {/if}
   {#if hasDepth}
     <div class="modes">
       <button class:on={mode === 'image'} onclick={() => (mode = 'image')}>Image</button>
@@ -202,6 +252,9 @@
     </div>
     <div class="measure-dock"><MeasurePanel compact /></div>
     {#if item?.scan}<HeightMapOverlay {item} />{/if}
+    {#if enhanceOpen && item}
+      <div class="enhance-dock"><EnhancePanel {item} /></div>
+    {/if}
   {/if}
   {#if detailsOpen && item}
     <div class="details panel mono">
@@ -271,4 +324,10 @@
   .sample-edit label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
   .modes { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 51; display: flex; gap: 6px; }
   .modes button.on { background: var(--accent); color: #fff; }
+  .enhance-toggle { position: absolute; top: 12px; right: 90px; z-index: 51; }
+  .enhance-dock { position: absolute; right: 12px; top: 52px; width: 300px; z-index: 52; max-height: calc(100vh - 80px); }
+
+  @media (max-width: 720px) {
+    .enhance-dock { left: 12px; right: 12px; width: auto; top: auto; bottom: 0; max-height: 60vh; }
+  }
 </style>

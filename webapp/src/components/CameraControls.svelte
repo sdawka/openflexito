@@ -5,6 +5,8 @@
   import { wb, gainsToTempTint, tempTintToGains, neutralWholeField } from '../lib/services/whiteBalance.svelte'
   import FlickerCheck from './FlickerCheck.svelte'
   import Histogram from './Histogram.svelte'
+  import '../lib/services/denoiseProcessor' // registers the live-denoise frame-chain processor
+  import { settings, saveSettings } from '../lib/store/settings.svelte'
 
   const c = $derived(device.controls)
   const live = $derived(device.frame)
@@ -78,7 +80,15 @@
     {#if wb.status}<div class="status-line {wb.status.startsWith('white balance: red') ? 'ok' : wb.status.includes('…') ? 'busy' : 'err'}">{wb.status}</div>{/if}
     <FlickerCheck />
     <Histogram />
-  {:else}
+  {/if}
+  <h4 class="sub">Live denoise</h4>
+  <label class="check"><input type="checkbox" bind:checked={settings.liveDenoise} onchange={saveSettings} /> live denoise (temporal, motion-compensated)</label>
+  {#if settings.liveDenoise}
+    <div class="kv"><span>Blend</span><span class="v">{settings.liveDenoiseAlpha.toFixed(2)}</span></div>
+    <input type="range" min="0" max="0.95" step="0.01" bind:value={settings.liveDenoiseAlpha} oninput={saveSettings} />
+    <label class="check"><input type="checkbox" bind:checked={settings.liveDenoiseRecord} onchange={saveSettings} /> also apply while recording</label>
+  {/if}
+  {#if !c}
     <span class="muted">camera not available</span>
   {/if}
 </div>

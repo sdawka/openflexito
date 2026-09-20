@@ -10,10 +10,14 @@
   import { onMount } from 'svelte'
   import { getBlob, type GalleryItem } from '../lib/store/gallery'
   import { exportTimelapseWebm } from '../lib/services/timelapse.svelte'
+  import { exportTimelapse, timelapseExportSupported } from '../lib/services/timelapseExport'
+  import { blobFileName } from '../lib/algo/naming'
   import { tracking } from '../lib/services/tracking.svelte'
   import { tracksToCsv } from '../lib/algo/tracking'
   import { playbackShift } from '../lib/algo/drift'
   import { IDENTITY, cssTransform, normalize, panBy, pinchDistance, pinchMidpoint, zoomAt, type ZoomPanState } from '../lib/input/zoomPan'
+  import '../lib/services/lookProcessor'
+  import { frameChain, isRgbaFrame } from '../lib/services/frameChain'
 
   let { item }: { item: GalleryItem } = $props()
   const meta = $derived(item.timelapse!)
@@ -23,6 +27,9 @@
   let playing = $state(false)
   let stabilised = $state(true)
   let status = $state('')
+  let mp4Fps = $state(8)
+  let exportingMp4 = $state(false)
+  let mp4Progress = $state(0)
   let canvas: HTMLCanvasElement | undefined = $state()
   let container: HTMLDivElement | undefined = $state()
   let timer: ReturnType<typeof setInterval> | undefined
@@ -96,7 +103,18 @@
     ctx.clearRect(0, 0, canvas.width, canvas.height)
     // full-frame px (legacy items measured on a 410 px downsample are rescaled by playbackShift)
     const shift = stabilised ? playbackShift(meta.frames[i], bmp.width) : { dx: 0, dy: 0 }
-    ctx.drawImage(bmp, -shift.dx, -shift.dy)
+    if (frameChain.active('playback')) {
+      const out = frameChain.run('playback', bmp, performance.now() * 1e6)
+      if (isRgbaFrame(out)) {
+        const looked = await createImageBitmap(new ImageData(out.data as Uint8ClampedArray<ArrayBuffer>, out.width, out.height))
+        ctx.drawImage(looked, -shift.dx, -shift.dy)
+        looked.close()
+      } else {
+        ctx.drawImage(out as CanvasImageSource, -shift.dx, -shift.dy)
+      }
+    } else {
+      ctx.drawImage(bmp, -shift.dx, -shift.dy)
+    }
     bmp.close()
   }
   $effect(() => { void draw(index) })
@@ -112,6 +130,19 @@
     status = 'exporting…'
     try { const v = await exportTimelapseWebm(item, { stabilised }); status = `saved "${v.name}"` }
     catch (e) { status = (e as Error).message }
+  }
+
+  /** WebCodecs + mediabunny MP4 export (`services/timelapseExport.ts`), downloaded directly rather
+   *  than saved to the gallery (the source time-lapse item already is the gallery record). */
+  async function exportMp4(): Promise<void> {
+    exportingMp4 = true; mp4Progress = 0; status = 'exporting MP4…'
+    try {
+      const { blob } = await exportTimelapse(item, { fps: mp4Fps, stabilised, onProgress: (f) => (mp4Progress = f) })
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(blob); a.download = blobFileName(item, 'export', 'mp4'); a.click()
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000)
+      status = `downloaded (${(blob.size / 1048576).toFixed(1)} MB)`
+    } catch (e) { status = (e as Error).message } finally { exportingMp4 = false }
   }
 
   async function trackThis(): Promise<void> {
@@ -138,6 +169,10 @@
     <span class="mono" title={meta.frames[index]?.t}>{index + 1}/{n}{meta.frames[index]?.refocused ? ' · refocused' : ''}{meta.frames[index]?.remetered ? ' · re-metered' : ''}</span>
     <label><input type="checkbox" bind:checked={stabilised} /> drift-free</label>
     <button onclick={exportVideo}>Export WebM</button>
+    {#if timelapseExportSupported()}
+      <label class="mp4-fps">MP4 fps <input type="number" min="1" max="60" step="1" style="width:3.5em" bind:value={mp4Fps} /></label>
+      <button onclick={exportMp4} disabled={exportingMp4}>{exportingMp4 ? `Exporting… ${Math.round(mp4Progress * 100)}%` : 'Export MP4'}</button>
+    {/if}
     <button onclick={trackThis}>Track organisms</button>
     {#if tracked}<button onclick={downloadCsv}>Export CSV</button>{/if}
   </div>
@@ -151,5 +186,6 @@
   .bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: center; padding: 0 12px; color: #fff; }
   .bar input[type=range] { width: 220px; }
   .bar label { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+  .mp4-fps input { width: 3.5em; }
   .status { color: #fff; font-size: 12px; opacity: .85; }
 </style>

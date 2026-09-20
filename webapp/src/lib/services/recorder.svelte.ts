@@ -1,4 +1,6 @@
-/** Video recording of the live stream, or the live focus stack, with MediaRecorder.
+/** Video recording of the live stream, or the live focus stack, through WebCodecs + mediabunny
+ *  (falling back to MediaRecorder where `VideoEncoder` is unavailable) — see `services/videoEncoder.ts`
+ *  for the sink split and why explicit per-frame timestamps replace a capture timer.
  *
  *  The live stream is read directly with `api/mjpegStream.ts` (fetch + ReadableStream, one fully
  *  decoded `createImageBitmap` per JPEG part) instead of redrawing the DOM `<img>` on a timer: a
@@ -6,17 +8,21 @@
  *  sample the `<img>` mid-decode (tearing) since the browser's own multipart handling gives no signal
  *  for exactly when a new part finishes decoding — this was the recorder's "shaky, glitchy" root
  *  cause (CAPTURE_AUDIT.md D8, priority 1). Each decoded frame is drawn into a canvas exactly once and
- *  pushed into a `captureStream(0)` track with `requestFrame()`, so the WebM holds one frame per
- *  source frame with no duplicates or drops. The live-stack composite (already temporally smoothed,
- *  and not an `<img>`) keeps using the existing `FrameSource` callback, throttled to `event.frame`.
+ *  handed to the sink with its own device timestamp, so played-back speed matches real time regardless
+ *  of encoder drops. The live-stack composite (already temporally smoothed, and not an `<img>`) keeps
+ *  using the existing `FrameSource` callback, throttled to `event.frame`.
  *
  *  Optional stabilisation (`algo/stabilize.ts`) removes hand/vibration jitter from the stream path: a
  *  small crop margin absorbs the correction, so the recorded frame is slightly smaller than the
  *  source. It is suspended (and the reference dropped) while `device.moving` is true, so a real stage
- *  move is never fought as if it were jitter.
+ *  move is never fought as if it were jitter. After stabilisation, the frame chain (`frameChain.run`,
+ *  order 50 = deflicker; other packages may register more stages) runs over the canvas before it is
+ *  handed to the sink — skipped entirely when nothing is registered/enabled, so a plain recording pays
+ *  no extra readback cost.
  *
- *  Codec (VP9 default, AV1 or VP8 when supported), bitrate and fps cap are options; a per-frame
- *  `{t, seq, position}` log is saved next to the video (gallery blob 'frames'). */
+ *  Container/codec/quality/keyframe interval are options; a per-frame `{t, seq, position}` log is
+ *  saved next to the video (gallery blob 'frames'), along with the sink's measured fps and its
+ *  dropped/duplicated frame counts. */
 import { device } from '../store/device.svelte'
 import { saveVideo, type GalleryItem, type VideoFrameLog } from '../store/gallery'
 import type { FrameMeta } from '../api/types'
@@ -24,37 +30,40 @@ import { MjpegStream, type MjpegFrame } from '../api/mjpegStream'
 import { Stabilizer, defaultStabilizeOptions } from '../algo/stabilize'
 import { toGray } from '../algo/sharpness'
 import { activity } from './activity.svelte'
+import { frameChain, toImageData } from './frameChain'
+import { deflickerProcessor } from './deflickerProcessor'
+import { createVideoSink, type VideoSink, type Container, type VideoCodecPref, type VideoQuality } from './videoEncoder'
 
 export type FrameSource = () => { image: CanvasImageSource; width: number; height: number } | null
 
-export type VideoCodec = 'vp9' | 'av1' | 'vp8' | 'auto'
+export type VideoContainer = Container
+export type VideoCodec = VideoCodecPref
+export type { VideoQuality } from './videoEncoder'
+
 export interface RecorderOptions {
+  container: VideoContainer
   codec: VideoCodec
-  /** encoder target, Mbit/s (scaled with the frame's pixel count relative to 820x616 if `scaleBitrate`) */
-  bitrateMbps: number
+  quality: VideoQuality
+  /** seconds between forced key frames */
+  keyframeS: number
   /** at most this many canvas frames per second when the browser cannot honour manual per-frame
-   *  pushes (`captureStream(0)`/`requestFrame` unsupported); ignored otherwise (0 = every frame) */
+   *  pushes (MediaRecorder fallback without `requestFrame`); ignored otherwise (0 = every frame) */
   maxFps: number
   /** remove hand/vibration jitter from the live-stream source (ignored for the live-stack source) */
   stabilize: boolean
+  /** bake `services/deflickerProcessor.ts` into this recording (order 50 in the frame chain) */
+  deflicker: boolean
 }
 
-const CANDIDATES: Record<Exclude<VideoCodec, 'auto'>, string[]> = {
-  vp9: ['video/webm;codecs=vp9'],
-  av1: ['video/webm;codecs=av01.0.08M.08', 'video/webm;codecs=av1', 'video/mp4;codecs=av01.0.08M.08'],
-  vp8: ['video/webm;codecs=vp8'],
-}
-const FALLBACKS = ['video/webm', 'video/mp4']
-const GRAY_WIDTH = 260   // downscale width for the stabiliser's tracking frame
+const GRAY_WIDTH = 480   // downscale width for the stabiliser's tracking frame (register.ts refines from here)
 
 export class Recorder {
   recording = $state(false)
   seconds = $state(0)
   frames = $state(0)
   status = $state('')
-  options = $state<RecorderOptions>({ codec: 'vp9', bitrateMbps: 12, maxFps: 30, stabilize: true })
-  private rec: MediaRecorder | null = null
-  private chunks: Blob[] = []
+  options = $state<RecorderOptions>({ container: 'mp4', codec: 'auto', quality: 'high', keyframeS: 2, maxFps: 30, stabilize: true, deflicker: false })
+  private sink: VideoSink | null = null
   private canvas: HTMLCanvasElement | null = null
   private ctx: CanvasRenderingContext2D | null = null
   private grayCanvas: OffscreenCanvas | null = null
@@ -70,28 +79,33 @@ export class Recorder {
   private label = ''
   private thumb: Blob | null = null
   private log: VideoFrameLog[] = []
-  private mimeUsed = ''
-  private bitrateMbpsUsed = 12
+  private stabiliseUsed = false
+  private deflickerUsed = false
+  private optsUsed: RecorderOptions = this.options
   private releaseActivity: (() => void) | null = null
 
-  static supported(m: string): boolean { return typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(m) }
+  /** Best-effort browser support probe; `VideoEncoder` (WebCodecs) or `MediaRecorder`. */
+  static supported(): boolean { return typeof VideoEncoder !== 'undefined' || typeof MediaRecorder !== 'undefined' }
 
-  /** Best supported MIME type for the codec preference ('auto' = VP9, then AV1, VP8, anything). */
-  static mime(codec: VideoCodec = 'auto'): string {
-    const order: Exclude<VideoCodec, 'auto'>[] = codec === 'auto' ? ['vp9', 'av1', 'vp8'] : [codec, ...(['vp9', 'av1', 'vp8'] as const).filter((c) => c !== codec)]
-    for (const c of order) for (const m of CANDIDATES[c]) if (Recorder.supported(m)) return m
-    for (const m of FALLBACKS) if (Recorder.supported(m)) return m
+  /** Best MediaRecorder MIME type available, kept for `services/timelapse.svelte.ts`'s existing
+   *  `exportTimelapseWebm` (its own canvas.captureStream + MediaRecorder path; WP5 owns the newer
+   *  `services/timelapseExport.ts` WebCodecs/mediabunny path instead, wired up as "Export MP4"). */
+  static mime(): string {
+    if (typeof MediaRecorder === 'undefined') return ''
+    for (const m of ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm', 'video/mp4']) if (MediaRecorder.isTypeSupported(m)) return m
     return ''
   }
 
-  /** Which codecs this browser can encode. */
+  /** Which codecs this browser can at least attempt (container-independent hint for the UI; the
+   *  actual choice is re-resolved per recording against the chosen container in `videoEncoder.ts`). */
   static codecSupport(): Record<Exclude<VideoCodec, 'auto'>, boolean> {
-    return { vp9: CANDIDATES.vp9.some(Recorder.supported), av1: CANDIDATES.av1.some(Recorder.supported), vp8: CANDIDATES.vp8.some(Recorder.supported) }
-  }
-
-  static codecOf(mime: string): string {
-    const m = /codecs=([^;,]+)/.exec(mime)
-    return m ? (m[1].startsWith('av01') ? 'av1' : m[1]) : mime.replace('video/', '')
+    const wc = typeof VideoEncoder !== 'undefined'
+    const mr = typeof MediaRecorder !== 'undefined'
+    return {
+      h264: wc || (mr && (MediaRecorder.isTypeSupported('video/mp4;codecs=avc1.4d0034') || MediaRecorder.isTypeSupported('video/mp4;codecs=h264'))),
+      vp9: wc || (mr && MediaRecorder.isTypeSupported('video/webm;codecs=vp9')),
+      av1: wc || (mr && MediaRecorder.isTypeSupported('video/webm;codecs=av01.0.08M.08')),
+    }
   }
 
   /** Record the live focus-stack composite (or another non-stream source) via a polled `FrameSource`,
@@ -100,11 +114,9 @@ export class Recorder {
   start(source: FrameSource, label: string, opts: Partial<RecorderOptions> = {}): void {
     if (this.recording) return
     const o = { ...this.options, ...opts }
-    const mime = Recorder.mime(o.codec)
-    if (!mime) { this.status = 'video recording is not supported by this browser'; return }
     const first = source()
     if (!first) { this.status = 'no frame to record yet'; return }
-    if (!this.beginCanvas(first.width, first.height, mime, o)) return
+    this.beginCanvas(first.width, first.height, o)
     this.label = label
     const draw = () => {
       const f = source(); if (!f) return false
@@ -113,8 +125,9 @@ export class Recorder {
       return true
     }
     draw()
-    let track: (MediaStreamTrack & { requestFrame?: () => void }) | null
-    try { track = this.attachTrack(mime, o) } catch (e) { this.status = `could not start the recorder: ${(e as Error).message}`; return }
+    void createVideoSink(this.canvas!, this.sinkOptions(o, 15))
+      .then((sink) => { this.sink = sink; this.finishStart() })
+      .catch((e) => { this.status = `could not start the recorder: ${(e as Error).message}` })
     const minGap = o.maxFps > 0 ? 1000 / o.maxFps : 0
     let lastSeq = -1, lastDraw = -Infinity
     this.off = device.client.on('event.frame', (f: FrameMeta) => {
@@ -123,12 +136,9 @@ export class Recorder {
       if (minGap && now - lastDraw < minGap * 0.9) return
       if (!draw()) return
       lastSeq = f.seq; lastDraw = now
-      track?.requestFrame?.()
-      this.frames++
-      this.log.push({ t: f.ts ?? f.t, seq: f.seq, position: { ...device.position } })
+      this.pushFrame(f.ts ?? f.t, f.seq)
       setTimeout(() => this.recording && this.captureThumbnail(), 800)
     })
-    this.finishStart()
   }
 
   /** Record the live stream directly (`/stream.mjpg`), one decoded frame per JPEG part, optionally
@@ -136,43 +146,42 @@ export class Recorder {
   startStream(label = 'live view', opts: Partial<RecorderOptions> = {}): void {
     if (this.recording) return
     const o = { ...this.options, ...opts }
-    const mime = Recorder.mime(o.codec)
-    if (!mime) { this.status = 'video recording is not supported by this browser'; return }
     this.label = label
     this.stabilizer = o.stabilize ? new Stabilizer(defaultStabilizeOptions) : null
     this.margin = o.stabilize ? Math.ceil(defaultStabilizeOptions.maxShiftPx) + 2 : 0
     this.wasMoving = device.moving
     let started = false
-    let track: (MediaStreamTrack & { requestFrame?: () => void }) | null = null
     this.mjpeg = new MjpegStream()
     const run = this.mjpeg.start(device.url('/stream.mjpg'), (frame: MjpegFrame) => {
       if (!started) {
-        if (!this.beginCanvas(frame.bitmap.width, frame.bitmap.height, mime, o)) { frame.bitmap.close(); this.mjpeg?.stop(); return }
-        try { track = this.attachTrack(mime, o) } catch (e) { this.status = `could not start the recorder: ${(e as Error).message}`; frame.bitmap.close(); this.mjpeg?.stop(); return }
         started = true
-        this.finishStart()
+        this.beginCanvas(frame.bitmap.width, frame.bitmap.height, o)
+        void createVideoSink(this.canvas!, this.sinkOptions(o, 20))
+          .then((sink) => { this.sink = sink; this.finishStart() })
+          .catch((e) => { this.status = `could not start the recorder: ${(e as Error).message}`; this.mjpeg?.stop() })
       }
       this.drawStreamFrame(frame)
-      track?.requestFrame?.()
-      this.frames++
-      this.log.push({ t: frame.ts ?? 0, seq: frame.seq, position: { ...device.position } })
-      if (this.frames === 20) this.captureThumbnail()
+      this.pushFrame(frame.ts, frame.seq)
       frame.bitmap.close()
-    }, (e) => { if (this.recording) this.status = `stream error: ${e.message}` })
+    }, (e) => { if (this.recording || this.sink) this.status = `stream error: ${e.message}` })
     void run.then(() => { if (this.recording) { this.status = 'stream ended'; void this.stop() } })
   }
 
-  private beginCanvas(w: number, h: number, mime: string, o: RecorderOptions): boolean {
+  private sinkOptions(o: RecorderOptions, fpsHint: number) {
+    return { width: this.canvas!.width, height: this.canvas!.height, container: o.container, codec: o.codec, quality: o.quality, keyframeS: o.keyframeS, fpsHint }
+  }
+
+  private beginCanvas(w: number, h: number, o: RecorderOptions): void {
     this.srcW = w; this.srcH = h
     const cw = Math.max(1, w - 2 * this.margin), ch = Math.max(1, h - 2 * this.margin)
     const canvas = document.createElement('canvas')
     canvas.width = cw; canvas.height = ch
     this.canvas = canvas
-    this.ctx = canvas.getContext('2d')
-    if (!this.ctx) { this.status = 'could not create a canvas 2D context'; return false }
-    this.mimeUsed = mime
-    this.chunks = []; this.log = []; this.frames = 0; this.thumb = null
-    return true
+    this.ctx = canvas.getContext('2d', { willReadFrequently: true })
+    this.log = []; this.frames = 0; this.thumb = null
+    this.optsUsed = o
+    deflickerProcessor.recordEnabled = o.deflicker
+    frameChain.reset()
   }
 
   private resizeIfNeeded(w: number, h: number): void {
@@ -210,21 +219,31 @@ export class Recorder {
     return toGray(gctx.getImageData(0, 0, w, h))
   }
 
-  /** `captureStream(0)` + `track.requestFrame()` when the browser supports manual pushes (frame-
-   *  accurate: exactly one encoded frame per call); otherwise a `captureStream(fps)` fallback that
-   *  samples the canvas on its own timer (may still duplicate/drop, but at least draws whole frames). */
-  /** Throws if the MediaRecorder cannot be constructed/started; the caller reports that and bails. */
-  private attachTrack(mime: string, o: RecorderOptions): (MediaStreamTrack & { requestFrame?: () => void }) | null {
-    const stream = this.canvas!.captureStream(0)
-    const track = stream.getVideoTracks()[0] as MediaStreamTrack & { requestFrame?: () => void }
-    const manual = typeof track.requestFrame === 'function'
-    let streamUsed = stream
-    if (!manual) { stream.getVideoTracks().forEach((t) => t.stop()); streamUsed = this.canvas!.captureStream(o.maxFps || 30) }
-    this.bitrateMbpsUsed = o.bitrateMbps
-    this.rec = new MediaRecorder(streamUsed, { mimeType: mime, videoBitsPerSecond: Math.round(o.bitrateMbps * 1e6) })
-    this.rec.ondataavailable = (e) => { if (e.data.size) this.chunks.push(e.data) }
-    this.rec.start(1000)
-    return manual ? track : null
+  /** Run the registered frame-chain processors (deflicker order 50; other packages may add more) over
+   *  the canvas's current pixels and write the result back. A no-op (no readback) when nothing for
+   *  `'record'` is enabled, so a plain recording never pays the extra `getImageData`/`putImageData`. */
+  private runChain(t: number): void {
+    if (!frameChain.active('record')) return
+    const ctx = this.ctx!, w = this.canvas!.width, h = this.canvas!.height
+    const img = ctx.getImageData(0, 0, w, h)
+    const out = frameChain.run('record', { data: img.data, width: img.width, height: img.height }, t)
+    const rgba = toImageData(out)
+    ctx.putImageData(rgba.data === img.data ? img : new ImageData(new Uint8ClampedArray(rgba.data), rgba.width, rgba.height), 0, 0)
+  }
+
+  /** Run the frame chain, then hand the canvas to the sink with the frame's own device time (falls
+   *  back to wall-clock when the stream carries none). Dropped-by-backlog frames are still logged as
+   *  "not encoded" by simply not appending to `log`/`frames`. */
+  private pushFrame(tNs: number | null, seq: number): void {
+    if (!this.sink || !this.recording) return
+    const chainT = tNs ?? performance.now() * 1e6
+    this.runChain(chainT)
+    const tSec = tNs != null ? tNs / 1e9 : performance.now() / 1000
+    if (this.sink.addFrame(this.canvas!, tSec)) {
+      this.frames++
+      this.log.push({ t: tNs ?? 0, seq, position: { ...device.position } })
+      if (this.frames === 20) this.captureThumbnail()
+    }
   }
 
   private captureThumbnail(): void {
@@ -232,6 +251,8 @@ export class Recorder {
   }
 
   private finishStart(): void {
+    this.stabiliseUsed = !!this.stabilizer
+    this.deflickerUsed = this.optsUsed.deflicker
     this.startedAt = performance.now(); this.seconds = 0
     this.clock = setInterval(() => (this.seconds = Math.round((performance.now() - this.startedAt) / 1000)), 500)
     this.recording = true; this.status = ''
@@ -242,27 +263,33 @@ export class Recorder {
   /** Stop and save to the gallery. Releases the activity hold taken in `finishStart` no matter how
    *  recording ends (normal stop, stream error, unmount) so a hold can never pin the device awake. */
   async stop(): Promise<GalleryItem | null> {
-    if (!this.rec || !this.recording) { this.releaseActivity?.(); this.releaseActivity = null; return null }
+    if (!this.sink || !this.recording) {
+      this.recording = false
+      this.sink = null
+      this.releaseActivity?.(); this.releaseActivity = null
+      return null
+    }
     this.recording = false
     this.off?.(); this.off = null
     this.mjpeg?.stop(); this.mjpeg = null
     clearInterval(this.clock)
+    deflickerProcessor.recordEnabled = false
     try {
-      const rec = this.rec
-      const done = new Promise<void>((r) => (rec.onstop = () => r()))
-      rec.stop(); await done
-      const durationS = (performance.now() - this.startedAt) / 1000
-      const blob = new Blob(this.chunks, { type: rec.mimeType || this.mimeUsed || 'video/webm' })
+      const sink = this.sink; this.sink = null
+      const result = await sink.close()
       const thumb = this.thumb ?? (await new Promise<Blob | null>((r) => this.canvas!.toBlob(r, 'image/jpeg', 0.8)))
       const log = this.log
-      this.rec = null; this.thumb = null; this.chunks = []; this.log = []; this.stabilizer = null
+      this.thumb = null; this.log = []; this.stabilizer = null
       this.status = 'saving…'
-      const fps = durationS > 0 ? Math.round((log.length / durationS) * 10) / 10 : 0
-      const item = await saveVideo(blob, thumb, {
-        durationS, fps, source: this.label, width: this.canvas!.width, height: this.canvas!.height, position: { ...device.position },
-        codec: Recorder.codecOf(this.mimeUsed), bitrateBps: Math.round(this.bitrateMbpsUsed * 1e6), frames: log,
+      const fps = result.durationS > 0 ? Math.round((log.length / result.durationS) * 10) / 10 : 0
+      const item = await saveVideo(result.blob, thumb, {
+        durationS: result.durationS, fps, source: this.label, width: this.canvas!.width, height: this.canvas!.height, position: { ...device.position },
+        codec: result.codec, frames: log,
+        encoder: result.kind, container: result.container, quality: typeof this.optsUsed.quality === 'string' ? this.optsUsed.quality : `${this.optsUsed.quality.bitrateMbps} Mbit/s`,
+        keyframeS: this.optsUsed.keyframeS, stabilised: this.stabiliseUsed, deflickered: this.deflickerUsed,
+        framesDropped: result.dropped, framesDuplicated: result.duplicated,
       })
-      this.status = `saved "${item.name}" (${durationS.toFixed(0)} s, ${log.length} frames, ${(blob.size / 1048576).toFixed(1)} MB)`
+      this.status = `saved "${item.name}" (${result.durationS.toFixed(0)} s, ${log.length} frames${result.dropped ? `, ${result.dropped} dropped` : ''}, ${(result.blob.size / 1048576).toFixed(1)} MB)`
       setTimeout(() => (this.status = ''), 5000)
       return item
     } finally {

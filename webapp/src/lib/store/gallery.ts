@@ -2,6 +2,7 @@
 
 import { currentSample, type SampleRecord } from './sample.svelte'
 import { fileStem, blobFileName } from '../algo/naming'
+import type { EnhanceParams } from '../algo/pipeline'
 
 export type ItemKind = 'snapshot' | 'scan' | 'video' | 'timelapse'
 
@@ -60,6 +61,17 @@ export interface GalleryItem {
     codec?: string; bitrateBps?: number; frameCount?: number; frameLog?: string
     /** whether per-frame stabilisation (`algo/stabilize.ts`) was applied to this recording (additive) */
     stabilised?: boolean
+    /** additive WP5 fields: which sink encoded this (`services/videoEncoder.ts`), the container the
+     *  blob's `mime` actually is, the quality preset/keyframe interval requested, whether the
+     *  deflicker processor was baked in, and how many frames the encoder backlog dropped or (WebM
+     *  fallback only) the browser's own captureStream(fps) timer duplicated. */
+    encoder?: 'webcodecs' | 'mediarecorder'
+    container?: 'mp4' | 'webm'
+    quality?: string
+    keyframeS?: number
+    deflickered?: boolean
+    framesDropped?: number
+    framesDuplicated?: number
   }
   /** time-lapse: blobs 'f0000', 'f0001', ... one JPEG per frame, plus 'thumb' from the first frame.
    *  `frames[i].shift` is that frame's measured drift (px) from the first frame (see `algo/drift.ts`);
@@ -103,6 +115,12 @@ export interface GalleryItem {
   }
   /** what was on the stage, copied from `store/sample.svelte.ts` at capture time (if it was filled in). */
   sample?: SampleRecord
+  /** WP4 Enhance panel provenance (additive; absent = never enhanced): the `EnhanceParams` used and
+   *  the source item's id, set by `services/enhance.svelte.ts#apply` on the *new* item it creates via
+   *  `saveSnapshot` (the source item itself is left untouched). A type-only import (erased at build,
+   *  no runtime cost — unlike the `videoCodec` string-not-union precedent in `settings.svelte.ts`,
+   *  which is about a *runtime* import into a module that must stay dependency-free). */
+  enhance?: { params: EnhanceParams; source: string }
 }
 
 const DB = 'openflexito', VERSION = 2
@@ -186,7 +204,7 @@ export async function makeThumb(blob: Blob, size = 256): Promise<Blob> {
 
 export async function saveSnapshot(blob: Blob, meta: { position?: GalleryItem['position']; controls?: object; name?: string;
   /** extra item fields (stack, raw) and extra blobs (slices, raw data) stored alongside the image */
-  extra?: Partial<Pick<GalleryItem, 'stack' | 'raw' | 'superres' | 'capture'>>; extraBlobs?: Record<string, Blob>; thumbFrom?: Blob; size?: { width: number; height: number } }): Promise<GalleryItem> {
+  extra?: Partial<Pick<GalleryItem, 'stack' | 'raw' | 'superres' | 'capture' | 'enhance'>>; extraBlobs?: Record<string, Blob>; thumbFrom?: Blob; size?: { width: number; height: number } }): Promise<GalleryItem> {
   const id = newId()
   const bmp = meta.size ?? await createImageBitmap(meta.thumbFrom ?? blob)
   const extraNames = Object.keys(meta.extraBlobs ?? {})
@@ -205,13 +223,18 @@ export async function saveSnapshot(blob: Blob, meta: { position?: GalleryItem['p
 }
 
 export async function saveVideo(blob: Blob, thumb: Blob | null, meta: { durationS: number; fps: number; source: string; width: number; height: number; position?: GalleryItem['position']
-  codec?: string; bitrateBps?: number; frames?: VideoFrameLog[] }): Promise<GalleryItem> {
+  codec?: string; bitrateBps?: number; frames?: VideoFrameLog[]
+  encoder?: 'webcodecs' | 'mediarecorder'; container?: 'mp4' | 'webm'; quality?: string; keyframeS?: number
+  stabilised?: boolean; deflickered?: boolean; framesDropped?: number; framesDuplicated?: number }): Promise<GalleryItem> {
   const id = newId()
   const frames = meta.frames?.length ? meta.frames : undefined
   const item: GalleryItem = {
     id, kind: 'video', name: `Video ${meta.source} ${meta.durationS.toFixed(0)} s`, when: new Date().toISOString(),
     position: meta.position, width: meta.width, height: meta.height, blobs: ['video', ...(thumb ? ['thumb'] : []), ...(frames ? ['frames'] : [])],
-    video: { durationS: meta.durationS, fps: meta.fps, source: meta.source, mime: blob.type, codec: meta.codec, bitrateBps: meta.bitrateBps, frameCount: frames?.length, frameLog: frames ? 'frames' : undefined },
+    video: {
+      durationS: meta.durationS, fps: meta.fps, source: meta.source, mime: blob.type, codec: meta.codec, bitrateBps: meta.bitrateBps, frameCount: frames?.length, frameLog: frames ? 'frames' : undefined,
+      stabilised: meta.stabilised, encoder: meta.encoder, container: meta.container, quality: meta.quality, keyframeS: meta.keyframeS, deflickered: meta.deflickered, framesDropped: meta.framesDropped, framesDuplicated: meta.framesDuplicated,
+    },
     sample: currentSample(),
   }
   await putBlob(id, 'video', blob)

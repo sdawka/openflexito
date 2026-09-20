@@ -54,6 +54,16 @@ describe('Stabilizer', () => {
     expect(r1.rawDx).toBe(0)
   })
 
+  it('tracks a known sub-pixel shift accurately (register.ts integration, not a reinvented downscale-then-correlate)', () => {
+    const w = 205, h = 154
+    const scene = makeScene(w, h, { seed: 11 })
+    const s = new Stabilizer({ ...defaultStabilizeOptions, minCutoff: 50, beta: 0 })  // near-zero smoothing lag
+    s.track(scene.gray(w, h, 0, 0), 0)
+    const r = s.track(scene.gray(w, h, 3.37, -1.2), 0.05)
+    expect(r.rawDx).toBeCloseTo(3.37, 0)
+    expect(r.rawDy).toBeCloseTo(-1.2, 0)
+  })
+
   it('clamps the correction to maxShiftPx', () => {
     const w = 128, h = 96
     const scene = makeScene(w, h, { seed: 9 })

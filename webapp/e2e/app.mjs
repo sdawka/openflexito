@@ -543,6 +543,139 @@ if (moves) await step('a recorded macro of two jogs replays and returns the stag
   await macroPanel.locator('summary').click()
 })
 
+// --- video ---
+// WP5: WebCodecs + mediabunny recording (services/recorder.svelte.ts, services/videoEncoder.ts) and
+// time-lapse MP4 export (services/timelapseExport.ts, workers/encodeWorker.ts). The default-settings
+// recording is already covered by 'video recording (stabilise on) lands in the gallery ...' above
+// (same UI, unchanged text: "Record video" / "Stop · N s" / "saved \"Video live view ...\"" / the
+// gallery's "video · N s · live view" chip); these two add container/codec choice and the new export.
+
+await step('recording with a non-default container/codec still lands in the gallery as a playable video', async () => {
+  await nav('live')
+  const panel = page.locator('.panel:has(h3:has-text("Photo"))')
+  await panel.locator('label:has-text("Container") select').selectOption('webm')
+  await panel.locator('label:has-text("Codec") select').selectOption('vp9')
+  await page.click('button:has-text("Record video")')
+  await page.waitForFunction(() => /Stop · \d+ s/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 5000 })
+  await page.waitForTimeout(2000)
+  await page.click('button:has-text("Stop ·")')
+  await page.waitForFunction(() => /saved "Video live view/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 15000 })
+  await nav('gallery'); await page.waitForTimeout(600)
+  await page.locator('.card:has-text("Video live view") button:has-text("Open")').first().click()
+  await page.waitForSelector('video.video', { timeout: 5000 })
+  const dur = await page.locator('video.video').evaluate((v) => new Promise((r) => { if (v.readyState >= 1) r(v.duration); else v.onloadedmetadata = () => r(v.duration) }))
+  expect(dur === Infinity || dur > 1, `video duration ${dur}`)
+  await page.click('button:has-text("close")')
+  // restore the defaults the other steps (and PhotoPanel's own persisted settings) expect
+  await nav('live')
+  await panel.locator('label:has-text("Container") select').selectOption('mp4')
+  await panel.locator('label:has-text("Codec") select').selectOption('auto')
+})
+
+await step('time-lapse exports to MP4 via WebCodecs', async () => {
+  await nav('gallery'); await page.waitForTimeout(600)
+  await page.locator('.card:has-text("Time-lapse") button:has-text("Open")').first().click()
+  await page.waitForSelector('.overlay canvas', { timeout: 5000 })
+  const exportBtn = page.locator('.overlay button:has-text("Export MP4")')
+  if (await exportBtn.count()) {
+    const [download] = await Promise.all([
+      page.waitForEvent('download', { timeout: 30000 }),
+      exportBtn.click(),
+    ])
+    expect(!!download, 'no MP4 download triggered by "Export MP4"')
+  } else {
+    // this browser has no WebCodecs VideoEncoder: the button is hidden (timelapseExportSupported()),
+    // which is the documented fallback, not a failure
+    console.log('  (skipped: no WebCodecs VideoEncoder in this browser)')
+  }
+  await page.click('.overlay button.close')
+})
+
+// --- look ---
+
+await step('Look panel applies a built-in colour map to the live canvas', async () => {
+  await nav('live')
+  const panel = page.locator('.panel:has(h3:has-text("Look"))')
+  await panel.locator('label.chk:has-text("enabled") input[type=checkbox]').check()
+  await page.selectOption('.panel:has(h3:has-text("Look")) select[aria-label="LUT"]', { label: 'Fire' })
+  await page.waitForSelector('canvas.processed', { timeout: 8000 })
+  await page.waitForTimeout(500)   // let a few processed frames land
+  // the fake specimen is coloured, so compare a block of the processed canvas with the same block of
+  // the untouched <img> (drawn through a scratch canvas) rather than assuming a neutral grey centre
+  const centreBlocks = () => page.evaluate(() => {
+    const c = document.querySelector('canvas.processed'), img = document.querySelector('.stream img, img[alt="microscope live view"]')
+    if (!c || !img) return null
+    const mean = (d) => { let r = 0, g = 0, b = 0, n = d.length / 4; for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i + 1]; b += d[i + 2] } return [r / n, g / n, b / n] }
+    const s = document.createElement('canvas'); s.width = img.naturalWidth; s.height = img.naturalHeight
+    s.getContext('2d').drawImage(img, 0, 0)
+    const bx = (c.width >> 1) - 16, by = (c.height >> 1) - 16
+    return { proc: mean(c.getContext('2d').getImageData(bx, by, 32, 32).data), raw: mean(s.getContext('2d').getImageData(bx, by, 32, 32).data) }
+  })
+  const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2])
+  const coloured = await centreBlocks()
+  expect(!!coloured, 'no processed canvas pixel read back')
+  expect(dist(coloured.proc, coloured.raw) > 20, `Fire LUT did not visibly change the centre block: ${coloured.proc} vs ${coloured.raw}`)
+
+  // strength 0: mix(in, lut(in), 0) == in, so the block should match the untouched view (frames differ slightly)
+  await panel.locator('input[type=range]').first().fill('0')
+  await page.waitForTimeout(700)
+  const back = await centreBlocks()
+  expect(!!back, 'no processed canvas pixel read back after strength=0')
+  expect(dist(back.proc, back.raw) < 20, `strength=0 should match the untouched view: ${back.proc} vs ${back.raw}`)
+  await panel.locator('input[type=range]').first().fill('1')
+})
+
+await step('an imported .cube LUT appears under "My LUTs"', async () => {
+  const panel = page.locator('.panel:has(h3:has-text("Look"))')
+  const cube = 'TITLE "e2e-test"\nLUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n'
+  await panel.locator('input[type=file]').setInputFiles({ name: 'e2e-test.cube', mimeType: 'text/plain', buffer: Buffer.from(cube) })
+  await page.waitForFunction(() => /e2e-test/.test(document.body.textContent || ''), null, { timeout: 8000 })
+  expect(/e2e-test/.test(await panel.innerText()), 'imported LUT "e2e-test" not listed under My LUTs')
+})
+
+await step('disabling the Look removes the processed canvas', async () => {
+  const panel = page.locator('.panel:has(h3:has-text("Look"))')
+  await panel.locator('label.chk:has-text("enabled") input[type=checkbox]').uncheck()
+  await page.waitForFunction(() => !document.querySelector('canvas.processed'), null, { timeout: 5000 })
+  expect((await page.locator('canvas.processed').count()) === 0, 'canvas.processed still present after disabling the Look')
+})
+
+// --- enhance ---
+
+await step('Enhance panel applies the "Crisp" preset to a gallery photo and saves it as a new item', async () => {
+  await nav('gallery'); await page.waitForTimeout(600)
+  const before = await page.locator('.card').count()
+  // the 820×616 quick frame, not the 8 MP photo: the point is the flow, not a multi-second develop
+  await page.locator('.card:has-text("Quick frame") .thumb').first().click()
+  await page.waitForSelector('.overlay')
+  await page.click('button.enhance-toggle')
+  await page.waitForSelector('.enhance-dock')
+  await page.click('.enhance-dock button:has-text("Crisp")')
+  // wait for the debounced (150ms) preview to actually render something
+  await page.waitForFunction(() => {
+    const c = document.querySelector('.enhance-dock canvas.preview-canvas')
+    return !!c && c.width > 0 && c.height > 0
+  }, null, { timeout: 20000 })
+  await page.click('.enhance-dock button:has-text("Apply")')
+  await page.waitForFunction(() => /saved as/.test(document.querySelector('.enhance-dock')?.textContent || ''), null, { timeout: 60000 })
+  await page.click('.overlay button.close')
+  await nav('gallery')
+  await page.waitForFunction((n) => document.querySelectorAll('.card').length > n, before, { timeout: 8000 })
+  expect(/\(enhanced\)/.test(await page.locator('main').innerText()), 'no "(enhanced)" card appeared after Apply')
+})
+
+await step('Live denoise shows the processed canvas while enabled, and stops it when disabled', async () => {
+  if (await page.locator('.overlay button.close').count()) await page.click('.overlay button.close')   // a failed viewer step must not mask this one
+  await nav('live')
+  const chk = page.locator('.panel:has(h3:has-text("Camera")) label:has-text("live denoise") input[type=checkbox]')
+  await chk.check()
+  await page.waitForSelector('canvas.processed', { timeout: 8000 })
+  await chk.uncheck()
+  // another view-target processor (the Look) may still keep canvas.processed alive; only assert it's
+  // gone when nothing else in this run has the Look enabled (the Look step above ends with it disabled).
+  await page.waitForFunction(() => !document.querySelector('canvas.processed'), null, { timeout: 5000 })
+})
+
 await step('no page errors during the run', async () => { expect(problems.length === 0, problems.join(' | ')) })
 
 await browser.close()

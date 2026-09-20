@@ -1,6 +1,8 @@
-/** Video stabilisation: per frame, track the raw displacement (`fftTrack.displacement`) of a
- *  downscaled luma frame against a reference frame that is periodically re-anchored to the latest
- *  frame (so the FFT correlation window stays small and accurate instead of degrading as the scene
+/** Video stabilisation: per frame, register the frame against a reference frame with `algo/register.ts`
+ *  (coarse whole-frame correlation, refined by a full-resolution crop) instead of hand-rolling a
+ *  downscale-then-correlate step here — CLAUDE.md is explicit that `register.ts` is the one primitive
+ *  anything measuring sub-pixel motion should use. The reference is periodically re-anchored to the
+ *  latest frame (so the correlation window stays small and accurate instead of degrading as the scene
  *  drifts far from the first reference). The raw trajectory (the re-anchor's running origin plus the
  *  current frame's offset from it) is low-pass filtered with a one-euro filter, which follows a
  *  deliberate pan (low frequency, larger amplitude) while damping jitter (high frequency, small
@@ -10,7 +12,7 @@
  *  Pure: no DOM or canvas access, so `track()` is unit-testable on plain `Gray` arrays. The caller
  *  (the recorder) does the actual `ctx.translate(-dx, -dy)` and crops a matching margin off the
  *  canvas so the translated frame never shows an edge. */
-import { displacement, type Displacement } from './fftTrack'
+import { register, type RegisterOptions } from './register'
 import type { Gray } from './sharpness'
 
 class OneEuroFilter {
@@ -57,9 +59,15 @@ export interface StabilizeOptions {
   /** a measurement below this correlation quality is discarded; the previous trajectory point is
    *  reused instead (guards a blank or otherwise untrackable frame) */
   minQuality: number
+  /** tuning passed straight through to `register()`'s coarse/fine stages; the defaults are chosen to
+   *  keep the per-frame FFT cost bounded for real-time recording rather than for offline accuracy. */
+  registerOptions: RegisterOptions
 }
 
-export const defaultStabilizeOptions: StabilizeOptions = { reanchorPx: 40, minCutoff: 1, beta: 0.02, maxShiftPx: 24, minQuality: 1.5 }
+export const defaultStabilizeOptions: StabilizeOptions = {
+  reanchorPx: 40, minCutoff: 1, beta: 0.02, maxShiftPx: 24, minQuality: 1.5,
+  registerOptions: { coarseW: 240, crop: 256, minQuality: 1.5 },
+}
 
 export interface StabilizeResult {
   /** apply as `ctx.translate(-dx, -dy)` before cropping the margin */
@@ -100,9 +108,9 @@ export class Stabilizer {
       this.fx.filter(0, tSec); this.fy.filter(0, tSec)
       return { dx: 0, dy: 0, rawDx: 0, rawDy: 0, quality: Infinity, reanchored: true }
     }
-    const d: Displacement = displacement(this.reference, gray)
+    const d = register(this.reference, gray, { ...this.opts.registerOptions, minQuality: this.opts.minQuality })
     let raw = { x: this.origin.x + d.dx, y: this.origin.y + d.dy }
-    if (d.quality >= this.opts.minQuality) this.lastRaw = raw
+    if (d.confident) this.lastRaw = raw
     else raw = this.lastRaw
     let reanchored = false
     if (Math.hypot(d.dx, d.dy) > this.opts.reanchorPx) {

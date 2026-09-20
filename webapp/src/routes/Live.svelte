@@ -39,6 +39,7 @@
   function onMeasureDblClick() { measure.closePolygon(umPerPxAt(measureImgW)) }
   import SamplePanel from '../components/SamplePanel.svelte'
   import MacroPanel from '../components/MacroPanel.svelte'
+  import LookPanel from '../components/LookPanel.svelte'
   import { macroService } from '../lib/services/macro.svelte'
 
   // ---- click-hold-drag panning (like a map): the picture follows the cursor, the stage follows the picture ----
@@ -229,6 +230,7 @@
         stage. Both reset whenever the stage moves. Save stores the processed frame; Record in the Photo panel records whatever is shown.</p>
       </details>
     </div>
+    <LookPanel />
     <PhotoPanel />
     <MeasurePanel />
     <TimelapsePanel />
