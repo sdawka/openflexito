@@ -9,7 +9,7 @@
   import { fetchRaw, grabGray } from '../lib/api/sampler'
   import { parseRaw, splitBayer, rawLevel } from '../lib/algo/raw'
   import { autoExpose } from '../lib/algo/exposure'
-  import { flatLensShading, lensShadingFromPlanes, type LensShading } from '../lib/algo/lst'
+  import { flatLensShading, lensShadingFromPlanes, checkFlatField, type LensShading } from '../lib/algo/lst'
   import { setLensShading, setStaticGreenEqualisation, setContrastEnhancement, isLensShadingCalibrated, CT_CALIBRATED, CT_UNCALIBRATED, type Tuning } from '../lib/algo/tuning'
   import { calibrate1D, contrast, imageToStageMatrix, moveUntilMotionDetected } from '../lib/algo/csm'
   import LstView from '../components/LstView.svelte'
@@ -95,6 +95,11 @@
   async function doLst() {
     say('capturing a raw flat field (~15 s over WiFi)…')
     const planes = splitBayer(parseRaw(await fetchRaw()))
+    // The table is max(g)/g, so a frame that is not actually an empty field bakes the sample's own
+    // dark regions in as a large gain and blows out every later RAW develop. Refuse rather than write.
+    const check = checkFlatField(planes)
+    say(`flat field: mean level ${check.level.toFixed(1)}, bright:dark ${check.ratio.toFixed(1)}x`)
+    if (!check.ok) throw new Error(check.reason)
     const result = lensShadingFromPlanes(planes)
     lst = result
     let t = await currentTuning()

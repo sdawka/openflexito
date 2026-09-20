@@ -16,6 +16,11 @@ export default defineConfig({
       '/stream-lores.mjpg': { target: device, changeOrigin: true },
       '/snapshot.jpg': { target: device, changeOrigin: true },
       '/raw.bin': { target: device, changeOrigin: true },
+      // Without these two the SPA fallback answers with index.html and the callers fail deep in the
+      // parser ("not an openflexito bracket") instead of at the fetch: keep in step with the device's
+      // routes in device/openflexito/web.py.
+      '/flat.bin': { target: device, changeOrigin: true },
+      '/bracket.bin': { target: device, changeOrigin: true },
     },
   },
   build: { target: 'es2022', sourcemap: false },

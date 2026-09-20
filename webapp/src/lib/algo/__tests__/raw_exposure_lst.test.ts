@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { parseRaw, splitBayer, percentile, rawLevel, type RawImage } from '../raw'
 import { autoExpose, nextExposure, nextGain } from '../exposure'
-import { gridAverage, lensShadingFromPlanes, flatLensShading, LST_COLS, LST_ROWS } from '../lst'
+import { gridAverage, lensShadingFromPlanes, flatLensShading, checkFlatField, MAX_LUMINANCE_GAIN, LST_COLS, LST_ROWS } from '../lst'
 import { findAlgo, setLensShading, isLensShadingCalibrated, setStaticGreenEqualisation, CT_CALIBRATED, CT_UNCALIBRATED } from '../tuning'
 
 function makeRaw(w: number, h: number, fill: (x: number, y: number) => number, black = 64): ArrayBuffer {
@@ -84,6 +84,47 @@ describe('lens shading', () => {
     expect(lst.cb.every((v) => Math.abs(v - 1.25) < 0.1)).toBe(true)  // G/B = 1/0.8
     expect(lst.colourGains[0]).toBeCloseTo(2, 1)
     expect(lst.colourGains[1]).toBeCloseTo(1.25, 1)
+  })
+})
+
+describe('flat field validation', () => {
+  const w = 160, h = 120
+  /** A gentle vignette: what a real empty field looks like. */
+  const evenField = () => parseRaw(makeRaw(w, h, (x, y) => {
+    const vx = (x - w / 2) / (w / 2), vy = (y - h / 2) / (h / 2)
+    return 64 + Math.round(600 * (1 - 0.3 * (vx * vx + vy * vy)))
+  }))
+  /** A specimen still in the field: a dark blob over one corner. */
+  const fieldWithSample = () => parseRaw(makeRaw(w, h, (x, y) => {
+    const dark = x < w / 3 && y < h / 3 ? 0.02 : 1
+    return 64 + Math.round(600 * dark)
+  }))
+
+  it('accepts an evenly lit field', () => {
+    const c = checkFlatField(splitBayer(evenField()))
+    expect(c.ok).toBe(true)
+    expect(c.ratio).toBeLessThan(3)
+    expect(c.reason).toBeUndefined()
+  })
+
+  it('rejects a field with the sample still in view', () => {
+    const c = checkFlatField(splitBayer(fieldWithSample()))
+    expect(c.ok).toBe(false)
+    expect(c.ratio).toBeGreaterThan(8)
+    expect(c.reason).toMatch(/not flat/)
+  })
+
+  it('rejects a dark frame rather than dividing by noise', () => {
+    const dark = parseRaw(makeRaw(w, h, () => 64 + 1))
+    const c = checkFlatField(splitBayer(dark))
+    expect(c.ok).toBe(false)
+    expect(c.reason).toMatch(/too dark/)
+  })
+
+  it('clamps the luminance gain a bad field would otherwise bake in', () => {
+    const lst = lensShadingFromPlanes(splitBayer(fieldWithSample()))
+    // unclamped this is max(g)/g on a 50x contrast blob
+    expect(Math.max(...lst.luminance)).toBeLessThanOrEqual(MAX_LUMINANCE_GAIN)
   })
 })
 

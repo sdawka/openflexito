@@ -96,3 +96,22 @@ describe('depth-from-focus', () => {
     expect(depthLegend(stepStats, 0)).toEqual({ min: 100, max: 300, unit: 'steps' })
   })
 })
+
+describe('reliefShade size contract', () => {
+  it('rejects a base image whose length does not match the dimensions', () => {
+    // regression: the RAW fine stack passed a 4x-downscaled base with full-resolution width/height,
+    // which only failed later inside `new ImageData(...)`
+    const w = 8, h = 6
+    const quarter = new Uint8ClampedArray((w / 4) * (h / 4) * 4)
+    const z = new Float32Array(w * h)
+    expect(() => reliefShade(quarter, z, w, h)).toThrow(/expected 192 for 8x6/)
+  })
+  it('accepts a correctly sized base', () => {
+    const w = 8, h = 6
+    const full = new Uint8ClampedArray(w * h * 4).fill(128)
+    const z = new Float32Array(w * h).map((_, i) => i % w)
+    const out = reliefShade(full, z, w, h)
+    expect(out.length).toBe(w * h * 4)
+  })
+})
+

@@ -11,6 +11,7 @@ import type { RawImage } from './raw'
 import { findAlgo, type Tuning } from './tuning'
 import { demosaic, cellColour, demosaicMalvar, demosaicBilinear, type DemosaicMethod } from './demosaic'
 import { flatFieldSampler, type FlatField } from './flatField'
+import { MAX_LUMINANCE_GAIN } from './lst'
 
 export { cellColour, demosaicMalvar, demosaicBilinear }
 
@@ -67,8 +68,13 @@ export function developParamsFromTuning(t: Tuning, ct?: number): Pick<DevelopOpt
   if (Array.isArray(lum) && lum.length === 192) {
     const cr = interpolateByCt(Array.isArray(alsc.calibrations_Cr) ? alsc.calibrations_Cr : [], 'table', 192, ct)
     const cb = interpolateByCt(Array.isArray(alsc.calibrations_Cb) ? alsc.calibrations_Cb : [], 'table', 192, ct)
-    // libcamera applies the luminance table as 1 + (lut - 1) * luminance_strength
-    const luminance = Array.from(lum as number[], (v) => 1 + (v - 1) * strength)
+    // libcamera applies the luminance table as 1 + (lut - 1) * luminance_strength.
+    // Clamp what a stored table may ask for: a lens-shading calibration run against a non-empty
+    // field produces gains of tens of x (measured 68x on a scope calibrated over its own sample),
+    // which blows every RAW develop out to white. Real vignetting stays far below the ceiling, so
+    // this only ever trims a table that was already broken. See algo/lst.ts.
+    const luminance = Array.from(lum as number[], (v) =>
+      Math.min(MAX_LUMINANCE_GAIN, 1 + (v - 1) * strength))
     lsc = { luminance, cr: cr ?? new Array(192).fill(1), cb: cb ?? new Array(192).fill(1), cols: 16, rows: 12 }
   }
   const ccms = findAlgo(t, 'rpi.ccm')?.ccms

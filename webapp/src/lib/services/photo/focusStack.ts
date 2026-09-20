@@ -220,7 +220,11 @@ export async function takeFineFocusStack(o: FocusStackOptions, say: Say, meta: P
   const depthIndex = smoothDepthIndex(r.depthIndex, r.width, r.height)
   const zMap = depthZMap(depthIndex, zs)
   const depthColor = colorizeDepth(zMap, r.width, r.height)
-  const baseRgba = r.data instanceof Uint16Array ? toRgba8({ data: r.data, width: r.width, height: r.height }, 4).data : r.data
+  // Must stay at full resolution: `reliefShade` and the encode below both index it with r.width/
+  // r.height. Downscaling here (the RAW path fuses to a Uint16Array, the JPEG path does not) made the
+  // buffer a quarter of the size the dimensions claimed, and the relief encode then died with
+  // "Failed to construct 'ImageData': The input data length is not equal to (4 * width * height)".
+  const baseRgba = r.data instanceof Uint16Array ? toRgba8({ data: r.data, width: r.width, height: r.height }).data : r.data
   const relief = reliefShade(baseRgba, zMap, r.width, r.height)
   extraBlobs['depth'] = await encodeRgba8Png({ data: depthColor.data, width: r.width, height: r.height })
   extraBlobs['relief'] = await encodeRgba8({ data: relief, width: r.width, height: r.height }, 0.9)

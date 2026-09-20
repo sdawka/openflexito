@@ -252,6 +252,24 @@ if (moves) await step('fine focus stack centres on the focus plane and fuses sev
   expect(shares.filter((s) => s > 5).length >= 2, `fine stack did not draw on several slices: ${m[1]}`)
 })
 
+if (moves) await step('fine focus stack from RAW fuses 16-bit slices and renders a relief', async () => {
+  // Regression: the RAW path fuses to a Uint16Array, and the relief base was downscaled 4x while the
+  // encode still used full width/height -> "Failed to construct 'ImageData'". `focusfine` (8-bit)
+  // cannot catch it, so this mode needs its own step.
+  await nav('live')
+  const panel = '.panel:has(h3:has-text("Photo"))'
+  await page.selectOption(`${panel} select[aria-label="capture mode"]`, 'focusfineraw')
+  const n = page.locator(`${panel} input[aria-label="focus stack slices"]`)
+  await n.click({ clickCount: 3 }); await n.pressSequentially('3')
+  await page.click('button:has-text("Take photo")')
+  await page.waitForFunction(() => /saved "Fine focus stack RAW/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 300000 })
+    .catch(async () => { throw new Error('RAW fine stack did not finish: ' + (await page.locator(panel).innerText()).replace(/\s+/g, ' ').slice(-240)) })
+  await page.selectOption(`${panel} select[aria-label="capture mode"]`, 'single')
+  await nav('gallery'); await page.waitForTimeout(600)
+  const g = await page.locator('main').innerText()
+  expect(/Fine focus stack RAW/.test(g), 'gallery does not list the RAW fine stack: ' + g.replace(/\s+/g, ' ').slice(0, 200))
+})
+
 await step('live focus stack builds a composite and saves it', async () => {
   await nav('live')
   await page.click('.panel:has(h3:has-text("Focus")) .seg button:has-text("Smooth")')

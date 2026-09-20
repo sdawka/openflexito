@@ -98,6 +98,12 @@ export function colorizeDepth(z: Float32Array, width: number, height: number): {
  *  a digital elevation model — surfaces sloping towards the (fixed, upper-left) light are brightened,
  *  the opposite darkened, flat regions unchanged. `strength` around 1 gives a subtle effect. */
 export function reliefShade(image: Uint8ClampedArray, z: Float32Array, width: number, height: number, strength = 1.2): Uint8ClampedArray {
+  // Fail here, where the caller is named, rather than several steps later inside an ImageData
+  // constructor: a downscaled base with full-resolution dimensions is otherwise silently indexed
+  // out of range and only surfaces at encode time.
+  if (image.length !== width * height * 4) {
+    throw new Error(`reliefShade: image is ${image.length} bytes, expected ${width * height * 4} for ${width}x${height}`)
+  }
   const out = new Uint8ClampedArray(image.length)
   const stats = depthStats(z), span = Math.max(1e-6, stats.max - stats.min)
   const at = (x: number, y: number) => z[Math.min(height - 1, Math.max(0, y)) * width + Math.min(width - 1, Math.max(0, x))]
