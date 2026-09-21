@@ -501,11 +501,22 @@ exposure or vignetting differences between tiles don't show as seams, and either
 feather-weighted blend or an optional multi-band (Laplacian) blend for harder edges — replacing the old
 last-drawn-tile-wins compositing. A flat-field gain map can be divided out of every tile before blending.
 
+**The scan map**: the Scan page is built around one picture, the planned grid drawn in mosaic space
+(`components/ScanMap.svelte`), with the live field of view shown where the stage currently is, tiles
+filling in as thumbnails while the run progresses, per-tile focus marks, and the last mosaic of the same
+footprint sitting underneath. The area is either **N×M fields around the current position** or **the grid
+covering two corners** marked from wherever the stage was driven (`buildScanPlan`/`gridCovering` in
+`lib/algo/scanPlan.ts`); the run itself lives in `services/scan.svelte.ts`, so switching to Live to drive
+the stage, or leaving mid-scan, loses neither the marked corners nor the progress and cancel controls.
+Cancelling keeps what was captured: the operator can stitch those tiles into a partial mosaic (saved with
+`scan.partial`) or discard them. A **Quick overview** button runs the same plan with stream frames and no
+focusing; its mosaic then underlays the map, which is how to draw a region on a real picture of the sample.
+
 **Programmable scan regions**: beyond a plain rectangle, the Scan page can clip the grid to a **polygon**
-— click points on an overview (the stitched preview of the last scan, or the live view if none exists
-yet) and only the tiles whose centre lands inside are kept (`lib/algo/scanPlan.ts`: point-in-polygon by
-ray casting, in coordinates normalised to the planned grid so it does not depend on the overview image's
-own resolution) — good for round or irregularly-shaped samples. The visiting order can be raster, snake
+— click points on the map (over the overview mosaic when one exists for this footprint) and only the
+tiles whose centre lands inside are kept (`lib/algo/scanPlan.ts`: point-in-polygon by ray casting, in
+coordinates normalised to the planned grid so it does not depend on the overview image's own
+resolution) — good for round or irregularly-shaped samples. The visiting order can be raster, snake
 (the previous default), or a **spiral** from the centre outward (a classic square-spiral grid walk,
 clipped to whatever the region kept), useful for round samples where the middle matters most. Tile count
 and a rough time estimate update live as the grid, region and focus settings change.

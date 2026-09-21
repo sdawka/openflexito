@@ -417,6 +417,38 @@ await step('spiral order and polygon region update the scan plan without moving 
   await page.selectOption('select:near(:text("order"))', 'snake')
 })
 
+if (moves) await step('scan between two corners survives a tab switch; cancel keeps the tiles for a partial stitch', async () => {
+  await nav('scan')
+  await page.click('button:has-text("Between two corners")')
+  await page.click('button:has-text("Mark here") >> nth=0')
+  // drive the stage away (raw move, as a jog would) and mark the opposite corner
+  await page.evaluate(async (b) => { await (await fetch(b + '/rpc', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ method: 'stage.move_rel', params: { x: 1200, y: 900, compensate: false } }) })).json() }, base)
+  await page.waitForTimeout(1200)
+  await page.click('button:has-text("Mark here") >> nth=1')
+  await page.waitForFunction(() => /→ \d+ × \d+ fields/.test(document.querySelector('aside')?.textContent || ''), null, { timeout: 5000 })
+  const fields = (await page.locator('aside').innerText()).match(/→ (\d+) × (\d+) fields/)
+  expect(+fields[1] >= 2 && +fields[2] >= 2, `corner grid too small: ${fields[0]}`)
+  await page.click('button:has-text("Stream frame")')
+  await page.click('button:has-text("Start scan")')
+  // let a couple of tiles land, then leave the page and come back: the run must still be there
+  await page.waitForFunction(() => /\b2\/\d+ tiles/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 60000 })
+  await nav('live'); await page.waitForTimeout(500); await nav('scan')
+  await page.waitForSelector('.run', { timeout: 5000 })   // the hash route switches asynchronously
+  expect((await page.locator('.run button:has-text("Cancel")').count()) === 1, 'cancel button gone after a tab switch: the run did not survive; run panel: ' + (await page.locator('.run').innerText()).replace(/\s+/g, ' ').slice(0, 300))
+  await page.click('.run button:has-text("Cancel")')
+  await page.waitForSelector('.run button:has-text("Stitch")', { timeout: 30000 })
+  await page.click('.run button:has-text("Stitch")')
+  await page.waitForSelector('img[alt="stitched scan"]', { timeout: 120000 })
+  expect(/partial \d+\/\d+/.test(await page.locator('main').innerText()), 'partial mosaic not labelled as partial')
+  // the stage is back where the scan started (corner B)
+  const p = await position()
+  const b = (await page.locator('aside').innerText()).match(/corner B\s+(-?\d+), (-?\d+)/)
+  expect(Math.abs(p.x - +b[1]) <= 2 && Math.abs(p.y - +b[2]) <= 2, `stage did not return to the start (${p.x},${p.y} vs corner B ${b[1]},${b[2]})`)
+  // leave the panel as later steps expect it
+  await page.click('button:has-text("Around here")')
+  await page.click('button:has-text("Full-res still")')
+})
+
 if (moves) await step('super-resolution captures a dithered pattern and drizzles it, sharpened', async () => {
   await nav('live')
   const panel = '.panel:has(h3:has-text("Photo"))'

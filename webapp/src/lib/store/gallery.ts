@@ -107,7 +107,11 @@ export interface GalleryItem {
     focusFailures?: number
     /** how autofocus was used during this scan, and its region/order settings, for the gallery's height-map overlay */
     focus?: { mode: 'none' | 'every' | 'interpolate'; step?: number; method?: 'plane' | 'bilinear' }
-    region?: { mode: 'rect' | 'polygon'; order: 'raster' | 'snake' | 'spiral' }
+    region?: { mode: 'rect' | 'polygon'; order: 'raster' | 'snake' | 'spiral'
+      /** how the extent was chosen ('centre': N×M fields around the stage position; 'corners': the grid covering two marked positions) and the grid centre in absolute stage steps (additive) */
+      extent?: 'centre' | 'corners'; origin?: { x: number; y: number } }
+    /** a scan stopped early: tiles captured vs. planned (additive; absent = the whole plan was captured) */
+    partial?: { captured: number; planned: number }
     /** stage z µm/step (Settings' `stageStepUm.z`) *at scan time*, if it was calibrated then (additive).
      *  Persisted so `HeightMapOverlay.svelte`'s legend keeps its µm scale even if the operator
      *  recalibrates the stage afterwards; older scans without it fall back to Settings' current value. */

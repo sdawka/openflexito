@@ -4,7 +4,7 @@
  *  for round samples (see `filterByPolygon`, `spiralOrder` below). */
 
 import type { Mat2 } from './csm'
-import { apply2 } from './csm'
+import { apply2, invert2 } from './csm'
 
 export interface ScanGrid { cols: number; rows: number; overlap: number }   // overlap 0..0.9 (fraction of FoV)
 
@@ -134,4 +134,91 @@ export function spiralOrder(tiles: TilePlan[]): TilePlan[] {
 export function settleForMove(steps: number, minMs = 150, msPerStep = 0.05, maxMs = 1500): number {
   if (!Number.isFinite(steps) || steps <= 0) return minMs
   return Math.round(Math.max(minMs, Math.min(maxMs, steps * msPerStep)))
+}
+
+// ---- whole-plan geometry: extent, mosaic box, and where a stage position sits in it ----------
+
+/** Scale a px->steps matrix measured at `measuredWidth` to frames of `width` px. */
+export function scaleMatrix(m: Mat2, measuredWidth: number, width: number): Mat2 {
+  const k = measuredWidth / width
+  return [[m[0][0] * k, m[0][1] * k], [m[1][0] * k, m[1][1] * k]]
+}
+
+/** Pixel offset (in the mosaic, tile px) of a field of view whose stage position is `stage` steps
+ *  away from the grid centre. Inverse of `planScan`'s "move the stage so the scene shifts by
+ *  (-px,-py)": stage = M·(-p)  ⇒  p = -M⁻¹·stage. */
+export function stageToPixelOffset(matrix: Mat2, stage: Point): Point {
+  const [x, y] = apply2(invert2(matrix), [stage.x, stage.y])
+  return { x: -x, y: -y }
+}
+
+/** Smallest grid whose outermost tile *centres* reach ±`halfExtent` px from the grid centre, so
+ *  the fields of view the operator marked at the corners are covered in full. Used by the
+ *  "between two corners" extent: (cols-1)·dx/2 ≥ halfExtent.x. */
+export function gridCovering(halfExtent: Point, fovW: number, fovH: number, overlap: number): { cols: number; rows: number } {
+  const { dx, dy } = tilePitchPx(fovW, fovH, overlap)
+  const n = (half: number, pitch: number) => Math.max(1, Math.ceil((2 * half) / pitch - 1e-9) + 1)
+  return { cols: n(Math.abs(halfExtent.x), dx), rows: n(Math.abs(halfExtent.y), dy) }
+}
+
+export type ScanOrder = 'raster' | 'snake' | 'spiral'
+
+/** Everything that decides *which* tiles a scan visits and where they are, independent of focus,
+ *  capture or stitching settings. Positions are absolute stage steps. */
+export interface ScanRegion {
+  /** 'centre': `cols`×`rows` fields around `current`; 'corners': the grid that covers cornerA..cornerB */
+  extent: 'centre' | 'corners'
+  cols: number
+  rows: number
+  cornerA: Point | null
+  cornerB: Point | null
+  overlap: number
+  /** normalised to the full grid's mosaic box; fewer than 3 points = keep every tile */
+  polygon: Point[]
+  order: ScanOrder
+}
+
+export interface ScanPlan {
+  tiles: TilePlan[]                        // visiting order; `stage` is relative to `origin`
+  cols: number
+  rows: number
+  origin: Point                            // absolute stage position of the grid centre
+  fov: { w: number; h: number }            // tile size, px
+  mosaic: { width: number; height: number }   // the FULL grid's nominal box (before any polygon clip)
+}
+
+/** Build the tile plan for a region. `matrix` maps px (at `fovW` frame width) -> stage steps;
+ *  `current` is the stage position the 'centre' extent is anchored on. Corner mode falls back to
+ *  centre mode until both corners exist. */
+export function buildScanPlan(region: ScanRegion, fovW: number, fovH: number, matrix: Mat2, current: Point): ScanPlan {
+  let origin: Point = { x: current.x, y: current.y }
+  let cols = Math.max(1, Math.round(region.cols)), rows = Math.max(1, Math.round(region.rows))
+  if (region.extent === 'corners' && region.cornerA && region.cornerB) {
+    const a = region.cornerA, b = region.cornerB
+    origin = { x: Math.round((a.x + b.x) / 2), y: Math.round((a.y + b.y) / 2) }
+    const half = stageToPixelOffset(matrix, { x: a.x - origin.x, y: a.y - origin.y })
+    ;({ cols, rows } = gridCovering(half, fovW, fovH, region.overlap))
+  }
+  let tiles = planScan({ cols, rows, overlap: region.overlap }, fovW, fovH, matrix, region.order === 'snake' ? 'snake' : 'raster')
+  const mosaic = mosaicSize(tiles, fovW, fovH)
+  if (region.polygon.length >= 3) tiles = filterByPolygon(tiles, region.polygon, fovW, fovH)
+  if (region.order === 'spiral') tiles = spiralOrder(tiles)
+  return { tiles, cols, rows, origin, fov: { w: fovW, h: fovH }, mosaic }
+}
+
+export interface NormRect { x: number; y: number; w: number; h: number }
+
+/** Where the field of view at absolute stage position `pos` sits in the plan's mosaic box, as
+ *  fractions of that box (may extend outside 0..1 when the stage is away from the region). */
+export function fovRectNorm(plan: ScanPlan, matrix: Mat2, pos: Point): NormRect {
+  const p = stageToPixelOffset(matrix, { x: pos.x - plan.origin.x, y: pos.y - plan.origin.y })
+  const cx = plan.mosaic.width / 2 + p.x, cy = plan.mosaic.height / 2 + p.y
+  const W = plan.mosaic.width || 1, H = plan.mosaic.height || 1
+  return { x: (cx - plan.fov.w / 2) / W, y: (cy - plan.fov.h / 2) / H, w: plan.fov.w / W, h: plan.fov.h / H }
+}
+
+/** A tile's nominal footprint in the same normalised box. */
+export function tileRectNorm(plan: ScanPlan, t: TilePlan): NormRect {
+  const W = plan.mosaic.width || 1, H = plan.mosaic.height || 1
+  return { x: t.pixel.x / W, y: t.pixel.y / H, w: plan.fov.w / W, h: plan.fov.h / H }
 }
