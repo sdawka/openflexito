@@ -633,6 +633,67 @@ await step('an imported .cube LUT appears under "My LUTs"', async () => {
   expect(/e2e-test/.test(await panel.innerText()), 'imported LUT "e2e-test" not listed under My LUTs')
 })
 
+await step('Curves editor brightens the live view and "Save as LUT…" preserves the look', async () => {
+  const panel = page.locator('.panel:has(h3:has-text("Look"))')
+  await panel.locator('label.chk:has-text("enabled") input[type=checkbox]').check()
+  await page.selectOption('.panel:has(h3:has-text("Look")) select[aria-label="LUT"]', { label: 'None' })
+  await page.waitForSelector('canvas.processed', { timeout: 8000 })
+  await page.waitForTimeout(500)
+
+  const centreBlocks = () => page.evaluate(() => {
+    const c = document.querySelector('canvas.processed'), img = document.querySelector('.stream img, img[alt="microscope live view"]')
+    if (!c || !img) return null
+    const mean = (d) => { let r = 0, g = 0, b = 0, n = d.length / 4; for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i + 1]; b += d[i + 2] } return [r / n, g / n, b / n] }
+    const s = document.createElement('canvas'); s.width = img.naturalWidth; s.height = img.naturalHeight
+    s.getContext('2d').drawImage(img, 0, 0)
+    const bx = (c.width >> 1) - 16, by = (c.height >> 1) - 16
+    return { proc: mean(c.getContext('2d').getImageData(bx, by, 32, 32).data), raw: mean(s.getContext('2d').getImageData(bx, by, 32, 32).data) }
+  })
+  const brightness = (rgb) => (rgb[0] + rgb[1] + rgb[2]) / 3
+  const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+  const before = await centreBlocks()
+  expect(!!before, 'no processed canvas pixel read back before curve edit')
+
+  await panel.locator('summary:has-text("Curves")').click()
+  const curveCanvas = panel.locator('canvas.curve-editor')
+  await curveCanvas.waitFor({ timeout: 5000 })
+  const box = await curveCanvas.boundingBox()
+  expect(!!box, 'curve editor canvas not found')
+  const midX = box.x + box.width / 2, midY = box.y + box.height / 2
+  // drag the master curve's middle upward (toward a brighter output) - click adds a point, the move
+  // while still pressed drags it via the same pointer sequence CurveEditor's pointerdown/move expects
+  await page.mouse.move(midX, midY)
+  await page.mouse.down()
+  await page.mouse.move(midX, midY - box.height * 0.3, { steps: 8 })
+  await page.mouse.up()
+  await page.waitForTimeout(700)
+
+  const brighter = await centreBlocks()
+  expect(!!brighter, 'no processed canvas pixel read back after curve edit')
+  expect(brightness(brighter.proc) > brightness(before.proc) + 5, `curve edit did not brighten the centre block: ${brighter.proc} vs ${before.proc}`)
+
+  // "Save as LUT…" with the default name, bar filling anything in
+  await panel.locator('button:has-text("Save as LUT…")').click()
+  const nameInput = panel.locator('.rename-input')
+  const defaultName = await nameInput.inputValue()
+  expect(defaultName.length > 0, 'Save as LUT… did not prefill a default name')
+  await panel.locator('button:has-text("Save")').click()
+  await page.waitForFunction(
+    (name) => (document.body.textContent || '').includes(name),
+    defaultName, { timeout: 8000 },
+  )
+  expect((await panel.innerText()).includes(defaultName), `saved LUT "${defaultName}" not listed under My LUTs`)
+  const savedOptionValue = await panel.locator('select[aria-label="LUT"] option', { hasText: defaultName }).evaluate((o) => o.value)
+  const selectedValue = await panel.locator('select[aria-label="LUT"]').inputValue()
+  expect(selectedValue === savedOptionValue, 'saved LUT was not selected after "Save as LUT…"')
+
+  await page.waitForTimeout(700)
+  const after = await centreBlocks()
+  expect(!!after, 'no processed canvas pixel read back after save')
+  expect(dist(after.proc, brighter.proc) < 12, `picture changed after "Save as LUT…" reset: ${after.proc} vs ${brighter.proc}`)
+})
+
 await step('disabling the Look removes the processed canvas', async () => {
   const panel = page.locator('.panel:has(h3:has-text("Look"))')
   await panel.locator('label.chk:has-text("enabled") input[type=checkbox]').uncheck()
