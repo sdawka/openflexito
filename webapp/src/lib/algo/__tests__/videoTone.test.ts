@@ -20,6 +20,35 @@ describe('StableLevels', () => {
     lv.update(img((x) => 200 + (x % 2) * 20), lut, 1)   // +90: scene change → snaps
     expect(Math.abs(lv.black - 200)).toBeLessThan(2)
   })
+  it('maxStretch caps the gain and widens the window about its centre', () => {
+    const lv = new StableLevels(0.5, 99.5, 0.1, 2, 40)
+    lv.maxStretch = 0.25
+    const lut = new Uint8ClampedArray(256)
+    lv.update(img((x) => 100 + (x % 2) * 20), lut, 1)
+    const { black, white } = lv.window()
+    expect(white - black).toBeCloseTo(255 * 0.75, 5)
+    expect((black + white) / 2).toBeCloseTo(110, 5)
+    // gain ≤ 1/(1 − 0.25): 100..120 spans at most 20 · 1.333 ≈ 27 output codes
+    expect(lut[120] - lut[100]).toBeLessThan(28); expect(lut[120] - lut[100]).toBeGreaterThan(24)
+    // a window near an edge is slid back inside 0..255 rather than clipped
+    lv.reset(); lv.update(img((x) => 5 + (x % 2) * 20), lut, 1)
+    expect(lv.window().black).toBe(0); expect(lv.window().white).toBeCloseTo(255 * 0.75, 5)
+    // maxStretch 1 is the unbounded behaviour
+    lv.maxStretch = 1; lv.reset(); lv.update(img((x) => 100 + (x % 2) * 20), lut, 1)
+    expect(lut[100]).toBeLessThan(10); expect(lut[120]).toBeGreaterThan(245)
+  })
+  it('strength mixes the table with identity', () => {
+    const lv = new StableLevels(0.5, 99.5, 0.1, 2, 40)
+    const full = new Uint8ClampedArray(256), half = new Uint8ClampedArray(256), off = new Uint8ClampedArray(256)
+    const frame = img((x) => 100 + (x % 2) * 20)
+    lv.update(frame, full, 1)
+    lv.strength = 0.5; lv.update(frame, half, 1)
+    lv.strength = 0; lv.update(frame, off, 1)
+    for (let v = 0; v < 256; v++) {
+      expect(off[v]).toBe(v)
+      expect(Math.abs(half[v] - (v + full[v]) / 2)).toBeLessThanOrEqual(1)
+    }
+  })
   it('applyLut maps every channel and keeps alpha', () => {
     const lut = new Uint8ClampedArray(256).map((_, i) => 255 - i)
     const out = new Uint8ClampedArray(4)

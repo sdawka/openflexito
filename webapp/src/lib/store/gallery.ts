@@ -77,6 +77,9 @@ export interface GalleryItem {
     mode?: { id: string; label: string; params?: Record<string, unknown>; stats?: Record<string, unknown> }
     /** additive: which burn-in overlays (`services/video/burnIn.ts`) were drawn into the frames */
     burnIn?: string[]
+    /** additive: stabiliser options in force and the re-timer's mode/stats (`algo/retime.ts`) */
+    stabiliser?: { strength: string; rotation: boolean; edges: string }
+    retime?: { mode: string; fps: number; pushed: number; emitted: number; duplicates: number; dropped: number }
   }
   /** time-lapse: blobs 'f0000', 'f0001', ... one JPEG per frame, plus 'thumb' from the first frame.
    *  `frames[i].shift` is that frame's measured drift (px) from the first frame (see `algo/drift.ts`);
@@ -235,7 +238,8 @@ export async function saveVideo(blob: Blob, thumb: Blob | null, meta: { duration
   codec?: string; bitrateBps?: number; frames?: VideoFrameLog[]
   encoder?: 'webcodecs' | 'mediarecorder'; container?: 'mp4' | 'webm'; quality?: string; keyframeS?: number
   stabilised?: boolean; deflickered?: boolean; framesDropped?: number; framesDuplicated?: number
-  mode?: NonNullable<GalleryItem['video']>['mode']; burnIn?: string[] }): Promise<GalleryItem> {
+  mode?: NonNullable<GalleryItem['video']>['mode']; burnIn?: string[]
+  stabiliser?: NonNullable<GalleryItem['video']>['stabiliser']; retime?: NonNullable<GalleryItem['video']>['retime'] }): Promise<GalleryItem> {
   const id = newId()
   const frames = meta.frames?.length ? meta.frames : undefined
   const item: GalleryItem = {
@@ -244,7 +248,7 @@ export async function saveVideo(blob: Blob, thumb: Blob | null, meta: { duration
     video: {
       durationS: meta.durationS, fps: meta.fps, source: meta.source, mime: blob.type, codec: meta.codec, bitrateBps: meta.bitrateBps, frameCount: frames?.length, frameLog: frames ? 'frames' : undefined,
       stabilised: meta.stabilised, encoder: meta.encoder, container: meta.container, quality: meta.quality, keyframeS: meta.keyframeS, deflickered: meta.deflickered, framesDropped: meta.framesDropped, framesDuplicated: meta.framesDuplicated,
-      mode: meta.mode, burnIn: meta.burnIn?.length ? meta.burnIn : undefined,
+      mode: meta.mode, burnIn: meta.burnIn?.length ? meta.burnIn : undefined, stabiliser: meta.stabiliser, retime: meta.retime,
     },
     sample: currentSample(),
   }

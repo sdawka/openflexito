@@ -4,35 +4,62 @@
 import type { RgbaFrame } from '../frameChain'
 import type { VideoModeRun, ModeOutput } from './types'
 import { StableLevels, AnchoredWhiteBalance, BackgroundFlattener, applyLut3, localContrast, relief, highPassView } from '../../algo/videoTone'
+import { VideoFlat } from '../../algo/videoFlat'
 import { device } from '../../store/device.svelte'
 import { OutBuffer } from './common'
+
+/** The reference flat-field/dark (`algo/videoFlat.ts`) the Enhance mode divides by when
+ *  `flattenMode` is `'reference'`. The integrator captures/persists it (capture buttons, IndexedDB
+ *  via `toJson`/`fromJson`) and hands it over here; `null` clears it. A run reads it at every frame,
+ *  so a reference captured mid-recording takes effect immediately. */
+let videoFlat: VideoFlat | null = null
+export function setVideoFlat(flat: VideoFlat | null): void { videoFlat = flat }
+export function getVideoFlat(): VideoFlat | null { return videoFlat }
 
 export interface EnhanceVideoParams {
   levels: boolean; lowPct: number; highPct: number
   /** soft highlight roll-off (0 = hard clip) */
   knee: boolean
+  /** bounded stretch: at most this fraction of the range is remapped (0.25; 1 = unbounded) */
+  levelsMaxStretch?: number
+  /** 0..1 mix of the levels table with identity (1) */
+  levelsStrength?: number
   /** reference-anchored software white balance (lock the camera's AWB first) */
   wb: boolean
-  /** rolling background flattening */
+  /** background flattening */
   flatten: boolean
+  /** `'rolling'`: live estimate (`BackgroundFlattener`); `'reference'`: divide by the captured
+   *  blank-field/dark maps from `setVideoFlat` (falls back to nothing while none is ready) */
+  flattenMode?: 'rolling' | 'reference'
+  /** reference flat only: blend the gain toward unity, 0..1 (1) */
+  flatStrength?: number
   clarity: number; scale: number
 }
 export function enhanceVideoMode(p: EnhanceVideoParams): VideoModeRun {
   const lv = new StableLevels(p.lowPct, p.highPct, 0.03, 2, 40, 0.3, p.knee ? 0.85 : 0)
+  lv.maxStretch = p.levelsMaxStretch ?? 0.25
+  lv.strength = p.levelsStrength ?? 1
   const wb = new AnchoredWhiteBalance()
   const flat = new BackgroundFlattener()
+  const flattenMode = p.flattenMode ?? 'rolling'
+  const flatStrength = p.flatStrength ?? 1
   const lut = new Uint8ClampedArray(256)
   const luts: [Uint8ClampedArray, Uint8ClampedArray, Uint8ClampedArray] = [new Uint8ClampedArray(256), new Uint8ClampedArray(256), new Uint8ClampedArray(256)]
   const identity = new Uint8ClampedArray(256).map((_, i) => i)
   const a = new OutBuffer(), b = new OutBuffer(), c = new OutBuffer()
   let n = 0
+  const refReady = () => flattenMode === 'reference' && !!videoFlat?.ready
   return {
     id: 'enhance',
     process(f: RgbaFrame): ModeOutput {
       n++
       const frozen = device.moving
       let src = f.data
-      if (p.flatten) { const o = c.get(f.width, f.height); flat.update(src, f.width, f.height, o, frozen); src = o }
+      if (p.flatten) {
+        const o = c.get(f.width, f.height)
+        if (flattenMode === 'reference') { if (videoFlat?.ready) { videoFlat.apply(src, f.width, f.height, o, flatStrength); src = o } }
+        else { flat.update(src, f.width, f.height, o, frozen); src = o }
+      }
       if (p.levels || p.wb) {
         const base = p.levels ? lv.update(src, lut, 4, frozen) : identity
         if (p.wb) { wb.update(src, 4, frozen); wb.luts(base, luts) } else { luts[0].set(base); luts[1].set(base); luts[2].set(base) }
@@ -42,8 +69,8 @@ export function enhanceVideoMode(p: EnhanceVideoParams): VideoModeRun {
       return { frame: { data: src, width: f.width, height: f.height } }
     },
     reset() { lv.reset(); wb.reset(); flat.reset() },
-    status: () => `${n} frames${p.levels ? ` · levels ${Math.round(lv.black)}–${Math.round(lv.white)}` : ''}${p.wb ? (wb.active ? ` · WB ${wb.gains.map((g) => g.toFixed(2)).join('/')}` : ' · WB idle (no bright background)') : ''}${p.clarity ? ` · clarity ${p.clarity}` : ''}`,
-    stats: () => ({ frames: n, levels: p.levels, black: Math.round(lv.black), white: Math.round(lv.white), knee: p.knee, wb: p.wb ? wb.gains.map((g) => +g.toFixed(3)) : false, flatten: p.flatten, clarity: p.clarity, scale: p.scale }),
+    status: () => `${n} frames${p.levels ? ` · levels ${Math.round(lv.window().black)}–${Math.round(lv.window().white)}` : ''}${p.wb ? (wb.active ? ` · WB ${wb.gains.map((g) => g.toFixed(2)).join('/')}` : ' · WB idle (no bright background)') : ''}${p.flatten ? (flattenMode === 'reference' ? (refReady() ? ' · flat: reference' : ' · flat: no reference captured') : ' · flat: rolling') : ''}${p.clarity ? ` · clarity ${p.clarity}` : ''}`,
+    stats: () => ({ frames: n, levels: p.levels, black: Math.round(lv.black), white: Math.round(lv.white), maxStretch: lv.maxStretch, levelsStrength: lv.strength, knee: p.knee, wb: p.wb ? wb.gains.map((g) => +g.toFixed(3)) : false, flatten: p.flatten, flattenMode, flatStrength, flatReference: refReady(), clarity: p.clarity, scale: p.scale }),
   }
 }
 

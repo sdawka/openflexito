@@ -3,8 +3,8 @@
  *  ("Decisions -> LUTs") and `services/lookProcessor.ts` for how this feeds the frame chain.
  *
  *  `lutId` selects the base LUT: `'none'`, a built-in colour map as `cm:<algo/colormaps.ts key>`, or a
- *  user-imported LUT's id (resolved against `myLuts`, loaded from `store/lutDb.ts`). Adjustments (levels,
- *  saturation, vibrance, hue) are baked with `algo/curves.ts#bakeAdjustments` and composed on top of the
+ *  user-imported LUT's id (resolved against `myLuts`, loaded from `store/lutDb.ts`). Adjustments (CDL grade,
+ *  filmic preset, levels, saturation, vibrance, hue, curves, mixer) are baked with `algo/curves.ts#bakeAdjustments` and composed on top of the
  *  selected LUT into one baked `Lut3D` - `current` is that composition as an `algo/lut.ts#Look`, memoised
  *  so the GPU renderer (`gfx/lutGl.ts`) only re-uploads when it actually changes (compared by reference,
  *  not a separate version counter).
@@ -17,7 +17,8 @@
  *  lookBakeIntoRecording` for the recorder target, does that. */
 
 import { isLut3D, identity1D, sample1D, bakeLook, type Look, type Lut, type Lut1D, type Lut3D, sampleTetra, parseLut, parseImageJLut, haldToLut3D, toCube } from '../algo/lut'
-import { bakeAdjustments, composeLut1D, levelsToLut1D, type ChannelMixer } from '../algo/curves'
+import { bakeAdjustments, composeLut1D, levelsToLut1D, filmicCurve, filmicLut1D, FILMIC_DEFAULT_EXPOSURE, type ChannelMixer, type FilmicPreset } from '../algo/curves'
+import { identityCdl, isIdentityCdl, isSeparableCdl, cdlToLut1D, toCdlXml, parseCdlXml, type Cdl } from '../algo/cdl'
 import { curveChannelsToFns, curveChannelsToLut1D, identityCurveChannels, isIdentityCurveChannels, type CurveChannels } from '../algo/curvePoints'
 import { sampleLutToStops, stopsToLut1D, type Stop } from '../algo/gradientStops'
 import { COLORMAPS } from '../algo/colormaps'
@@ -52,6 +53,8 @@ const KEY = 'openflexito.look'
 const BAKE_SIZE = 33
 
 export interface Levels { black: number; white: number; gamma: number }
+/** Filmic tone preset + linear exposure scale (`algo/curves.ts#filmicCurve`); `neutral` = off. */
+export interface Filmic { preset: FilmicPreset; exposure: number }
 
 interface PersistedLook {
   enabled: boolean
@@ -67,12 +70,15 @@ interface PersistedLook {
   curves: CurveChannels | null
   channelMixer: ChannelMixer | null
   gradientStops: Stop[] | null
+  cdl: Cdl
+  filmic: Filmic
 }
 
 const defaults: PersistedLook = {
   enabled: false, lutId: 'none', strength: 1, input: 'srgb', pseudo: false, invert: false,
   levels: { black: 0, white: 1, gamma: 1 }, saturation: 0, vibrance: 0, hue: 0,
   curves: null, channelMixer: null, gradientStops: null,
+  cdl: identityCdl(), filmic: { preset: 'neutral', exposure: FILMIC_DEFAULT_EXPOSURE },
 }
 
 /** Reconstruct an `algo/lut.ts` `Lut` from a `StoredLut` (see `lutDb.ts`'s doc for the `kind: '1d'`
@@ -131,6 +137,10 @@ export class LookStore {
   /** When non-null, this gradient (built by `GradientEditor`) is the LUT source instead of `lutId` -
    *  see `resolveSelected`. */
   gradientStops = $state<Stop[] | null>(defaults.gradientStops)
+  /** ASC CDL grade node (`algo/cdl.ts`), applied after the channel mixer and before the curves. */
+  cdl = $state<Cdl>(identityCdl())
+  /** Filmic preset (applied after the CDL, before the curves). */
+  filmic = $state<Filmic>({ ...defaults.filmic })
   myLuts = $state<StoredLut[]>([])
 
   constructor() { this.load() }
@@ -155,8 +165,10 @@ export class LookStore {
     const lv = this.levels
     const hasCurves = !!this.curves && !isIdentityCurveChannels(this.curves)
     const hasMixer = !!this.channelMixer && !mixerEquals(this.channelMixer, IDENTITY_MIXER)
+    const hasCdl = !isIdentityCdl(this.cdl)
+    const hasFilmic = this.filmic.preset !== 'neutral'
     const hasAdjustments = this.saturation !== 0 || this.vibrance !== 0 || this.hue !== 0
-      || lv.black !== 0 || lv.white !== 1 || lv.gamma !== 1 || hasCurves || hasMixer
+      || lv.black !== 0 || lv.white !== 1 || lv.gamma !== 1 || hasCurves || hasMixer || hasCdl || hasFilmic
     if (!selected && !hasAdjustments) return null
     let cube: Lut3D | undefined
     if (selected) {
@@ -172,6 +184,8 @@ export class LookStore {
         levels: lv, saturation: this.saturation, vibrance: this.vibrance, hue: this.hue,
         curves: hasCurves ? curveChannelsToFns(this.curves!) : undefined,
         channelMixer: hasMixer ? this.channelMixer! : undefined,
+        cdl: hasCdl ? $state.snapshot(this.cdl) as Cdl : undefined,
+        filmic: hasFilmic ? filmicCurve(this.filmic.preset, this.filmic.exposure) : undefined,
       }, BAKE_SIZE)
       cube = cube ? composeCubes(cube, adjCube, BAKE_SIZE) : adjCube
     }
@@ -188,6 +202,8 @@ export class LookStore {
       this.pseudo = p.pseudo; this.invert = p.invert; this.levels = p.levels
       this.saturation = p.saturation; this.vibrance = p.vibrance; this.hue = p.hue
       this.curves = p.curves; this.channelMixer = p.channelMixer; this.gradientStops = p.gradientStops
+      this.cdl = { ...identityCdl(), ...p.cdl }
+      this.filmic = { ...defaults.filmic, ...p.filmic }
     } catch { /* private mode, or no localStorage (tests) */ }
   }
 
@@ -198,6 +214,7 @@ export class LookStore {
         pseudo: this.pseudo, invert: this.invert, levels: this.levels,
         saturation: this.saturation, vibrance: this.vibrance, hue: this.hue,
         curves: this.curves, channelMixer: this.channelMixer, gradientStops: this.gradientStops,
+        cdl: this.cdl, filmic: this.filmic,
       }
       localStorage.setItem(KEY, JSON.stringify(p))
     } catch { /* private mode etc. */ }
@@ -208,6 +225,22 @@ export class LookStore {
   reset(): void {
     this.levels = { ...defaults.levels }; this.saturation = defaults.saturation; this.vibrance = defaults.vibrance; this.hue = defaults.hue
     this.curves = null; this.channelMixer = null
+    this.cdl = identityCdl(); this.filmic = { ...defaults.filmic }
+    this.save()
+  }
+
+  /** Reset only the CDL node (slope/offset/power/saturation) to identity. */
+  resetCdl(): void { this.cdl = identityCdl(); this.save() }
+
+  /** Download the CDL node as an ASC `.cdl` XML file (identity CDL still exports - it's a valid file). */
+  exportCdl(): void {
+    const text = toCdlXml($state.snapshot(this.cdl) as Cdl, 'openflexito-look')
+    download(new Blob([text], { type: 'application/xml' }), blobFileName({ when: new Date().toISOString(), name: 'Grade' }, 'image', 'cdl'))
+  }
+
+  /** Load a `.cdl` / `.ccc` / `.cc` file into the CDL node (replaces the current one). */
+  async importCdl(file: File): Promise<void> {
+    this.cdl = parseCdlXml(await file.text())
     this.save()
   }
 
@@ -290,7 +323,8 @@ export class LookStore {
    *  reset every adjustment/curve/mixer/gradient back to neutral - so the live result looks identical
    *  before and after the save. Stored as a compact 1D 256-entry LUT when the whole pipeline is
    *  channel-separable (no 3D cube source, no pseudo-colour, no hue/saturation/vibrance, no channel
-   *  mixer - curves and levels are pointwise per channel, so they stay 1D-safe); otherwise a 33^3 cube. */
+   *  mixer, CDL saturation exactly 1 - curves, levels, the CDL's slope/offset/power and the filmic curve
+   *  are pointwise per channel, so they stay 1D-safe); otherwise a 33^3 cube. */
   async saveAsLut(name: string): Promise<StoredLut> {
     const cur = this.current
     if (!cur) throw new Error('nothing to save: enable the Look and set a LUT or adjustment first')
@@ -298,11 +332,17 @@ export class LookStore {
     const hasCubeSource = !!selected && isLut3D(selected)
     const hasCurves = !!this.curves && !isIdentityCurveChannels(this.curves)
     const hasMixer = !!this.channelMixer && !mixerEquals(this.channelMixer, IDENTITY_MIXER)
+    const hasCdl = !isIdentityCdl(this.cdl)
+    const hasFilmic = this.filmic.preset !== 'neutral'
     const separable = !hasCubeSource && !this.pseudo && this.hue === 0 && this.saturation === 0 && this.vibrance === 0 && !hasMixer
+      && (!hasCdl || isSeparableCdl(this.cdl))
 
     let lut: Lut
     if (separable) {
       let l1: Lut1D = (selected as Lut1D | null) ?? identity1D(256)
+      // same order as `bakeAdjustments`: (mixer,) CDL, filmic, curves, levels
+      if (hasCdl) l1 = composeLut1D(l1, cdlToLut1D($state.snapshot(this.cdl) as Cdl))
+      if (hasFilmic) l1 = composeLut1D(l1, filmicLut1D(this.filmic.preset, this.filmic.exposure))
       if (hasCurves) l1 = composeLut1D(l1, curveChannelsToLut1D(this.curves!))
       const lv = this.levels
       if (lv.black !== 0 || lv.white !== 1 || lv.gamma !== 1) l1 = composeLut1D(l1, levelsToLut1D(lv.black, lv.white, lv.gamma))
@@ -319,6 +359,8 @@ export class LookStore {
     this.gradientStops = null
     this.curves = null
     this.channelMixer = null
+    this.cdl = identityCdl()
+    this.filmic = { ...defaults.filmic }
     this.levels = { ...defaults.levels }
     this.saturation = defaults.saturation
     this.vibrance = defaults.vibrance

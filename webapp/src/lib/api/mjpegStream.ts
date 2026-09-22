@@ -24,6 +24,9 @@ export interface MjpegFrame {
   meta: FrameMeta | null
   /** JPEG byte size of this part, for diagnostics/bitrate estimates. */
   size: number
+  /** The part's JPEG bytes (a view valid until the handler returns; copy to keep). A recorder's
+   *  pre-roll ring keeps these instead of decoded bitmaps: ~100 kB per frame instead of 8 MB. */
+  bytes: Uint8Array
 }
 
 export type MjpegFrameHandler = (frame: MjpegFrame) => void
@@ -95,7 +98,7 @@ export class MjpegStream {
           if (body.length) {
             try {
               const bitmap = await createImageBitmap(new Blob([body], { type: 'image/jpeg' }))
-              onFrame({ bitmap, ts: meta?.ts ?? meta?.t ?? null, seq: meta?.seq ?? -1, meta, size: body.length })
+              onFrame({ bitmap, ts: meta?.ts ?? meta?.t ?? null, seq: meta?.seq ?? -1, meta, size: body.length, bytes: body })
             } catch { /* a corrupt/truncated part: skip it, keep the connection open */ }
           }
         }

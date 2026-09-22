@@ -740,6 +740,58 @@ if (moves) await step('super-resolution video dithers xy, drizzles and returns t
   await panel.locator('label:has-text("Stabilise") input[type=checkbox]').check()
 })
 
+await step('constant-rate timing and rotation stabilisation record a playable video with their meta', async () => {
+  await nav('live')
+  const panel = await tool('Photo')
+  await panel.locator('label:has-text("Timing") select').selectOption('cfr')
+  const fps = panel.locator('label:has-text("fps") input[type=number]')
+  await fps.click({ clickCount: 3 }); await fps.pressSequentially('30'); await fps.dispatchEvent('change')
+  const stab = panel.locator('label:has-text("Stabilise") input[type=checkbox]')
+  if (!(await stab.isChecked())) await stab.check()
+  await panel.locator('label:has-text("Rotation") input[type=checkbox]').check()
+  await panel.locator('select[aria-label="video mode"]').selectOption('plain')
+  await page.click('button:has-text("Record video")')
+  await page.waitForFunction(() => /Stop · \d+ s/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 8000 })
+  await page.waitForTimeout(2500)
+  await page.click('button:has-text("Stop ·")')
+  await page.waitForFunction(() => /saved "Video live view/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 20000 })
+  const { size, details } = await openLatestVideo('Video live view')
+  expect(size.d > 1.5, `cfr video duration ${size.d}`)
+  expect(/timing cfr 30 fps · \d+ duplicated/.test(details) && /stabiliser normal \+ rotation/.test(details), `meta missing: ${details.slice(0, 200)}`)
+  await nav('live'); await tool('Photo')
+  await panel.locator('label:has-text("Timing") select').selectOption('vfr')
+  await panel.locator('label:has-text("Rotation") input[type=checkbox]').uncheck()
+})
+
+await step('Look panel CDL grade changes the live canvas and a .cdl round-trips through save-as-LUT', async () => {
+  await nav('live')
+  const panel = await tool('Look')
+  await panel.locator('label.chk:has-text("enabled") input[type=checkbox]').check()
+  await page.selectOption('.panel:has(h3:has-text("Look")) select[aria-label="LUT"]', { label: 'Okabe-Ito orange' }).catch(() => {})
+  await page.waitForSelector('canvas.processed', { timeout: 8000 })
+  await panel.locator('details:has(summary:has-text("Grade")) summary').click()
+  const sat = panel.locator('details:has(summary:has-text("Grade")) input[type=range]').last()
+  await sat.fill('0'); await sat.dispatchEvent('input'); await sat.dispatchEvent('change')
+  await page.waitForTimeout(800)
+  const grey = await page.evaluate(() => {
+    const c = document.querySelector('canvas.processed'); const ctx = c.getContext('2d'); const d = ctx.getImageData(c.width >> 1, c.height >> 1, 32, 32).data
+    let sat = 0; for (let i = 0; i < d.length; i += 4) sat += Math.max(d[i], d[i + 1], d[i + 2]) - Math.min(d[i], d[i + 1], d[i + 2]); return sat / (d.length / 4)
+  })
+  expect(grey < 12, `saturation 0 should give a grey canvas, mean chroma ${grey.toFixed(1)}`)
+  await panel.locator('button:has-text("Reset grade")').click()
+  await panel.locator('label.chk:has-text("enabled") input[type=checkbox]').uncheck()
+})
+
+await step('focus peaking paints the live canvas only while enabled', async () => {
+  await nav('live')
+  const cam = await tool('Camera')
+  const chk = cam.locator('label:has-text("focus peaking") input[type=checkbox]')
+  await chk.check()
+  await page.waitForSelector('canvas.processed', { timeout: 8000 })
+  await chk.uncheck()
+  await page.waitForTimeout(600)
+})
+
 await step('projection and optical-flow modes record at the stream size with their stats', async () => {
   const sw = await streamWidth()
   await recordMode('project', 2, /saved "Video projection over time/)
@@ -758,29 +810,25 @@ await step('kymograph mode outputs a side-by-side space–time image', async () 
   expect(/rows 600/.test(details) && /length \d+/.test(details), `kymograph stats missing: ${details.slice(0, 160)}`)
 })
 
-await step('motion-triggered mode arms and records the fake specimen when it moves', async () => {
-  // the fake scene is static: trigger by jogging (the mode inhibits during the move, so the trigger
-  // happens on the settle frames afterwards) — expect at least one event and some kept frames
+await step('motion-triggered mode arms and records when the fake\'s clock text changes', async () => {
+  // the fake scene is static except for its on-frame clock, which redraws once a second: a real,
+  // small motion event. Stage moves and light changes are inhibited by design, so they are not used.
   await nav('live')
   const panel = await tool('Photo')
-  const sens = panel.locator('label:has-text("Trigger (%)") input')
   await panel.locator('select[aria-label="video mode"]').selectOption('trigger')
-  await sens.click({ clickCount: 3 }); await sens.pressSequentially('0.05'); await sens.dispatchEvent('change')
+  const sens = panel.locator('label:has-text("Trigger (%)") input')
+  await sens.click({ clickCount: 3 }); await sens.pressSequentially('0.01'); await sens.dispatchEvent('change')
   const stabilise = panel.locator('label:has-text("Stabilise") input[type=checkbox]')
   if (await stabilise.isChecked()) await stabilise.uncheck()
   await page.click('button:has-text("Record video")')
   await page.waitForFunction(() => /Stop · \d+ s/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 8000 })
-  await page.waitForTimeout(2500)   // arm
-  if (moves) { await tool('Stage'); await page.click('button[title="D / →"]'); await page.waitForTimeout(1500); await page.click('button[title="A / ←"]'); await page.waitForTimeout(2500); await tool('Photo') }
-  else await page.waitForTimeout(3000)
+  await page.waitForTimeout(6500)   // 2 s arming + a few clock ticks
   await page.click('button:has-text("Stop ·")')
   await page.waitForFunction(() => /saved "Video motion-triggered|nothing recorded/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 20000 })
   const txt = await panel.innerText()
-  if (moves) {
-    expect(/saved "Video motion-triggered/.test(txt), `trigger did not fire on the jog: ${txt.match(/(saved|nothing)[^\n]*/)?.[0]}`)
-    const { details } = await openLatestVideo('Video motion-triggered')
-    expect(/events [1-9]/.test(details), `trigger stats: ${details.slice(0, 160)}`)
-  } else expect(/nothing recorded/.test(txt), 'a static scene must not trigger')
+  expect(/saved "Video motion-triggered/.test(txt), `trigger did not fire on the clock: ${txt.match(/(saved|nothing)[^\n]*/)?.[0]}`)
+  const { details } = await openLatestVideo('Video motion-triggered')
+  expect(/events [1-9]/.test(details) && /preRollS 2/.test(details), `trigger stats: ${details.slice(0, 200)}`)
 })
 
 if (moves) await step('focus servo mode probes z and returns to the starting z', async () => {
@@ -856,7 +904,7 @@ await step('Look panel applies a built-in colour map to the live canvas', async 
 await step('an imported .cube LUT appears under "My LUTs"', async () => {
   const panel = page.locator('.panel:has(h3:has-text("Look"))')
   const cube = 'TITLE "e2e-test"\nLUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n'
-  await panel.locator('input[type=file]').setInputFiles({ name: 'e2e-test.cube', mimeType: 'text/plain', buffer: Buffer.from(cube) })
+  await panel.locator('input[type=file][accept*=".cube"]').setInputFiles({ name: 'e2e-test.cube', mimeType: 'text/plain', buffer: Buffer.from(cube) })
   await page.waitForFunction(() => /e2e-test/.test(document.body.textContent || ''), null, { timeout: 8000 })
   expect(/e2e-test/.test(await panel.innerText()), 'imported LUT "e2e-test" not listed under My LUTs')
 })

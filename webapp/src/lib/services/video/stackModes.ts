@@ -9,6 +9,7 @@ import type { RgbaFrame } from '../frameChain'
 import type { VideoModeRun, ModeFrameInfo, ModeOutput } from './types'
 import { SlidingMean, ExpIntegrator, TemporalMedian, QualityGate, frameSharpness } from '../../algo/videoStack'
 import { BurstMerge } from '../../algo/burstMerge'
+import { ChromaDenoiser } from '../../algo/chromaDenoise'
 import { binRgba, binnedSize, upscaleRgba, type BinKernel } from '../../algo/binning'
 import { lockCamera, type CameraLock } from '../cameraLock'
 import { StageShiftTracker, OutBuffer } from './common'
@@ -23,9 +24,19 @@ function exposureLock(on: boolean): Pick<VideoModeRun, 'start' | 'stop'> & { loc
   }
 }
 
-export interface DenoiseParams { frames: number; c: number; lockExposure: boolean }
+export interface DenoiseParams {
+  frames: number; c: number; lockExposure: boolean
+  /** chroma-heavy stage after the merge (`algo/chromaDenoise.ts`): 0 = off, 1 = default strength;
+   *  scales the guided filter's ε by chroma² and the chroma EMA weight by chroma (quality.md #2) */
+  chroma?: number
+}
+/** Chroma denoiser options for a strength knob: ε = 64·s², temporal weight 0.8·s (≤ 0.95). */
+function chromaOptions(s: number) { return { radius: 4, eps: 64 * s * s, temporal: Math.min(0.95, 0.8 * s) } }
+
 export function denoiseMode(p: DenoiseParams): VideoModeRun {
   const merge = new BurstMerge({ maxFrames: Math.max(2, p.frames), c: p.c, maxShiftPx: 60 })
+  const chromaStrength = p.chroma ?? 0
+  const chroma = chromaStrength > 0 ? new ChromaDenoiser(chromaOptions(chromaStrength)) : null
   const shift = new StageShiftTracker()
   const lk = exposureLock(p.lockExposure)
   let n = 0
@@ -35,12 +46,19 @@ export function denoiseMode(p: DenoiseParams): VideoModeRun {
     start: lk.start, stop: lk.stop,
     process(f: RgbaFrame): ModeOutput {
       n++
-      const out = merge.push(f.data, f.width, f.height, shift.next())
+      const s = shift.next()
+      let out = merge.push(f.data, f.width, f.height, s)
+      if (chroma) {
+        // the merge warps its history by the stage shift; the chroma EMA is not warped, so a real
+        // move restarts it (chroma rebuilds in a few frames, the luma path is unaffected)
+        if (Math.abs(s.dx) + Math.abs(s.dy) > 0.5) chroma.reset()
+        out = chroma.push(out, f.width, f.height)
+      }
       return { frame: { data: out, width: f.width, height: f.height } }
     },
-    reset() { merge.reset(); shift.reset() },
-    status: () => `${n} frames · averaging ${merge.meanCount.toFixed(1)}/${p.frames} · σ ${Math.sqrt(merge.sigma2[8]).toFixed(1)}${lk.locked() ? ' · AE locked' : ''}`,
-    stats: () => ({ frames: n, maxFrames: p.frames, c: p.c, meanCount: +merge.meanCount.toFixed(2), sigmaMid: +Math.sqrt(merge.sigma2[8]).toFixed(2), lockedAe: lk.locked() }),
+    reset() { merge.reset(); shift.reset(); chroma?.reset() },
+    status: () => `${n} frames · averaging ${merge.meanCount.toFixed(1)}/${p.frames} · σ ${Math.sqrt(merge.sigma2[8]).toFixed(1)}${chroma ? ` · chroma ×${chromaStrength}` : ''}${lk.locked() ? ' · AE locked' : ''}`,
+    stats: () => ({ frames: n, maxFrames: p.frames, c: p.c, chroma: chromaStrength, meanCount: +merge.meanCount.toFixed(2), sigmaMid: +Math.sqrt(merge.sigma2[8]).toFixed(2), lockedAe: lk.locked() }),
   }
 }
 

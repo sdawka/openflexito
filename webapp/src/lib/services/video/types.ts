@@ -50,6 +50,11 @@ export interface VideoModeRun {
   /** The mode needs the raw, un-stabilised frame geometry (it registers frames itself or dithers
    *  the stage in xy on purpose); the recorder then records with stabilisation off. */
   readonly disablesStabiliser?: boolean
+  /** Seconds of stream to keep in a pre-roll ring (raw JPEG parts). When `process` returns a frame
+   *  after having returned `null` (an event starts), the recorder first encodes the buffered frames
+   *  with their own timestamps, bypassing `process`, then continues live. Only meaningful for gating
+   *  modes (motion-triggered recording). */
+  readonly preRollS?: number
   /** Output frame size for a given working-canvas size; default: unchanged. Called once before the
    *  encoder is configured, so it must be a pure function of its inputs. */
   outputSize?(w: number, h: number): { w: number; h: number }

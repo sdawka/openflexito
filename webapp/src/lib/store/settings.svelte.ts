@@ -45,6 +45,11 @@ export interface Settings {
   /** last chosen video mode (`services/video/videoModes.ts#VideoModeId`, kept as string like
    *  `videoCodec`), its per-mode parameters (merged over `DEFAULT_VIDEO_PARAMS` at load) and the
    *  burn-in overlays (`services/video/burnIn.ts#BurnInKind`) */
+  videoStabiliseStrength: 'light' | 'normal' | 'strong'
+  videoStabiliseRotation: boolean
+  videoStabiliseEdges: 'crop' | 'hold'
+  videoRetime: 'vfr' | 'cfr'
+  videoRetimeFps: number
   videoMode: string
   videoModeParams: Record<string, Record<string, unknown>>
   videoBurnIn: string[]
@@ -71,6 +76,11 @@ export interface Settings {
    *  `Viewer.svelte`'s gallery display, both of which already depend on `settings`. */
   lookBakeIntoRecording: boolean
   lookApplyInGallery: boolean
+  /** Viewfinder overlays (`services/peakingProcessor.ts`, frame chain order 950, `view` target only):
+   *  focus peaking paints strong edges in `peakingColour` (CSS hex), zebra stripes clipped/crushed pixels. */
+  peaking: boolean
+  zebra: boolean
+  peakingColour: string
 }
 
 const defaults: Settings = {
@@ -87,10 +97,12 @@ const defaults: Settings = {
   showScaleBar: true,
   videoCodec: 'vp9', videoBitrateMbps: 12, videoStabilise: true,
   videoCodecPref: 'auto', videoContainer: 'mp4', videoQuality: 'high', videoKeyframeS: 2, videoDeflicker: false, deflickerLive: false,
+  videoStabiliseStrength: 'normal', videoStabiliseRotation: false, videoStabiliseEdges: 'crop', videoRetime: 'vfr', videoRetimeFps: 18,
   videoMode: 'plain', videoModeParams: {}, videoBurnIn: [],
   superresScale: 2, superresPixfrac: 0.5, superresSharpen: false,
   liveDenoise: false, liveDenoiseRecord: false, liveDenoiseAlpha: 0.7, enhancePreviewWidth: 1024,
   lookBakeIntoRecording: false, lookApplyInGallery: true,
+  peaking: false, zebra: false, peakingColour: '#00ff00',
 }
 
 function load(): Settings {

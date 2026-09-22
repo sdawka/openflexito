@@ -134,9 +134,9 @@ export function halfPixelSteps(axis: 'x' | 'y'): { steps: number; px: [number, n
   return best ? { steps: best.steps, px: best.px } : null
 }
 
-export interface SuperresVideoParams { pixfrac: number; window: number; scale: 1.5 | 2; dither: boolean; keep: number }
+export interface SuperresVideoParams { pixfrac: number; window: number; scale: 1.5 | 2; dither: boolean; keep: number; robust: boolean; robustK: number }
 export function superresVideoMode(p: SuperresVideoParams): VideoModeRun {
-  type R = { data: Uint8ClampedArray; width: number; height: number; t: number | null; coverage: number; frames: number; rejected: number; fused: number }
+  type R = { data: Uint8ClampedArray; width: number; height: number; t: number | null; coverage: number; frames: number; rejected: number; fused: number; robustRejectedFrac?: number }
   let worker: LatestResultWorker<VideoSrMessage, R> | null = null
   let dither: StageDither | null = null
   let lock: CameraLock | null = null
@@ -161,7 +161,7 @@ export function superresVideoMode(p: SuperresVideoParams): VideoModeRun {
         dither.start()
       }
       worker = new LatestResultWorker(new Worker(new URL('../../workers/videoSrWorker.ts', import.meta.url), { type: 'module' }))
-      worker.post({ type: 'init', scale: p.scale, pixfrac: p.pixfrac, window: p.window })
+      worker.post({ type: 'init', scale: p.scale, pixfrac: p.pixfrac, window: p.window, robust: p.robust, robustK: p.robustK })
     },
     accept() { if (dither && !dither.settled()) { dropped++; return false } return true },
     process(f: RgbaFrame, info: ModeFrameInfo): ModeOutput | null {
@@ -180,8 +180,8 @@ export function superresVideoMode(p: SuperresVideoParams): VideoModeRun {
     },
     reset() { worker?.post({ type: 'reset' }); gate.reset() },
     async stop() { await dither?.stop(); worker?.terminate(); worker = null; await lock?.release(); lock = null },
-    status: () => `${last?.fused ?? 0} fused · window ${last?.frames ?? 0}/${p.window} · coverage ${Math.round((last?.coverage ?? 0) * 100)} %${last?.rejected ? ` · ${last.rejected} restarts` : ''}${p.dither ? (calibration.csm ? ` · dither ${pattern[1]?.x ?? 1}/${pattern[3]?.y ?? 1} steps · ${dropped} unsettled dropped` : ' · no calibration: 1-step dither') : ` · lucky gate kept ${gate.kept}/${gate.seen}`}${ditherNote(dither)}`,
-    stats: () => ({ fused: last?.fused ?? 0, rejected: last?.rejected ?? 0, window: p.window, pixfrac: p.pixfrac, scale: p.scale, dither: p.dither, calibrated: !!calibration.csm, unsettledDropped: dropped, gated, ditherError: dither?.error ?? undefined }),
+    status: () => `${last?.fused ?? 0} fused · window ${last?.frames ?? 0}/${p.window} · coverage ${Math.round((last?.coverage ?? 0) * 100)} %${last?.rejected ? ` · ${last.rejected} restarts` : ''}${p.robust && last?.robustRejectedFrac != null ? ` · ${Math.round(last.robustRejectedFrac * 100)} % rejected as motion` : ''}${p.dither ? (calibration.csm ? ` · dither ${pattern[1]?.x ?? 1}/${pattern[3]?.y ?? 1} steps · ${dropped} unsettled dropped` : ' · no calibration: 1-step dither') : ` · lucky gate kept ${gate.kept}/${gate.seen}`}${ditherNote(dither)}`,
+    stats: () => ({ fused: last?.fused ?? 0, rejected: last?.rejected ?? 0, window: p.window, pixfrac: p.pixfrac, scale: p.scale, dither: p.dither, robust: p.robust, robustRejectedFrac: last?.robustRejectedFrac, calibrated: !!calibration.csm, unsettledDropped: dropped, gated, ditherError: dither?.error ?? undefined }),
   }
 }
 

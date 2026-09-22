@@ -289,6 +289,8 @@
           {#if item.video.mode.stats && Object.keys(item.video.mode.stats).length}<div class="muted">{Object.entries(item.video.mode.stats).map(([k, v]) => `${k} ${typeof v === 'number' ? (Number.isInteger(v) ? v : v.toFixed(2)) : v}`).join(' · ')}</div>{/if}
         {/if}
         {#if item.video.burnIn?.length}<div class="muted">burn-in: {item.video.burnIn.join(', ')}</div>{/if}
+        {#if item.video.stabiliser}<div class="muted">stabiliser {item.video.stabiliser.strength}{item.video.stabiliser.rotation ? ' + rotation' : ''} · {item.video.stabiliser.edges} edges</div>{/if}
+        {#if item.video.retime}<div class="muted">timing {item.video.retime.mode} {item.video.retime.fps} fps · {item.video.retime.duplicates} duplicated · {item.video.retime.dropped} dropped</div>{/if}
       {/if}
     </div>
   {/if}

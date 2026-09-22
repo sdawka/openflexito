@@ -126,3 +126,35 @@ describe('bakeAdjustments', () => {
     expect(out[1]).toBeCloseTo(1, 1)
   })
 })
+
+describe('filmic presets', () => {
+  it('neutral is identity; soft and flat are monotone with 0 → 0 and top ≤ 1', async () => {
+    const { filmicCurve, filmicLut1D } = await import('../curves')
+    expect(filmicCurve('neutral')(0.37)).toBe(0.37)
+    for (const preset of ['soft', 'flat'] as const) {
+      const f = filmicCurve(preset)
+      expect(f(0)).toBeCloseTo(0, 6)
+      expect(f(1)).toBeLessThanOrEqual(1)
+      expect(f(1)).toBeGreaterThan(0.9)
+      let prev = -1
+      for (let i = 0; i <= 256; i++) { const y = f(i / 256); expect(y).toBeGreaterThanOrEqual(prev - 1e-9); prev = y }
+      const l = filmicLut1D(preset)
+      expect(l.size).toBe(256)
+      expect(l.r[128]).toBeCloseTo(f(128 / 255), 6)
+      expect(l.g[200]).toBe(l.r[200])
+    }
+  })
+
+  it('soft compresses the top: the last stop gains less than the identity, mids stay near identity', async () => {
+    const { filmicCurve } = await import('../curves')
+    const f = filmicCurve('soft', 1.15)
+    expect(f(1) - f(0.85)).toBeLessThan(0.15 * 0.7) // top 15 % of input maps to < 70 % of its identity span
+    expect(Math.abs(f(0.5) - 0.5)).toBeLessThan(0.2) // the ACES fit lifts mids a little by design
+    expect(filmicCurve('soft', 2)(0.5)).toBeGreaterThan(f(0.5)) // more exposure = brighter
+  })
+
+  it('flat lifts shadows more than soft', async () => {
+    const { filmicCurve } = await import('../curves')
+    expect(filmicCurve('flat')(0.1)).toBeGreaterThan(filmicCurve('soft')(0.1))
+  })
+})

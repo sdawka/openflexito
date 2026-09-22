@@ -5,7 +5,9 @@
  *  - `StableLevels`: auto-levels whose black/white points are the EMA of the frame's low/high luma
  *    percentiles (ImageJ's Enhance Contrast per frame would flicker); a new target only moves the
  *    points when it differs by more than `deadband`, and then at `rate` per frame. A scene change
- *    (percentiles jump by more than `jump`) snaps immediately.
+ *    (percentiles jump by more than `jump`) snaps immediately. `maxStretch` bounds the gain
+ *    (`docs/video-research/colour.md`, "bounded stretch": an empty field must not be stretched into
+ *    noise) and `strength` mixes the table with identity.
  *  - `localContrast`: clarity — the luma minus its large-scale mean (box blur on a `factor`× coarse
  *    grid, bilinearly upsampled), scaled by `amount` and added back. One coarse pass + one full pass.
  *  - `relief`: pseudo-DIC shading — the directional derivative of the luma along `angle`, added to
@@ -16,17 +18,40 @@ export class StableLevels {
   black = 0
   white = 255
   private init = false
+  /** Bounded stretch: the gain 255/(white − black) is capped at 1/(1 − maxStretch), i.e. at most
+   *  `maxStretch` of the 0..255 range is remapped away (0.25 → gain ≤ 1.33, window ≥ 191 codes).
+   *  When the measured window is narrower it is widened symmetrically about its centre (mid-grey
+   *  stays put) and slid back inside 0..255. 1 = unbounded (the class default, so existing callers
+   *  keep their behaviour); the video Enhance mode passes 0.25. */
+  maxStretch = 1
+  /** 0..1 mix of the table with identity (1 = full effect). */
+  strength = 1
+  private hist = new Uint32Array(256)
   /** `rate` relaxes the range slowly; `rateOut` reacts fast when content falls *outside* the current
    *  range (so nothing clips while waiting for the slow average). `knee` > 0 rolls the top of the
    *  curve into white softly instead of clipping it (`knee` = where the roll-off starts, 0.85). */
   constructor(public lowPct = 0.5, public highPct = 99.5, public rate = 0.03, public deadband = 2, public jump = 40, public rateOut = 0.3, public knee = 0) {}
+
+  /** The black/white window actually used for the table after the `maxStretch` bound. */
+  window(): { black: number; white: number } {
+    const minSpan = 255 * (1 - Math.min(1, Math.max(0, this.maxStretch)))
+    let b = this.black, w = this.white
+    if (w - b < minSpan) {
+      const mid = (b + w) / 2
+      b = mid - minSpan / 2; w = mid + minSpan / 2
+      if (b < 0) { w -= b; b = 0 }
+      if (w > 255) { b -= w - 255; w = 255 }
+    }
+    return { black: b, white: w }
+  }
 
   reset(): void { this.init = false }
 
   /** Update from a frame (sampled at `stride` pixels) and return the 256-entry LUT for this frame.
    *  `frozen` keeps the range where it is (stage moving: content changes, lighting does not). */
   update(data: Uint8ClampedArray, lut: Uint8ClampedArray, stride = 4, frozen = false): Uint8ClampedArray {
-    const hist = new Uint32Array(256)
+    const hist = this.hist
+    hist.fill(0)
     let n = 0
     for (let i = 0; i < data.length; i += 4 * stride) { hist[(data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) | 0]++; n++ }
     let lo = 0, hi = 255, acc = 0
@@ -43,12 +68,14 @@ export class StableLevels {
     }
     // an (almost) empty field has nothing to stretch: identity rather than amplified noise
     if (this.white - this.black < 16) { for (let v = 0; v < 256; v++) lut[v] = v; return lut }
-    const b = this.black, s = 1 / Math.max(1, this.white - b), k = this.knee
+    const { black: b, white: wh } = this.window()
+    const s = 1 / Math.max(1, wh - b), k = this.knee, m = Math.min(1, Math.max(0, this.strength))
     for (let v = 0; v < 256; v++) {
       let x = (v - b) * s
       if (k > 0 && x > k) x = k + (1 - k) * Math.tanh((x - k) / (1 - k))
-      const o = x * 255
-      lut[v] = o < 0 ? 0 : o > 255 ? 255 : o
+      let o = x * 255
+      o = o < 0 ? 0 : o > 255 ? 255 : o
+      lut[v] = v + (o - v) * m
     }
     return lut
   }

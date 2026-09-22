@@ -33,15 +33,15 @@ export interface VideoModeInfo {
 
 export const VIDEO_MODES: VideoModeInfo[] = [
   { id: 'plain', label: 'Live view', group: 'quality', blurb: 'The stream as it is, with the options below.', cost: 'full rate' },
-  { id: 'denoise', label: 'Temporal denoise', group: 'quality', blurb: 'HDR+-style soft Wiener merge, recursive per pixel: each pixel averages as many frames as the scene lets it (a per-pixel frame count with a measured noise curve), so noise fades where the picture is steady and moving organisms stay crisp with no hard gate. History is warped by the known stage shift, so it survives pans.', cost: 'full rate' },
+  { id: 'denoise', label: 'Temporal denoise', group: 'quality', blurb: 'HDR+-style soft Wiener merge, recursive per pixel: each pixel averages as many frames as the scene lets it (a per-pixel frame count with a measured noise curve), so noise fades where the picture is steady and moving organisms stay crisp with no hard gate. History is warped by the known stage shift, so it survives pans. Colour speckle gets an extra luma-guided smoothing at half resolution.', cost: 'full rate' },
   { id: 'integrate', label: 'Long exposure', group: 'quality', blurb: 'Mean of the last N frames (a software long exposure): noise falls by √N, dim fluorescence becomes visible, moving things smear as they would in a real long exposure.', cost: 'full rate, N-frame lag' },
   { id: 'median', label: 'Temporal median', group: 'quality', blurb: 'Per-pixel median of 3 or 5 frames: rejects hot pixels, JPEG glitches and single-frame flicker without blurring anything that stays still.', cost: 'full rate' },
   { id: 'bin', label: 'Binned', group: 'quality', blurb: 'Software 2×2/3×3/4×4 binning: the noise averages down, the file shrinks to a fraction, and the encoder stops fighting sensor noise. The edge-aware kernel keeps sharp boundaries a step instead of a smear. "Keep size" upscales back so scale bars and calibrations made on the stream stay valid.', cost: 'full rate' },
   { id: 'lucky', label: 'Lucky imaging', group: 'quality', blurb: 'Keeps only the sharpest fraction of frames (astronomers\' frame selection, live, with an exposure-invariant gradient metric): vibration and focus wobble drop out. Either at the reduced rate with the real frame times, or with dropped frames filled from the last kept one for constant-rate playback.', cost: 'reduced rate' },
   { id: 'edof', label: 'Extended depth of field', group: 'stage', drivesStage: true, blurb: 'Dithers z by ±Δz while a block-wise sharpest-over-time stack builds an all-in-focus view of a thick specimen. The stage returns to the starting z when you stop.', cost: 'worker rate, ~1 s lag' },
   { id: 'sweep', label: 'Focus sweep', group: 'stage', drivesStage: true, blurb: 'A slow triangular z sweep over ±range in N stops, recorded as it goes: a walk through the specimen\'s depth. Turn on the position burn-in to read z off the frame.', cost: 'full rate' },
-  { id: 'superres', label: 'Super-resolution zoom', group: 'stage', drivesStage: true, blurb: 'Dithers the stage by the smallest steps that shift the image by about half a pixel (through the stage↔camera calibration) and drizzles the last few registered frames of the central crop onto a 1.5× or 2× grid: a digital zoom that is actually resolved, at the source frame size. With the dither off it is "lucky drizzle": no stage motion, the specimen\'s own jitter supplies the phases and a sharpness gate rejects blurred frames, so it also works on a moving specimen.', cost: 'a few fps' },
-  { id: 'hdr', label: 'HDR (LED alternation)', group: 'stage', needsLed: true, blurb: 'Locks exposure, alternates the LED between a bright and a dim level and fuses each frame with the newest frame of the other level by well-exposedness: highlights from the dim frame (clipped bright pixels get no weight), shadows from the bright one. The LED level is restored on stop.', cost: 'full rate' },
+  { id: 'superres', label: 'Super-resolution zoom', group: 'stage', drivesStage: true, blurb: 'Dithers the stage by the smallest steps that shift the image by about half a pixel (through the stage↔camera calibration) and drizzles the last few registered frames of the central crop onto a 1.5× or 2× grid: a digital zoom that is actually resolved, at the source frame size. With the dither off it is "lucky drizzle": no stage motion, the specimen\'s own jitter supplies the phases and a sharpness gate rejects blurred frames, so it also works on a moving specimen. Frames are down-weighted where they differ from the newest one beyond the noise (Wronski et al. 2019), so a mover is not smeared.', cost: 'a few fps' },
+  { id: 'hdr', label: 'HDR (LED alternation)', group: 'stage', needsLed: true, blurb: 'Locks exposure, alternates the LED between a bright and a dim level and fuses each frame in linear light with the newest frame of the other level by well-exposedness: highlights from the dim frame (clipped bright pixels get no weight), shadows from the bright one. Frames are attributed to a level by their exposure window; a settling check on the first frames measures the LED latency and warns when the LED does not change the picture. The LED level is restored on stop.', cost: 'full rate' },
   { id: 'illum', label: 'Interleaved illumination', group: 'stage', needsLed: false, blurb: 'Alternates two illumination presets (two oblique directions, or brightfield and dark-field) frame by frame with exposure locked and combines the newest frame of each: pseudo differential phase contrast from a left/right pair, a Rheinberg colour composite from brightfield + dark-field, or a split view. Needs presets on the extra LED channels.', cost: 'half rate or less' },
   { id: 'servo', label: 'Focus servo', group: 'stage', drivesStage: true, blurb: 'Keeps a long recording sharp: every N seconds, in a quiet moment, z is nudged ±δ, the sharpness at the three positions is fitted with a parabola and z moves to the best (clamped, backlash-compensated). The probe frames are replaced by the last good frame, so the film never shows the search; z returns to its start on stop.', cost: 'full rate' },
   { id: 'motion', label: 'Motion highlight', group: 'motion', blurb: 'A running-median background (never learns something that is there less than half the time, so a resting organism is not absorbed and a passing one leaves no ghost); whatever departs from it in any colour channel is painted orange over a dimmed grey view.', cost: 'full rate' },
@@ -50,22 +50,22 @@ export const VIDEO_MODES: VideoModeInfo[] = [
   { id: 'project', label: 'Projection over time', group: 'motion', blurb: 'Fiji\'s Z Project on the time axis, live: per-pixel running max (tracks of bright particles on dark-field as a photo finish), min (paths of dark swimmers on brightfield) or range (activity), optionally fading.', cost: 'full rate' },
   { id: 'magnify', label: 'Motion magnification', group: 'motion', blurb: 'Eulerian video magnification (Wu et al. 2012): tiny periodic intensity changes in a frequency band are amplified ×α so a heartbeat, flagellum or vibration too small to see becomes obvious. The band is clamped below half the measured frame rate (~8 Hz on this stream: cilia beat faster than that and alias).', cost: 'full rate' },
   { id: 'flow', label: 'Optical flow', group: 'motion', blurb: 'Dense motion field (grid Lucas–Kanade, two levels) painted as a colour wheel: hue is the direction, brightness the speed. Shows currents, cytoplasmic streaming and swimming headings that highlight/trails cannot; the commanded stage pan is subtracted.', cost: 'full rate' },
-  { id: 'enhance', label: 'Enhance (stable)', group: 'tone', blurb: 'Video grading that does not pump: auto-levels whose black/white points ease with a dead band (fast when something would clip, slow otherwise) and a soft highlight knee; optional software white balance anchored to the first frame\'s background (lock the camera AWB first), rolling background flattening for uneven illumination, and clarity (local contrast at a chosen scale).', cost: 'full rate' },
+  { id: 'enhance', label: 'Enhance (stable)', group: 'tone', blurb: 'Video grading that does not pump: auto-levels whose black/white points ease with a dead band (fast when something would clip, slow otherwise) and a soft highlight knee; optional software white balance anchored to the first frame\'s background (lock the camera AWB first), background flattening for uneven illumination (a rolling estimate, or a captured blank-field reference that also removes dust and hot pixels), and clarity (local contrast at a chosen scale).', cost: 'full rate' },
   { id: 'relief', label: 'Relief / dark-field / phase', group: 'tone', blurb: 'Contrast methods emulated from the brightfield stream: relief renders the directional derivative as light and shadow (the DIC look), digital dark-field shows the high-pass on black, pseudo-phase shows it on grey. Visualisations for transparent, unstained samples, not phase data.', cost: 'full rate' },
   { id: 'kymograph', label: 'Kymograph', group: 'analysis', blurb: 'The video becomes a growing space–time image: each frame contributes one row sampled along a line (the Distance measurement\'s two points, or the centre line), so slopes are velocities. Cilia beat, flow in a channel and growing tips read at a glance; side-by-side keeps the live view.', cost: 'full rate' },
-  { id: 'trigger', label: 'Motion-triggered', group: 'analysis', blurb: 'Watch an empty field for as long as you like: frames are encoded only while something moves (plus a post-roll) and the idle stretches are cut from the timeline, so an hour of waiting becomes a film of the events. Inhibited around stage moves and light changes.', cost: 'sparse' },
+  { id: 'trigger', label: 'Motion-triggered', group: 'analysis', blurb: 'Watch an empty field for as long as you like: frames are encoded only while something moves, with a pre-roll (the last seconds are kept as raw JPEG parts and written when the event starts) and a post-roll, and the idle stretches are cut from the timeline. Inhibited around stage moves and light changes; the stabiliser is off (replayed pre-roll frames cannot be tracked).', cost: 'sparse' },
   { id: 'timelapse', label: 'Time compression', group: 'time', blurb: 'Keeps one frame every N seconds and lays them out at the chosen fps: an hour of growth in a minute, recorded live with no frame store. Optionally each kept frame is the mean of its whole interval (free noise reduction for slow scenes).', cost: 'sparse' },
 ]
 
 export interface VideoModeParams {
-  denoise: { frames: number; c: number; lockExposure: boolean }
+  denoise: { frames: number; c: number; lockExposure: boolean; chroma: number }
   integrate: { frames: number; kind: 'mean' | 'exp'; lockExposure: boolean }
   median: { frames: 3 | 5; lockExposure: boolean }
   bin: { factor: 2 | 3 | 4; kernel: 'mean' | 'edge'; keepSize: boolean }
   lucky: { keep: number; fill: boolean; lockExposure: boolean }
   edof: { dz: number; dwellMs: number }
   sweep: { range: number; steps: number; dwellMs: number }
-  superres: { pixfrac: number; window: number; scale: 1.5 | 2; dither: boolean; keep: number }
+  superres: { pixfrac: number; window: number; scale: 1.5 | 2; dither: boolean; keep: number; robust: boolean; robustK: number }
   hdr: { ratio: number; period: number }
   illum: { presetA: string; presetB: string; hold: number; output: 'dpc' | 'rheinberg' | 'split'; gain: number; tintA: string; tintB: string }
   servo: { periodS: number; delta: number; maxExcursion: number; hideProbe: boolean }
@@ -75,22 +75,22 @@ export interface VideoModeParams {
   project: { kind: 'max' | 'min' | 'range'; decay: number }
   magnify: { factor: number; fLo: number; fHi: number; alpha: number; maxDelta: number; colour: boolean }
   flow: { cell: number; alpha: number; vMax: number }
-  enhance: { levels: boolean; lowPct: number; highPct: number; knee: boolean; wb: boolean; flatten: boolean; clarity: number; scale: number }
+  enhance: { levels: boolean; lowPct: number; highPct: number; levelsMaxStretch: number; levelsStrength: number; knee: boolean; wb: boolean; flatten: boolean; flattenMode: 'rolling' | 'reference'; flatStrength: number; clarity: number; scale: number }
   relief: { style: 'relief' | 'darkfield' | 'phase'; angle: number; strength: number; mix: number; scale: number }
   kymograph: { band: number; rows: number; sideBySide: boolean }
-  trigger: { sensitivity: number; postRollS: number; compressGaps: boolean }
+  trigger: { sensitivity: number; preRollS: number; postRollS: number; compressGaps: boolean }
   timelapse: { intervalS: number; fps: number; average: boolean }
 }
 
 export const DEFAULT_VIDEO_PARAMS: VideoModeParams = {
-  denoise: { frames: 8, c: 4, lockExposure: true },
+  denoise: { frames: 8, c: 4, lockExposure: true, chroma: 1 },
   integrate: { frames: 8, kind: 'mean', lockExposure: true },
   median: { frames: 3, lockExposure: true },
   bin: { factor: 2, kernel: 'mean', keepSize: false },
   lucky: { keep: 0.5, fill: false, lockExposure: true },
   edof: { dz: 40, dwellMs: 260 },
   sweep: { range: 300, steps: 24, dwellMs: 400 },
-  superres: { pixfrac: 0.6, window: 4, scale: 2, dither: true, keep: 0.6 },
+  superres: { pixfrac: 0.6, window: 4, scale: 2, dither: true, keep: 0.6, robust: true, robustK: 3 },
   hdr: { ratio: 4, period: 1 },
   illum: { presetA: 'Brightfield', presetB: 'Darkfield', hold: 3, output: 'rheinberg', gain: 4, tintA: '#4060ff', tintB: '#ff6030' },
   servo: { periodS: 30, delta: 4, maxExcursion: 60, hideProbe: true },
@@ -100,10 +100,10 @@ export const DEFAULT_VIDEO_PARAMS: VideoModeParams = {
   project: { kind: 'max', decay: 1 },
   magnify: { factor: 8, fLo: 0.5, fHi: 4, alpha: 15, maxDelta: 60, colour: false },
   flow: { cell: 8, alpha: 0.3, vMax: 0 },
-  enhance: { levels: true, lowPct: 0.5, highPct: 99.5, knee: true, wb: false, flatten: false, clarity: 0.6, scale: 16 },
+  enhance: { levels: true, lowPct: 0.5, highPct: 99.5, levelsMaxStretch: 0.25, levelsStrength: 1, knee: true, wb: false, flatten: false, flattenMode: 'rolling', flatStrength: 1, clarity: 0.6, scale: 16 },
   relief: { style: 'relief', angle: 45, strength: 2.5, mix: 0.3, scale: 8 },
   kymograph: { band: 3, rows: 600, sideBySide: true },
-  trigger: { sensitivity: 0.5, postRollS: 3, compressGaps: true },
+  trigger: { sensitivity: 0.5, preRollS: 2, postRollS: 3, compressGaps: true },
   timelapse: { intervalS: 5, fps: 15, average: false },
 }
 

@@ -77,3 +77,19 @@ describe('colormapPreview / listColormaps', () => {
     expect(list.find((c) => c.key === 'viridis')?.group).toBe('scientific')
   })
 })
+
+describe('Okabe-Ito ramps', () => {
+  it('run black → the published hue, linearly, with a licence string', async () => {
+    const { COLORMAPS, OKABE_ITO } = await import('../colormaps')
+    for (const [key, hue] of [['okabe-orange', OKABE_ITO.orange], ['okabe-skyblue', OKABE_ITO.skyblue], ['okabe-green', OKABE_ITO.green], ['okabe-purple', OKABE_ITO.purple]] as const) {
+      const e = COLORMAPS[key]
+      expect(e.group).toBe('okabe')
+      expect(e.licence).toMatch(/Okabe/)
+      const l = e.build()
+      expect(l.r[0]).toBe(0); expect(l.g[0]).toBe(0); expect(l.b[0]).toBe(0)
+      expect(l.r[255]).toBeCloseTo(hue[0], 6); expect(l.g[255]).toBeCloseTo(hue[1], 6); expect(l.b[255]).toBeCloseTo(hue[2], 6)
+      expect(l.g[128]).toBeCloseTo(hue[1] * 128 / 255, 6)
+    }
+    expect(OKABE_ITO.orange).toEqual([230 / 255, 159 / 255, 0])
+  })
+})

@@ -14,6 +14,7 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
   import { calibration } from '../lib/store/calibration.svelte'
   import { listColormaps } from '../lib/algo/colormaps'
   import { measure } from '../lib/services/measureService.svelte'
+  import { videoFlatCapture } from '../lib/services/video/videoFlatCapture.svelte'
 
   let mode = $state<PhotoMode>('single')
   let slices = $state(5)
@@ -39,6 +40,11 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
   let vidKeyframeS = $state(settings.videoKeyframeS)
   let vidStabilise = $state(settings.videoStabilise)
   let vidDeflicker = $state(settings.videoDeflicker)
+  let vidStabStrength = $state(settings.videoStabiliseStrength)
+  let vidStabRotation = $state(settings.videoStabiliseRotation)
+  let vidStabEdges = $state(settings.videoStabiliseEdges)
+  let vidRetime = $state(settings.videoRetime)
+  let vidRetimeFps = $state(settings.videoRetimeFps)
   const codecSupport = Recorder.codecSupport()
   // ---- video mode (services/video/videoModes.ts): the recording counterpart of the photo modes ----
   let vidMode = $state<VideoModeId>((VIDEO_MODES.some((m) => m.id === settings.videoMode) ? settings.videoMode : 'plain') as VideoModeId)
@@ -143,6 +149,7 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
     try { mode = createVideoMode(vidMode, $state.snapshot(vidParams) as VideoModeParams) } catch (e) { status = { kind: 'err', text: (e as Error).message }; return }
     const opts = {
       container: vidContainer, codec: vidCodec, quality: vidQuality, keyframeS: vidKeyframeS, stabilize: vidStabilise, deflicker: vidDeflicker,
+      stabilizeStrength: vidStabStrength, stabilizeRotation: vidStabRotation, stabilizeEdges: vidStabEdges, retime: vidRetime, retimeFps: vidRetimeFps,
       mode, modeInfo: { label: vidInfo.label, params: modeParamsRecord(vidMode, $state.snapshot(vidParams) as VideoModeParams) }, burnIn: [...vidBurnIn],
     }
     // "Video extended depth of field 5 s" but "Video HDR (LED alternation) 5 s": only a leading capital before lowercase is lowered
@@ -168,6 +175,8 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
   function saveVideoDefaults() {
     settings.videoCodecPref = vidCodec; settings.videoContainer = vidContainer; settings.videoQuality = vidQuality
     settings.videoKeyframeS = vidKeyframeS; settings.videoStabilise = vidStabilise; settings.videoDeflicker = vidDeflicker
+    settings.videoStabiliseStrength = vidStabStrength; settings.videoStabiliseRotation = vidStabRotation; settings.videoStabiliseEdges = vidStabEdges
+    settings.videoRetime = vidRetime; settings.videoRetimeFps = vidRetimeFps
     saveSettings()
   }
   function saveSuperresDefaults() { settings.superresScale = superresScale; settings.superresPixfrac = superresPixfrac; settings.superresSharpen = superresSharpen; saveSettings() }
@@ -204,6 +213,7 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
         <label title="the longest effective average a steady pixel reaches (the strength)">Strength (frames) <input type="number" min="2" max="32" bind:value={vidParams.denoise.frames} onchange={saveVideoMode} /></label>
         <label title="motion robustness: 2 cautious (movers stay crisp), 8 smooth">Robustness <select bind:value={vidParams.denoise.c} onchange={saveVideoMode}><option value={2}>2 · cautious</option><option value={4}>4</option><option value={8}>8 · smooth</option></select></label>
         <label style="flex-direction:row;align-items:center;gap:6px" title="lock AE/AWB for the recording so every frame shares one gain"><input type="checkbox" bind:checked={vidParams.denoise.lockExposure} onchange={saveVideoMode} /> Lock exposure</label>
+        <label title="extra smoothing of colour speckle only, at half resolution, guided by the luma so edges stay sharp; 0 = off, 1 = normal, 2 = strong">Chroma <input type="range" min="0" max="2" step="0.25" bind:value={vidParams.denoise.chroma} onchange={saveVideoMode} /> <span class="mono small">{vidParams.denoise.chroma}</span></label>
       </div>
     {:else if vidMode === 'integrate'}
       <div class="params">
@@ -247,6 +257,8 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
         <label title="frames drizzled per output frame">Window <input type="number" min="2" max="12" bind:value={vidParams.superres.window} onchange={saveVideoMode} /></label>
         <label title="drizzle drop size (0.4 sharp … 1 plain average)">Pixfrac <input type="number" min="0.3" max="1" step="0.1" bind:value={vidParams.superres.pixfrac} onchange={saveVideoMode} /></label>
         <label style="flex-direction:row;align-items:center;gap:6px" title="move the stage in a sub-pixel pattern (needs a still specimen); off = lucky drizzle from the specimen's own jitter with a sharpness gate"><input type="checkbox" bind:checked={vidParams.superres.dither} onchange={saveVideoMode} /> Stage dither</label>
+        <label style="flex-direction:row;align-items:center;gap:6px" title="down-weight frames where they differ from the newest one beyond the noise, so a moving specimen is not smeared (Wronski et al. 2019)"><input type="checkbox" bind:checked={vidParams.superres.robust} onchange={saveVideoMode} /> Reject movers</label>
+        {#if vidParams.superres.robust}<label title="rejection threshold in noise σ; lower rejects more">σ <input type="number" min="1" max="6" step="0.5" style="width:4.5em" bind:value={vidParams.superres.robustK} onchange={saveVideoMode} /></label>{/if}
         {#if !vidParams.superres.dither}<label title="fraction of frames kept by sharpness">Keep <input type="range" min="0.2" max="1" step="0.1" bind:value={vidParams.superres.keep} onchange={saveVideoMode} /> <span class="mono small">{Math.round(vidParams.superres.keep * 100)} %</span></label>{/if}
       </div>
     {:else if vidMode === 'hdr'}
@@ -306,6 +318,7 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
     {:else if vidMode === 'trigger'}
       <div class="params">
         <label title="fraction of the field that must move">Trigger (%) <input type="number" min="0.05" max="20" step="0.05" bind:value={vidParams.trigger.sensitivity} onchange={saveVideoMode} /></label>
+        <label title="seconds before the trigger to include (kept as raw JPEG parts, ~100 kB each)">Pre-roll (s) <input type="number" min="0" max="10" step="0.5" bind:value={vidParams.trigger.preRollS} onchange={saveVideoMode} /></label>
         <label>Post-roll (s) <input type="number" min="0.5" max="60" step="0.5" bind:value={vidParams.trigger.postRollS} onchange={saveVideoMode} /></label>
         <label style="flex-direction:row;align-items:center;gap:6px" title="cut the idle stretches from the timeline (off = true times, gaps visible in the player)"><input type="checkbox" bind:checked={vidParams.trigger.compressGaps} onchange={saveVideoMode} /> Compress gaps</label>
       </div>
@@ -328,7 +341,23 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
         <label title="percentile clipped to black / white">Clip % <span class="row" style="gap:4px"><input type="number" min="0" max="5" step="0.1" bind:value={vidParams.enhance.lowPct} onchange={saveVideoMode} />–<input type="number" min="95" max="100" step="0.1" bind:value={vidParams.enhance.highPct} onchange={saveVideoMode} /></span></label>
         <label style="flex-direction:row;align-items:center;gap:6px" title="soft roll-off into white instead of a hard clip"><input type="checkbox" bind:checked={vidParams.enhance.knee} onchange={saveVideoMode} /> Soft knee</label>
         <label style="flex-direction:row;align-items:center;gap:6px" title="per-channel gains that keep the bright background the colour it had on the first frame; lock the camera's AWB first or the two controllers fight"><input type="checkbox" bind:checked={vidParams.enhance.wb} onchange={saveVideoMode} /> Anchor WB</label>
-        <label style="flex-direction:row;align-items:center;gap:6px" title="divide out the slowly varying illumination (rolling estimate; a sample filling the whole field is partly flattened too)"><input type="checkbox" bind:checked={vidParams.enhance.flatten} onchange={saveVideoMode} /> Flatten background</label>
+        {#if vidParams.enhance.levels}
+          <label title="how much of the tonal range auto-levels may remap; 0.25 keeps an empty field from being stretched into noise, 1 = unbounded">Max stretch <input type="number" min="0" max="1" step="0.05" bind:value={vidParams.enhance.levelsMaxStretch} onchange={saveVideoMode} /></label>
+          <label title="blend auto-levels toward the original">Levels strength <input type="number" min="0" max="1" step="0.05" bind:value={vidParams.enhance.levelsStrength} onchange={saveVideoMode} /></label>
+        {/if}
+        <label style="flex-direction:row;align-items:center;gap:6px" title="divide out the slowly varying illumination"><input type="checkbox" bind:checked={vidParams.enhance.flatten} onchange={saveVideoMode} /> Flatten background</label>
+        {#if vidParams.enhance.flatten}
+          <label title="Rolling: estimate the background from the video itself (a sample filling the field is partly flattened too). Reference: divide by a blank field you capture with the sample moved away (exact; also removes dust and hot pixels).">Flatten <select bind:value={vidParams.enhance.flattenMode} onchange={saveVideoMode}><option value="rolling">Rolling estimate</option><option value="reference">Captured reference</option></select></label>
+          {#if vidParams.enhance.flattenMode === 'reference'}
+            <label title="blend the correction toward none">Flat strength <input type="number" min="0" max="1" step="0.05" bind:value={vidParams.enhance.flatStrength} onchange={saveVideoMode} /></label>
+            <span class="row" style="gap:6px;align-items:center">
+              <button onclick={() => videoFlatCapture.captureReference()} disabled={videoFlatCapture.busy || !device.connected} title="move the sample away first: 32 stream frames of the blank field, AE/AWB locked">Capture blank field</button>
+              <button onclick={() => videoFlatCapture.captureDark()} disabled={videoFlatCapture.busy || !videoFlatCapture.hasReference || !device.connected} title="LED off for 32 frames (restored afterwards): dark map and hot-pixel list; worth it above ~4× gain">Capture dark</button>
+              {#if videoFlatCapture.hasReference}<button onclick={() => videoFlatCapture.clear()} disabled={videoFlatCapture.busy}>Clear</button>{/if}
+              <span class="muted small">{videoFlatCapture.status || (videoFlatCapture.hasReference ? `reference ready${videoFlatCapture.hasDark ? ' + dark' : ''}` : 'no reference yet')}</span>
+            </span>
+          {/if}
+        {/if}
         <label title="local contrast amount (0 = off)">Clarity <input type="number" min="0" max="2" step="0.1" bind:value={vidParams.enhance.clarity} onchange={saveVideoMode} /></label>
         <label title="scale of the local contrast in pixels">Scale <select bind:value={vidParams.enhance.scale} onchange={saveVideoMode}><option value={8}>8 px</option><option value={16}>16 px</option><option value={32}>32 px</option><option value={64}>64 px</option></select></label>
       </div>
@@ -383,9 +412,16 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
       <label style="flex-direction:row;align-items:center;gap:6px" title="removes hand/vibration jitter from the live view with a small crop margin; not needed for the live stack, which is already smoothed">
         <input type="checkbox" bind:checked={vidStabilise} disabled={busy} onchange={saveVideoDefaults} /> Stabilise
       </label>
+      {#if vidStabilise}
+        <label title="how hard the stabiliser smooths: light follows real motion quickly, strong damps slow table breathing too">Strength <select bind:value={vidStabStrength} disabled={busy} onchange={saveVideoDefaults}><option value="light">Light</option><option value="normal">Normal</option><option value="strong">Strong</option></select></label>
+        <label style="flex-direction:row;align-items:center;gap:6px" title="also correct in-plane rotation from left/right patch registration (+2 ms per frame, wider crop)"><input type="checkbox" bind:checked={vidStabRotation} disabled={busy} onchange={saveVideoDefaults} /> Rotation</label>
+        <label title="crop: a margin is cut so the corrected frame always fills the picture; hold: full frame size, the uncovered border keeps the previous frames' pixels">Edges <select bind:value={vidStabEdges} disabled={busy} onchange={saveVideoDefaults}><option value="crop">Crop</option><option value="hold">Hold</option></select></label>
+      {/if}
       <label style="flex-direction:row;align-items:center;gap:6px" title="normalises per-frame brightness (LED driver / mains flicker) before encoding">
         <input type="checkbox" bind:checked={vidDeflicker} disabled={busy} onchange={saveVideoDefaults} /> Deflicker
       </label>
+      <label title="variable: every frame at its true device time (scientifically honest); constant: re-timed to a fixed rate, the current frame repeated into skipped slots and early frames dropped (what editors and slides expect)">Timing <select bind:value={vidRetime} disabled={busy} onchange={saveVideoDefaults}><option value="vfr">Variable (true times)</option><option value="cfr">Constant rate</option></select></label>
+      {#if vidRetime === 'cfr'}<label>fps <input type="number" min="1" max="60" style="width:4.5em" bind:value={vidRetimeFps} disabled={busy} onchange={saveVideoDefaults} /></label>{/if}
       <label style="flex-direction:row;align-items:center;gap:6px" title="apply the Look panel's LUT, curves and levels (as shown on the live view) to the recorded frames, after the video mode; the look can be changed while recording">
         <input type="checkbox" bind:checked={settings.lookBakeIntoRecording} disabled={busy} onchange={saveSettings} /> Bake look
       </label>

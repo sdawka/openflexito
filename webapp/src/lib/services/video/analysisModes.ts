@@ -55,7 +55,7 @@ export function kymographMode(p: KymographParams): VideoModeRun {
   }
 }
 
-export interface TriggerParams { sensitivity: number /* % of the field that must move */; postRollS: number; compressGaps: boolean }
+export interface TriggerParams { sensitivity: number /* % of the field that must move */; preRollS: number; postRollS: number; compressGaps: boolean }
 /** Encodes only while motion energy (fraction of pixels above k·σ against a running-median
  *  background, measured on a coarse sample) is above `sensitivity`, plus `postRollS` afterwards.
  *  With `compressGaps` the recording's timeline skips the idle stretches (a burst-to-burst film);
@@ -72,6 +72,7 @@ export function triggerMode(p: TriggerParams): VideoModeRun {
   let gap = 0, lastOutIn: number | null = null
   return {
     id: 'trigger',
+    preRollS: p.preRollS,
     process(f: RgbaFrame, info: ModeFrameInfo): ModeOutput | null {
       seen++
       const t = info.t != null ? info.t / 1e9 : performance.now() / 1000
@@ -90,12 +91,13 @@ export function triggerMode(p: TriggerParams): VideoModeRun {
       recordingNow = active
       if (!active) { inEvent = false; return null }
       kept++
-      if (p.compressGaps) { if (lastOutIn != null && t - lastOutIn > 0.5) gap += t - lastOutIn - 1 / 15; lastOutIn = t }
+      // the pre-roll the recorder injects starts `preRollS` before this frame: the compressed gap ends there
+      if (p.compressGaps) { if (lastOutIn != null && t - lastOutIn > 0.5 + p.preRollS) gap += t - p.preRollS - lastOutIn - 1 / 15; lastOutIn = t }
       return { frame: f }
     },
     retime(tSec: number): number { return p.compressGaps ? tSec - gap : tSec },
     reset() { bg?.reset(); armedT = performance.now() + 2000 },
     status: () => `${recordingNow ? 'recording' : 'armed'} · motion ${energy.toFixed(1)} % (trigger ${p.sensitivity} %) · ${events} events · ${kept}/${seen} frames kept`,
-    stats: () => ({ events, kept, seen, sensitivity: p.sensitivity, postRollS: p.postRollS, compressGaps: p.compressGaps }),
+    stats: () => ({ events, kept, seen, sensitivity: p.sensitivity, preRollS: p.preRollS, postRollS: p.postRollS, compressGaps: p.compressGaps }),
   }
 }

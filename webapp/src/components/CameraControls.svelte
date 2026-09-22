@@ -6,6 +6,7 @@
   import FlickerCheck from './FlickerCheck.svelte'
   import Histogram from './Histogram.svelte'
   import '../lib/services/denoiseProcessor' // registers the live-denoise frame-chain processor
+  import '../lib/services/peakingProcessor' // registers the focus-peaking/zebra view overlay processor
   import { settings, saveSettings } from '../lib/store/settings.svelte'
 
   const c = $derived(device.controls)
@@ -88,6 +89,19 @@
     <input type="range" min="0" max="0.95" step="0.01" bind:value={settings.liveDenoiseAlpha} oninput={saveSettings} />
     <label class="check"><input type="checkbox" bind:checked={settings.liveDenoiseRecord} onchange={saveSettings} /> also apply while recording</label>
   {/if}
+  <h4 class="sub">Focus aids</h4>
+  <label class="check"><input type="checkbox" bind:checked={settings.peaking} onchange={saveSettings} /> focus peaking (view only)</label>
+  {#if settings.peaking}
+    <div class="kv"><span>Peaking colour</span>
+      <span class="v peak-colour">
+        <input type="color" bind:value={settings.peakingColour} oninput={saveSettings} aria-label="peaking colour" />
+        <button class:on={settings.peakingColour === '#00ff00'} onclick={() => { settings.peakingColour = '#00ff00'; saveSettings() }} title="green">G</button>
+        <button class:on={settings.peakingColour === '#ff0000'} onclick={() => { settings.peakingColour = '#ff0000'; saveSettings() }} title="red">R</button>
+        <button class:on={settings.peakingColour === '#0080ff'} onclick={() => { settings.peakingColour = '#0080ff'; saveSettings() }} title="blue">B</button>
+      </span>
+    </div>
+  {/if}
+  <label class="check"><input type="checkbox" bind:checked={settings.zebra} onchange={saveSettings} /> zebra stripes on clipped highlights / crushed shadows (view only)</label>
   {#if !c}
     <span class="muted">camera not available</span>
   {/if}
@@ -95,6 +109,10 @@
 
 <style>
   .check { display: inline-flex; align-items: center; gap: 6px; margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+  .peak-colour { display: inline-flex; align-items: center; gap: 4px; }
+  .peak-colour input[type=color] { width: 28px; height: 22px; padding: 0; border: 1px solid var(--border); border-radius: 4px; background: transparent; }
+  .peak-colour button { padding: 0 6px; font-size: 11px; line-height: 20px; }
+  .peak-colour button.on { color: var(--accent); font-weight: 600; }
   .wbrow { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
   .wbrow input { flex: 1; }
   .wbrow .end { font-size: 11px; width: 3.6em; text-align: center; }

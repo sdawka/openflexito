@@ -3,6 +3,7 @@
  *  `Look.cube`. Pure, no DOM access; `algo/lut.ts` supplies the `Lut1D`/`Lut3D` types and samplers. */
 
 import { identity3D, sample1D, type Lut1D, type Lut3D } from './lut'
+import { applyCdl, isIdentityCdl, type Cdl } from './cdl'
 
 export type CurveFn = (x: number) => number
 
@@ -116,6 +117,11 @@ export interface LevelsAdjust { black: number; white: number; gamma: number }
 export type ChannelMixer = [[number, number, number], [number, number, number], [number, number, number]]
 
 export interface Adjustments {
+  /** ASC CDL grade node (`algo/cdl.ts`), applied after the channel mixer and before curves. */
+  cdl?: Cdl
+  /** Filmic tone curve (`filmicCurve`), same curve on all channels, applied after the CDL and before
+   *  the user's curves. */
+  filmic?: CurveFn
   curves?: CurveSet
   levels?: LevelsAdjust
   saturation?: number // -1..1, 0 = no change
@@ -154,11 +160,13 @@ function hslToRgb(h: number, s: number, l: number): [number, number, number] {
 }
 
 /** Bake curves, levels, saturation/vibrance, hue rotation and a channel mixer into one 3D LUT
- *  (`Look.cube`). Order: channel mixer, per-channel curves, levels, hue rotation, then saturation/
+ *  (`Look.cube`). Order: channel mixer, CDL, filmic, per-channel curves, levels, hue rotation, then saturation/
  *  vibrance (luma-preserving: each channel is pulled toward/away from Rec.601 luma, so overall
  *  brightness doesn't shift). With no options set this is exactly `identity3D(size)`. */
 export function bakeAdjustments(adj: Adjustments, size = 33): Lut3D {
-  const hasAny = adj.curves || adj.levels || adj.saturation || adj.vibrance || adj.hue || adj.channelMixer
+  const cdl = adj.cdl && !isIdentityCdl(adj.cdl) ? adj.cdl : undefined
+  const filmic = adj.filmic
+  const hasAny = adj.curves || adj.levels || adj.saturation || adj.vibrance || adj.hue || adj.channelMixer || cdl || filmic
   if (!hasAny) return identity3D(size)
 
   const mixer = adj.channelMixer
@@ -176,6 +184,7 @@ export function bakeAdjustments(adj: Adjustments, size = 33): Lut3D {
   } : null
 
   const data = new Float32Array(size * size * size * 3)
+  const cdlTmp = new Float32Array(3)
   let o = 0
   for (let bi = 0; bi < size; bi++) for (let gi = 0; gi < size; gi++) for (let ri = 0; ri < size; ri++) {
     let r = ri / (size - 1), g = gi / (size - 1), b = bi / (size - 1)
@@ -186,6 +195,8 @@ export function bakeAdjustments(adj: Adjustments, size = 33): Lut3D {
       const b2 = mixer[2][0] * r + mixer[2][1] * g + mixer[2][2] * b
       r = r2; g = g2; b = b2
     }
+    if (cdl) { applyCdl(cdl, clamp01(r), clamp01(g), clamp01(b), cdlTmp, 0); r = cdlTmp[0]; g = cdlTmp[1]; b = cdlTmp[2] }
+    if (filmic) { r = filmic(clamp01(r)); g = filmic(clamp01(g)); b = filmic(clamp01(b)) }
     if (cr) r = cr(clamp01(r))
     if (cg) g = cg(clamp01(g))
     if (cb) b = cb(clamp01(b))
@@ -216,3 +227,51 @@ export function bakeAdjustments(adj: Adjustments, size = 33): Lut3D {
 }
 
 function clamp01(x: number): number { return x < 0 ? 0 : x > 1 ? 1 : x }
+
+// ---------------------------------------------------------------------------------------------
+// Filmic presets (docs/video-research/colour.md proposal 3 + addendum)
+// ---------------------------------------------------------------------------------------------
+
+export type FilmicPreset = 'neutral' | 'soft' | 'flat'
+export const FILMIC_PRESETS: FilmicPreset[] = ['neutral', 'soft', 'flat']
+export const FILMIC_DEFAULT_EXPOSURE = 1.15
+
+function srgbDecode(x: number): number { return x <= 0.04045 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4) }
+function srgbEncode(x: number): number { return x <= 0.0031308 ? 12.92 * x : 1.055 * Math.pow(x, 1 / 2.4) - 0.055 }
+
+/** Narkowicz's ACES fit (same constants as `enhance.ts#filmic`, duplicated here so `curves.ts` stays
+ *  free of the RgbPlanes machinery). Scene-linear in, display-linear 0..1 out. */
+function acesFit(x: number): number {
+  const a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14
+  const y = (x * (a * x + b)) / (x * (c * x + d) + e)
+  return y < 0 ? 0 : y > 1 ? 1 : y
+}
+
+/** Filmic tone presets as monotone 0..1 → 0..1 curve evaluators, meant for display-referred (sRGB)
+ *  input as the live JPEG stream is:
+ *   - `neutral`: identity.
+ *   - `soft`: sRGB decode → ×exposure → Narkowicz ACES fit → sRGB encode. The fit gives a gentle
+ *     shoulder so an LED brightfield background approaches white smoothly instead of hitting a wall;
+ *     the exposure scale (default 1.15) puts mid-grey back roughly where it was, since the fit alone
+ *     darkens mids. Only meaningful when the capture is a little under-exposed (the research doc
+ *     recommends ~0.3–0.5 EV under).
+ *   - `flat`: log-ish `log2(1 + k·lin) / log2(1 + k)` with k = 8 on the exposure-scaled linear value,
+ *     then sRGB encode. Lifts shadows a lot; on 8-bit input that posterises, so the UI warns.
+ *  All presets map 0 → 0; `soft`/`flat` map 1 → slightly below 1 (the fit never quite reaches white
+ *  at exposure ≈ 1), which is the intended roll-off. */
+export function filmicCurve(preset: FilmicPreset, exposure = FILMIC_DEFAULT_EXPOSURE): CurveFn {
+  if (preset === 'neutral') return (x) => x
+  const ex = exposure > 1e-6 ? exposure : 1e-6
+  if (preset === 'soft') {
+    return (x) => clamp01(srgbEncode(acesFit(srgbDecode(clamp01(x)) * ex)))
+  }
+  const k = 8
+  const norm = 1 / Math.log2(1 + k)
+  return (x) => clamp01(srgbEncode(clamp01(Math.log2(1 + k * srgbDecode(clamp01(x)) * ex) * norm)))
+}
+
+/** `filmicCurve` sampled into a 1D LUT (same curve on all three channels). */
+export function filmicLut1D(preset: FilmicPreset, exposure = FILMIC_DEFAULT_EXPOSURE, size = 256): Lut1D {
+  const f = filmicCurve(preset, exposure)
+  return curveToLut1D(f, f, f, size)
+}

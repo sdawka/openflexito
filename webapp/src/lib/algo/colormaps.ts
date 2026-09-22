@@ -18,7 +18,7 @@
 
 import { identity1D, lut1DFromStops, type Lut1D } from './lut'
 
-export type ColormapGroup = 'scientific' | 'imagej' | 'basic'
+export type ColormapGroup = 'scientific' | 'imagej' | 'basic' | 'okabe'
 
 export interface ColormapEntry {
   name: string
@@ -30,6 +30,23 @@ export interface ColormapEntry {
 const MPL_LICENCE = 'CC0 (public domain), matplotlib project'
 const CIVIDIS_LICENCE = 'Apache-2.0, PNNL cividis (matplotlib bundled copy)'
 const IJ_LICENCE = 'Public domain, ImageJ (Wayne Rasband / NIH)'
+/** Okabe & Ito (2008) "Color Universal Design" palette: eight hues chosen to stay distinguishable
+ *  under the common forms of colour-vision deficiency (jfly.uni-koeln.de/color/). The palette is a set
+ *  of published sRGB values, not a copyrightable work; the single-hue ramps below (black → hue) are
+ *  generated here as linear interpolations, the same construction ImageJ's Red/Green/Blue use. */
+const OKABE_LICENCE = 'Okabe & Ito 2008 Color Universal Design palette values (freely usable), ramps generated here'
+export const OKABE_ITO: Record<'orange' | 'skyblue' | 'green' | 'yellow' | 'blue' | 'vermillion' | 'purple', [number, number, number]> = {
+  orange: [230 / 255, 159 / 255, 0],
+  skyblue: [86 / 255, 180 / 255, 233 / 255],
+  green: [0, 158 / 255, 115 / 255],
+  yellow: [240 / 255, 228 / 255, 66 / 255],
+  blue: [0, 114 / 255, 178 / 255],
+  vermillion: [213 / 255, 94 / 255, 0],
+  purple: [204 / 255, 121 / 255, 167 / 255],
+}
+function okabeRamp(hue: [number, number, number]): Lut1D {
+  return build((i) => [hue[0] * i / 255, hue[1] * i / 255, hue[2] * i / 255])
+}
 
 function stops33(rows: Array<[number, number, number, number]>): Array<[number, [number, number, number]]> {
   return rows.map(([pos, r, g, b]) => [pos, [r, g, b]])
@@ -176,6 +193,11 @@ export const COLORMAPS: Record<string, ColormapEntry> = {
   cyan: { name: 'Cyan', group: 'imagej', licence: IJ_LICENCE, build: () => build((i) => [0, i / 255, i / 255]) },
   magenta: { name: 'Magenta', group: 'imagej', licence: IJ_LICENCE, build: () => build((i) => [i / 255, 0, i / 255]) },
   yellow: { name: 'Yellow', group: 'imagej', licence: IJ_LICENCE, build: () => build((i) => [i / 255, i / 255, 0]) },
+
+  'okabe-orange': { name: 'Okabe-Ito orange', group: 'okabe', licence: OKABE_LICENCE, build: () => okabeRamp(OKABE_ITO.orange) },
+  'okabe-skyblue': { name: 'Okabe-Ito sky blue', group: 'okabe', licence: OKABE_LICENCE, build: () => okabeRamp(OKABE_ITO.skyblue) },
+  'okabe-green': { name: 'Okabe-Ito green', group: 'okabe', licence: OKABE_LICENCE, build: () => okabeRamp(OKABE_ITO.green) },
+  'okabe-purple': { name: 'Okabe-Ito purple', group: 'okabe', licence: OKABE_LICENCE, build: () => okabeRamp(OKABE_ITO.purple) },
 
   '16 colors': {
     name: '16 colors', group: 'imagej', licence: 'Posterised HSV sweep, reimplemented here (not from LutLoader.java)',
