@@ -42,6 +42,12 @@ export interface Settings {
   videoKeyframeS: number
   /** bake `services/deflickerProcessor.ts` into recordings by default */
   videoDeflicker: boolean
+  /** last chosen video mode (`services/video/videoModes.ts#VideoModeId`, kept as string like
+   *  `videoCodec`), its per-mode parameters (merged over `DEFAULT_VIDEO_PARAMS` at load) and the
+   *  burn-in overlays (`services/video/burnIn.ts#BurnInKind`) */
+  videoMode: string
+  videoModeParams: Record<string, Record<string, unknown>>
+  videoBurnIn: string[]
   /** run the deflicker processor on the live view too (off by default: most users never see a
    *  flicker worth the per-frame cost) */
   deflickerLive: boolean
@@ -81,6 +87,7 @@ const defaults: Settings = {
   showScaleBar: true,
   videoCodec: 'vp9', videoBitrateMbps: 12, videoStabilise: true,
   videoCodecPref: 'auto', videoContainer: 'mp4', videoQuality: 'high', videoKeyframeS: 2, videoDeflicker: false, deflickerLive: false,
+  videoMode: 'plain', videoModeParams: {}, videoBurnIn: [],
   superresScale: 2, superresPixfrac: 0.5, superresSharpen: false,
   liveDenoise: false, liveDenoiseRecord: false, liveDenoiseAlpha: 0.7, enhancePreviewWidth: 1024,
   lookBakeIntoRecording: false, lookApplyInGallery: true,

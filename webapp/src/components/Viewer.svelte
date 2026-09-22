@@ -283,7 +283,12 @@
       {/if}
       {#if item.video}
         <div class="d-title">Video</div>
-        <div>{item.video.codec ?? '—'}{item.video.bitrateBps ? ` · ${(item.video.bitrateBps / 1e6).toFixed(1)} Mbit/s` : ''} · {item.video.fps.toFixed(1)} fps{item.video.stabilised ? ' · stabilised' : ''}</div>
+        <div>{item.video.codec ?? '—'}{item.video.bitrateBps ? ` · ${(item.video.bitrateBps / 1e6).toFixed(1)} Mbit/s` : ''} · {item.video.fps.toFixed(1)} fps{item.video.stabilised ? ' · stabilised' : ''}{item.video.deflickered ? ' · deflickered' : ''}</div>
+        {#if item.video.mode}
+          <div>mode {item.video.mode.label}{item.video.mode.params && Object.keys(item.video.mode.params).length ? ` (${Object.entries(item.video.mode.params).map(([k, v]) => `${k} ${Array.isArray(v) ? v.join('/') : v}`).join(', ')})` : ''}</div>
+          {#if item.video.mode.stats && Object.keys(item.video.mode.stats).length}<div class="muted">{Object.entries(item.video.mode.stats).map(([k, v]) => `${k} ${typeof v === 'number' ? (Number.isInteger(v) ? v : v.toFixed(2)) : v}`).join(' · ')}</div>{/if}
+        {/if}
+        {#if item.video.burnIn?.length}<div class="muted">burn-in: {item.video.burnIn.join(', ')}</div>{/if}
       {/if}
     </div>
   {/if}

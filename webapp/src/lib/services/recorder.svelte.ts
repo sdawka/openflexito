@@ -20,6 +20,13 @@
  *  handed to the sink — skipped entirely when nothing is registered/enabled, so a plain recording pays
  *  no extra readback cost.
  *
+ *  A video mode (`services/video/types.ts#VideoModeRun`, catalogue in `services/video/videoModes.ts`)
+ *  hooks into the same path: it may gate frames (`accept`), transform them between the chain's
+ *  denoise stages and its colour LUT (`process`, possibly changing the output size or answering with
+ *  a worker result for an earlier frame), re-time them, and drive the stage/LEDs while recording
+ *  (`start`/`stop`). Burn-in overlays (`services/video/burnIn.ts`) are drawn last, on the output
+ *  canvas, so they appear in the encoded frames.
+ *
  *  Container/codec/quality/keyframe interval are options; a per-frame `{t, seq, position}` log is
  *  saved next to the video (gallery blob 'frames'), along with the sink's measured fps and its
  *  dropped/duplicated frame counts. */
@@ -30,9 +37,13 @@ import { MjpegStream, type MjpegFrame } from '../api/mjpegStream'
 import { Stabilizer, defaultStabilizeOptions } from '../algo/stabilize'
 import { toGray } from '../algo/sharpness'
 import { activity } from './activity.svelte'
-import { frameChain, toImageData } from './frameChain'
+import { frameChain, toImageData, type FrameInput } from './frameChain'
 import { deflickerProcessor } from './deflickerProcessor'
 import { createVideoSink, type VideoSink, type Container, type VideoCodecPref, type VideoQuality } from './videoEncoder'
+import type { VideoModeRun, ModeFrameInfo } from './video/types'
+import { drawBurnIn, type BurnInKind } from './video/burnIn'
+import { umPerPxAt } from '../store/scaleCal.svelte'
+import { sample } from '../store/sample.svelte'
 
 export type FrameSource = () => { image: CanvasImageSource; width: number; height: number } | null
 
@@ -53,6 +64,12 @@ export interface RecorderOptions {
   stabilize: boolean
   /** bake `services/deflickerProcessor.ts` into this recording (order 50 in the frame chain) */
   deflicker: boolean
+  /** the video mode run for this recording (none = plain) */
+  mode?: VideoModeRun | null
+  /** overlays to draw into the frames */
+  burnIn?: BurnInKind[]
+  /** catalogue label and user parameters of `mode`, recorded on the gallery item */
+  modeInfo?: { label: string; params?: Record<string, unknown> }
 }
 
 const GRAY_WIDTH = 480   // downscale width for the stabiliser's tracking frame (register.ts refines from here)
@@ -63,9 +80,24 @@ export class Recorder {
   frames = $state(0)
   status = $state('')
   options = $state<RecorderOptions>({ container: 'mp4', codec: 'auto', quality: 'high', keyframeS: 2, maxFps: 30, stabilize: true, deflicker: false })
+  /** the mode's own progress text, refreshed with the clock while recording */
+  modeStatus = $state('')
   private sink: VideoSink | null = null
   private canvas: HTMLCanvasElement | null = null
   private ctx: CanvasRenderingContext2D | null = null
+  /** encoder input: the working canvas itself unless the mode changes the output size */
+  private outCanvas: HTMLCanvasElement | null = null
+  private outCtx: CanvasRenderingContext2D | null = null
+  private outImage: ImageData | null = null
+  private mode: VideoModeRun | null = null
+  private modeStarted = false
+  private modeWasMoving = false
+  private burnIn: BurnInKind[] = []
+  /** human label + the parameters the mode was started with, for the gallery item (set by the caller
+   *  through `RecorderOptions.modeInfo`) */
+  private modeLabel = ''
+  private modeParams: Record<string, unknown> | undefined
+  private firstOutT: number | null = null
   private grayCanvas: OffscreenCanvas | null = null
   private off: (() => void) | null = null
   private mjpeg: MjpegStream | null = null
@@ -125,15 +157,17 @@ export class Recorder {
       return true
     }
     draw()
-    void createVideoSink(this.canvas!, this.sinkOptions(o, 15))
+    void this.startMode()
+      .then(() => createVideoSink(this.outCanvas!, this.sinkOptions(o, 15)))
       .then((sink) => { this.sink = sink; this.finishStart() })
-      .catch((e) => { this.status = `could not start the recorder: ${(e as Error).message}` })
+      .catch((e) => { this.status = `could not start the recorder: ${(e as Error).message}`; void this.stopMode() })
     const minGap = o.maxFps > 0 ? 1000 / o.maxFps : 0
     let lastSeq = -1, lastDraw = -Infinity
     this.off = device.client.on('event.frame', (f: FrameMeta) => {
       if (!this.recording || f.seq === lastSeq) return
       const now = performance.now()
       if (minGap && now - lastDraw < minGap * 0.9) return
+      if (this.mode?.accept && !this.mode.accept(this.frameInfo(f.ts ?? f.t, f.seq))) return
       if (!draw()) return
       lastSeq = f.seq; lastDraw = now
       this.pushFrame(f.ts ?? f.t, f.seq)
@@ -147,6 +181,7 @@ export class Recorder {
     if (this.recording) return
     const o = { ...this.options, ...opts }
     this.label = label
+    if (o.mode?.disablesStabiliser) o.stabilize = false
     this.stabilizer = o.stabilize ? new Stabilizer(defaultStabilizeOptions) : null
     this.margin = o.stabilize ? Math.ceil(defaultStabilizeOptions.maxShiftPx) + 2 : 0
     this.wasMoving = device.moving
@@ -156,10 +191,12 @@ export class Recorder {
       if (!started) {
         started = true
         this.beginCanvas(frame.bitmap.width, frame.bitmap.height, o)
-        void createVideoSink(this.canvas!, this.sinkOptions(o, 20))
+        void this.startMode()
+          .then(() => createVideoSink(this.outCanvas!, this.sinkOptions(o, 20)))
           .then((sink) => { this.sink = sink; this.finishStart() })
-          .catch((e) => { this.status = `could not start the recorder: ${(e as Error).message}`; this.mjpeg?.stop() })
+          .catch((e) => { this.status = `could not start the recorder: ${(e as Error).message}`; this.mjpeg?.stop(); void this.stopMode() })
       }
+      if (this.mode?.accept && !this.mode.accept(this.frameInfo(frame.ts, frame.seq))) { frame.bitmap.close(); return }
       this.drawStreamFrame(frame)
       this.pushFrame(frame.ts, frame.seq)
       frame.bitmap.close()
@@ -168,7 +205,7 @@ export class Recorder {
   }
 
   private sinkOptions(o: RecorderOptions, fpsHint: number) {
-    return { width: this.canvas!.width, height: this.canvas!.height, container: o.container, codec: o.codec, quality: o.quality, keyframeS: o.keyframeS, fpsHint }
+    return { width: this.outCanvas!.width, height: this.outCanvas!.height, container: o.container, codec: o.codec, quality: o.quality, keyframeS: o.keyframeS, fpsHint }
   }
 
   private beginCanvas(w: number, h: number, o: RecorderOptions): void {
@@ -178,10 +215,40 @@ export class Recorder {
     canvas.width = cw; canvas.height = ch
     this.canvas = canvas
     this.ctx = canvas.getContext('2d', { willReadFrequently: true })
-    this.log = []; this.frames = 0; this.thumb = null
+    this.log = []; this.frames = 0; this.thumb = null; this.firstOutT = null
     this.optsUsed = o
+    this.mode = o.mode ?? null
+    this.modeLabel = o.modeInfo?.label ?? this.mode?.id ?? ''
+    this.modeParams = o.modeInfo?.params
+    this.modeStarted = false
+    this.modeWasMoving = device.moving
+    this.burnIn = o.burnIn ?? []
+    const out = this.mode?.outputSize?.(cw, ch) ?? { w: cw, h: ch }
+    if (out.w !== cw || out.h !== ch) {
+      this.outCanvas = document.createElement('canvas')
+      this.outCanvas.width = out.w; this.outCanvas.height = out.h
+      this.outCtx = this.outCanvas.getContext('2d', { willReadFrequently: true })
+    } else { this.outCanvas = canvas; this.outCtx = this.ctx }
+    this.outImage = null
     deflickerProcessor.recordEnabled = o.deflicker
     frameChain.reset()
+    this.mode?.reset?.()
+  }
+
+  private frameInfo(t: number | null, seq: number): ModeFrameInfo {
+    return { t, seq, position: { ...device.position } }
+  }
+
+  private async startMode(): Promise<void> {
+    if (!this.mode?.start || this.modeStarted) { this.modeStarted = true; return }
+    this.modeStarted = true
+    await this.mode.start()
+  }
+
+  private async stopMode(): Promise<void> {
+    const m = this.mode
+    this.mode = null
+    if (m && this.modeStarted) { this.modeStarted = false; try { await m.stop?.() } catch (e) { this.status = `mode stop: ${(e as Error).message}` } }
   }
 
   private resizeIfNeeded(w: number, h: number): void {
@@ -197,7 +264,7 @@ export class Recorder {
     this.resizeIfNeeded(bitmap.width, bitmap.height)
     let dx = 0, dy = 0
     if (this.stabilizer) {
-      const moving = device.moving
+      const moving = device.moving && !this.mode?.drivesStage
       if (moving) { if (!this.wasMoving) this.stabilizer.reset(); this.wasMoving = true }
       else {
         this.wasMoving = false
@@ -219,42 +286,83 @@ export class Recorder {
     return toGray(gctx.getImageData(0, 0, w, h))
   }
 
-  /** Run the registered frame-chain processors (deflicker order 50; other packages may add more) over
-   *  the canvas's current pixels and write the result back. A no-op (no readback) when nothing for
-   *  `'record'` is enabled, so a plain recording never pays the extra `getImageData`/`putImageData`. */
-  private runChain(t: number): void {
-    if (!frameChain.active('record')) return
+  /** Frame chain (< 900: deflicker, denoise) → video mode → frame chain (≥ 900: colour LUT), read
+   *  back from the working canvas and written to the output canvas. A no-op (no readback) when
+   *  nothing is enabled and no mode processes frames, so a plain recording never pays the extra
+   *  `getImageData`/`putImageData`. Returns the device time the output frame represents, or `null`
+   *  when the mode produced nothing for this input. */
+  private processFrame(tNs: number | null, seq: number): { t: number | null } | null {
+    const mode = this.mode
+    const chainT = tNs ?? performance.now() * 1e6
+    if (mode?.reset && !mode.drivesStage) {
+      const moving = device.moving
+      if (moving !== this.modeWasMoving) { this.modeWasMoving = moving; mode.reset() }
+    }
+    const needRgba = !!mode?.process || frameChain.active('record')
+    if (!needRgba) return { t: tNs }
     const ctx = this.ctx!, w = this.canvas!.width, h = this.canvas!.height
     const img = ctx.getImageData(0, 0, w, h)
-    const out = frameChain.run('record', { data: img.data, width: img.width, height: img.height }, t)
-    const rgba = toImageData(out)
-    ctx.putImageData(rgba.data === img.data ? img : new ImageData(new Uint8ClampedArray(rgba.data), rgba.width, rgba.height), 0, 0)
+    let f: FrameInput = { data: img.data, width: img.width, height: img.height }
+    f = frameChain.run('record', f, chainT, { max: 900 })
+    let tOut: number | null = tNs
+    if (mode?.process) {
+      const r = mode.process(toImageData(f), this.frameInfo(tNs, seq))
+      if (!r) return null
+      f = r.frame
+      if (r.t !== undefined) tOut = r.t
+    }
+    f = frameChain.run('record', f, chainT, { min: 900 })
+    const rgba = toImageData(f)
+    const oc = this.outCanvas!, octx = this.outCtx!
+    if (rgba.width !== oc.width || rgba.height !== oc.height) {
+      // a mode whose output size differs from what it declared: fit rather than corrupt the encoder
+      const tmp = new OffscreenCanvas(rgba.width, rgba.height)
+      tmp.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(rgba.data), rgba.width, rgba.height), 0, 0)
+      octx.drawImage(tmp, 0, 0, oc.width, oc.height)
+      return { t: tOut }
+    }
+    if (rgba.data === img.data && oc === this.canvas) { octx.putImageData(img, 0, 0); return { t: tOut } }
+    if (!this.outImage || this.outImage.width !== oc.width || this.outImage.height !== oc.height) this.outImage = octx.createImageData(oc.width, oc.height)
+    this.outImage.data.set(rgba.data)
+    octx.putImageData(this.outImage, 0, 0)
+    return { t: tOut }
   }
 
-  /** Run the frame chain, then hand the canvas to the sink with the frame's own device time (falls
-   *  back to wall-clock when the stream carries none). Dropped-by-backlog frames are still logged as
-   *  "not encoded" by simply not appending to `log`/`frames`. */
+  /** Process, overlay, then hand the output canvas to the sink with the frame's own device time
+   *  (falls back to wall-clock when the stream carries none), re-timed by the mode if it asks.
+   *  Dropped-by-backlog frames are still logged as "not encoded" by simply not appending to
+   *  `log`/`frames`. */
   private pushFrame(tNs: number | null, seq: number): void {
     if (!this.sink || !this.recording) return
-    const chainT = tNs ?? performance.now() * 1e6
-    this.runChain(chainT)
-    const tSec = tNs != null ? tNs / 1e9 : performance.now() / 1000
-    if (this.sink.addFrame(this.canvas!, tSec)) {
+    const out = this.processFrame(tNs, seq)
+    if (!out) return
+    let tSec = out.t != null ? out.t / 1e9 : performance.now() / 1000
+    if (this.mode?.retime) tSec = this.mode.retime(tSec)
+    if (this.firstOutT == null) this.firstOutT = tSec
+    if (this.burnIn.length) {
+      const oc = this.outCanvas!
+      drawBurnIn(this.outCtx!, oc.width, oc.height, {
+        kinds: this.burnIn, elapsedS: Math.max(0, tSec - this.firstOutT), position: device.position,
+        umPerPx: this.burnIn.includes('scalebar') ? umPerPxAt(oc.width) : null,
+        sampleName: sample.name || undefined, modeStatus: this.mode?.status?.(),
+      })
+    }
+    if (this.sink.addFrame(this.outCanvas!, tSec)) {
       this.frames++
-      this.log.push({ t: tNs ?? 0, seq, position: { ...device.position } })
+      this.log.push({ t: out.t ?? 0, seq, position: { ...device.position } })
       if (this.frames === 20) this.captureThumbnail()
     }
   }
 
   private captureThumbnail(): void {
-    this.canvas?.toBlob((b) => (this.thumb = b), 'image/jpeg', 0.8)
+    this.outCanvas?.toBlob((b) => (this.thumb = b), 'image/jpeg', 0.8)
   }
 
   private finishStart(): void {
     this.stabiliseUsed = !!this.stabilizer
     this.deflickerUsed = this.optsUsed.deflicker
     this.startedAt = performance.now(); this.seconds = 0
-    this.clock = setInterval(() => (this.seconds = Math.round((performance.now() - this.startedAt) / 1000)), 500)
+    this.clock = setInterval(() => { this.seconds = Math.round((performance.now() - this.startedAt) / 1000); this.modeStatus = this.mode?.status?.() ?? '' }, 500)
     this.recording = true; this.status = ''
     this.releaseActivity?.()
     this.releaseActivity = activity.hold('video recording')
@@ -266,6 +374,9 @@ export class Recorder {
     if (!this.sink || !this.recording) {
       this.recording = false
       this.sink = null
+      this.mjpeg?.stop(); this.mjpeg = null
+      this.off?.(); this.off = null
+      await this.stopMode()
       this.releaseActivity?.(); this.releaseActivity = null
       return null
     }
@@ -274,16 +385,22 @@ export class Recorder {
     this.mjpeg?.stop(); this.mjpeg = null
     clearInterval(this.clock)
     deflickerProcessor.recordEnabled = false
+    const mode = this.mode
+    const modeMeta = mode ? { id: mode.id, label: this.modeLabel, params: this.modeParams, stats: mode.stats?.() } : undefined
+    const modeStop = this.stopMode()
     try {
       const sink = this.sink; this.sink = null
       const result = await sink.close()
-      const thumb = this.thumb ?? (await new Promise<Blob | null>((r) => this.canvas!.toBlob(r, 'image/jpeg', 0.8)))
+      await modeStop
+      const thumb = this.thumb ?? (await new Promise<Blob | null>((r) => this.outCanvas!.toBlob(r, 'image/jpeg', 0.8)))
       const log = this.log
       this.thumb = null; this.log = []; this.stabilizer = null
+      if (!log.length) { this.status = `nothing recorded: ${modeMeta ? `the ${modeMeta.label} mode produced no frames` : 'no frames arrived'}${mode?.status ? ` (${mode.status()})` : ''}`; return null }
       this.status = 'saving…'
       const fps = result.durationS > 0 ? Math.round((log.length / result.durationS) * 10) / 10 : 0
       const item = await saveVideo(result.blob, thumb, {
-        durationS: result.durationS, fps, source: this.label, width: this.canvas!.width, height: this.canvas!.height, position: { ...device.position },
+        durationS: result.durationS, fps, source: this.label, width: this.outCanvas!.width, height: this.outCanvas!.height, position: { ...device.position },
+        mode: modeMeta, burnIn: this.burnIn,
         codec: result.codec, frames: log,
         encoder: result.kind, container: result.container, quality: typeof this.optsUsed.quality === 'string' ? this.optsUsed.quality : `${this.optsUsed.quality.bitrateMbps} Mbit/s`,
         keyframeS: this.optsUsed.keyframeS, stabilised: this.stabiliseUsed, deflickered: this.deflickerUsed,

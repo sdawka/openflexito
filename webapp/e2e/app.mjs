@@ -647,6 +647,99 @@ await step('recording with a non-default container/codec still lands in the gall
   await panel.locator('label:has-text("Codec") select').selectOption('auto')
 })
 
+// ---- video modes (services/video/videoModes.ts): same Record button, a mode picker like the photo modes ----
+async function recordMode(modeId, seconds, savedRe) {
+  await nav('live')
+  const panel = await tool('Photo')
+  // the mode steps compare output sizes with the stream size, so record without the stabiliser's crop margin
+  const stabilise = panel.locator('label:has-text("Stabilise") input[type=checkbox]')
+  if (await stabilise.isChecked()) await stabilise.uncheck()
+  await panel.locator('select[aria-label="video mode"]').selectOption(modeId)
+  await page.click('button:has-text("Record video")')
+  await page.waitForFunction(() => /Stop · \d+ s/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 8000 })
+  await page.waitForTimeout(seconds * 1000)
+  await page.click('button:has-text("Stop ·")')
+  await page.waitForFunction((src) => new RegExp(src).test(document.querySelector('main')?.textContent || ''), savedRe.source, { timeout: 20000 })
+}
+async function openLatestVideo(cardText) {
+  await nav('gallery'); await page.waitForTimeout(600)
+  await page.locator(`.card:has-text("${cardText}") button:has-text("Open")`).first().click()
+  await page.waitForSelector('video.video', { timeout: 5000 })
+  const size = await page.locator('video.video').evaluate((v) => new Promise((r) => { const done = () => r({ w: v.videoWidth, h: v.videoHeight, d: v.duration }); if (v.readyState >= 1) done(); else v.onloadedmetadata = done }))
+  await page.click('.overlay button.details-toggle')
+  await page.waitForSelector('.overlay .details', { timeout: 3000 })
+  const details = await page.locator('.overlay .details').innerText()
+  await page.click('.overlay button.details-toggle')
+  await page.click('button:has-text("close")')
+  return { size, details }
+}
+/** Stream frame width as the Photo panel reports it ("stream N kB/frame · W×H"). */
+async function streamWidth() {
+  await nav('live'); await tool('Photo')
+  const m = (await page.locator('.panel:has(h3:has-text("Photo"))').innerText()).match(/· (\d+)×(\d+)/)
+  expect(m, 'Photo panel does not show the stream size')
+  return +m[1]
+}
+
+await step('binned video mode records at half size and the viewer shows the mode', async () => {
+  const sw = await streamWidth()
+  await recordMode('bin', 2, /saved "Video binned/)
+  const { size, details } = await openLatestVideo('Video binned')
+  expect(size.w === Math.floor(sw / 2), `binned video width ${size.w}, expected ${Math.floor(sw / 2)}`)
+  expect(/mode Binned/.test(details), 'viewer lacks the video mode line')
+})
+
+await step('motion highlight mode with the elapsed-time burn-in records and saves its stats', async () => {
+  await nav('live')
+  const panel = await tool('Photo')
+  await panel.locator('.burnin label:has-text("Elapsed time") input').check()
+  const sw = await streamWidth()
+  await recordMode('motion', 2, /saved "Video motion highlight/)
+  const { size, details } = await openLatestVideo('Video motion highlight')
+  expect(size.w === sw, `motion video width ${size.w}, expected the stream's ${sw}`)
+  expect(/mode Motion highlight/.test(details) && /burn-in: time/.test(details), 'viewer lacks mode/burn-in details')
+  await nav('live'); await tool('Photo')
+  await panel.locator('.burnin label:has-text("Elapsed time") input').uncheck()
+})
+
+await step('time compression mode keeps one frame per interval and re-times them', async () => {
+  await nav('live')
+  const panel = await tool('Photo')
+  await panel.locator('select[aria-label="video mode"]').selectOption('timelapse')
+  const every = panel.locator('label:has-text("Every (s)") input')
+  await every.click({ clickCount: 3 }); await every.pressSequentially('0.5'); await every.dispatchEvent('change')
+  await recordMode('timelapse', 3, /saved "Video time compression/)
+  const { details } = await openLatestVideo('Video time compression')
+  const m = details.match(/kept (\d+)/)
+  expect(m && +m[1] >= 3 && +m[1] <= 9, `expected 3–9 kept frames over 3 s at 0.5 s, got ${m?.[1]}`)
+})
+
+if (moves) await step('extended-depth-of-field video dithers z and returns to the starting z', async () => {
+  await nav('live')
+  const z0 = (await position()).z
+  await recordMode('edof', 4, /saved "Video extended depth of field/)
+  await page.waitForFunction((z) => { const m = document.querySelector('nav')?.textContent?.match(/z\s+(-?\d+)/); return m && +m[1] === z }, z0, { timeout: 8000 })
+    .catch(async () => { throw new Error(`EDOF video left z at ${(await position()).z}, started at ${z0}`) })
+  const { details } = await openLatestVideo('Video extended depth of field')
+  expect(/mode Extended depth of field/.test(details) && /framesStacked [1-9]/.test(details), `EDOF stats missing: ${details.slice(0, 200)}`)
+})
+
+if (moves) await step('super-resolution video dithers xy, drizzles and returns to the start', async () => {
+  await nav('live')
+  const p0 = await position()
+  const sw = await streamWidth()
+  await recordMode('superres', 5, /saved "Video super-resolution/)
+  await page.waitForFunction((x) => { const m = document.querySelector('nav')?.textContent?.match(/x\s+(-?\d+)/); return m && +m[1] === x }, p0.x, { timeout: 8000 })
+    .catch(async () => { throw new Error(`SR video left x at ${(await position()).x}, started at ${p0.x}`) })
+  const { size, details } = await openLatestVideo('Video super-resolution')
+  expect(size.w === 2 * (Math.floor(sw / 2) & ~1), `SR video width ${size.w}: expected ${2 * (Math.floor(sw / 2) & ~1)}`)
+  expect(/fused [1-9]/.test(details), `SR stats missing: ${details.slice(0, 200)}`)
+  await nav('live')
+  const panel = await tool('Photo')
+  await panel.locator('select[aria-label="video mode"]').selectOption('plain')
+  await panel.locator('label:has-text("Stabilise") input[type=checkbox]').check()
+})
+
 await step('time-lapse exports to MP4 via WebCodecs', async () => {
   await nav('gallery'); await page.waitForTimeout(600)
   await page.locator('.card:has-text("Time-lapse") button:has-text("Open")').first().click()

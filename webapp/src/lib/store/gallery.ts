@@ -72,6 +72,11 @@ export interface GalleryItem {
     deflickered?: boolean
     framesDropped?: number
     framesDuplicated?: number
+    /** additive: the video mode (`services/video/videoModes.ts`) this was recorded with, its
+     *  parameters, and what the mode reports about the run (frames fused, frames rejected, ...) */
+    mode?: { id: string; label: string; params?: Record<string, unknown>; stats?: Record<string, unknown> }
+    /** additive: which burn-in overlays (`services/video/burnIn.ts`) were drawn into the frames */
+    burnIn?: string[]
   }
   /** time-lapse: blobs 'f0000', 'f0001', ... one JPEG per frame, plus 'thumb' from the first frame.
    *  `frames[i].shift` is that frame's measured drift (px) from the first frame (see `algo/drift.ts`);
@@ -229,7 +234,8 @@ export async function saveSnapshot(blob: Blob, meta: { position?: GalleryItem['p
 export async function saveVideo(blob: Blob, thumb: Blob | null, meta: { durationS: number; fps: number; source: string; width: number; height: number; position?: GalleryItem['position']
   codec?: string; bitrateBps?: number; frames?: VideoFrameLog[]
   encoder?: 'webcodecs' | 'mediarecorder'; container?: 'mp4' | 'webm'; quality?: string; keyframeS?: number
-  stabilised?: boolean; deflickered?: boolean; framesDropped?: number; framesDuplicated?: number }): Promise<GalleryItem> {
+  stabilised?: boolean; deflickered?: boolean; framesDropped?: number; framesDuplicated?: number
+  mode?: NonNullable<GalleryItem['video']>['mode']; burnIn?: string[] }): Promise<GalleryItem> {
   const id = newId()
   const frames = meta.frames?.length ? meta.frames : undefined
   const item: GalleryItem = {
@@ -238,6 +244,7 @@ export async function saveVideo(blob: Blob, thumb: Blob | null, meta: { duration
     video: {
       durationS: meta.durationS, fps: meta.fps, source: meta.source, mime: blob.type, codec: meta.codec, bitrateBps: meta.bitrateBps, frameCount: frames?.length, frameLog: frames ? 'frames' : undefined,
       stabilised: meta.stabilised, encoder: meta.encoder, container: meta.container, quality: meta.quality, keyframeS: meta.keyframeS, deflickered: meta.deflickered, framesDropped: meta.framesDropped, framesDuplicated: meta.framesDuplicated,
+      mode: meta.mode, burnIn: meta.burnIn?.length ? meta.burnIn : undefined,
     },
     sample: currentSample(),
   }

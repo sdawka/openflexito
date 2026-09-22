@@ -77,10 +77,20 @@ export const frameChain = {
     return processors.some((p) => p.enabled(target))
   },
   list(): readonly FrameProcessor[] { return processors },
-  run(target: FrameTarget, frame: FrameInput, t = performance.now() * 1e6): FrameInput {
+  /** Run every enabled processor whose `order` lies in `[range.min, range.max)` (default: all). A
+   *  consumer that has to insert its own step at a fixed point in the chain (the recorder's video
+   *  mode runs after denoise/deflicker but before the colour LUT) calls this twice with adjacent
+   *  ranges instead of editing the processors. */
+  run(target: FrameTarget, frame: FrameInput, t = performance.now() * 1e6, range?: { min?: number; max?: number }): FrameInput {
+    const min = range?.min ?? -Infinity, max = range?.max ?? Infinity
     let f = frame
-    for (const p of processors) if (p.enabled(target)) f = p.process(f, target, t)
+    for (const p of processors) if (p.order >= min && p.order < max && p.enabled(target)) f = p.process(f, target, t)
     return f
+  },
+  /** Like `active`, restricted to an order range. */
+  activeIn(target: FrameTarget, range: { min?: number; max?: number }): boolean {
+    const min = range.min ?? -Infinity, max = range.max ?? Infinity
+    return processors.some((p) => p.order >= min && p.order < max && p.enabled(target))
   },
   reset(): void { for (const p of processors) p.reset?.() },
 }

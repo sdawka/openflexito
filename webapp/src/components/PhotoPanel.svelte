@@ -9,6 +9,10 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
   import { recorder, Recorder, type VideoCodec, type VideoContainer, type VideoQuality } from '../lib/services/recorder.svelte'
   import { liveStack } from '../lib/services/liveStack.svelte'
   import { macroService } from '../lib/services/macro.svelte'
+  import { VIDEO_MODES, DEFAULT_VIDEO_PARAMS, createVideoMode, modeParamsRecord, videoModeInfo, type VideoModeId, type VideoModeParams } from '../lib/services/video/videoModes'
+  import { BURN_IN_KINDS, type BurnInKind } from '../lib/services/video/burnIn'
+  import { calibration } from '../lib/store/calibration.svelte'
+  import { listColormaps } from '../lib/algo/colormaps'
 
   let mode = $state<PhotoMode>('single')
   let slices = $state(5)
@@ -35,6 +39,34 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
   let vidStabilise = $state(settings.videoStabilise)
   let vidDeflicker = $state(settings.videoDeflicker)
   const codecSupport = Recorder.codecSupport()
+  // ---- video mode (services/video/videoModes.ts): the recording counterpart of the photo modes ----
+  let vidMode = $state<VideoModeId>((VIDEO_MODES.some((m) => m.id === settings.videoMode) ? settings.videoMode : 'plain') as VideoModeId)
+  let vidParams = $state<VideoModeParams>(mergeParams(settings.videoModeParams))
+  let vidBurnIn = $state<BurnInKind[]>((settings.videoBurnIn ?? []).filter((k) => BURN_IN_KINDS.some((b) => b.id === k)) as BurnInKind[])
+  const vidInfo = $derived(videoModeInfo(vidMode))
+  const colormaps = listColormaps()
+  function mergeParams(saved: Record<string, Record<string, unknown>> | undefined): VideoModeParams {
+    const out = structuredClone(DEFAULT_VIDEO_PARAMS) as unknown as Record<string, Record<string, unknown>>
+    for (const [k, v] of Object.entries(saved ?? {})) if (out[k] && v && typeof v === 'object') out[k] = { ...out[k], ...v }
+    return out as unknown as VideoModeParams
+  }
+  function saveVideoMode() {
+    settings.videoMode = vidMode
+    settings.videoModeParams = $state.snapshot(vidParams) as unknown as Record<string, Record<string, unknown>>
+    settings.videoBurnIn = [...vidBurnIn]
+    saveSettings()
+  }
+  function toggleBurnIn(k: BurnInKind, on: boolean) {
+    vidBurnIn = on ? [...new Set([...vidBurnIn, k])] : vidBurnIn.filter((x) => x !== k)
+    saveVideoMode()
+  }
+  /** Why the chosen video mode cannot start right now, or null. */
+  const vidBlock = $derived.by(() => {
+    if (vidInfo.drivesStage && device.moving) return 'the stage is moving'
+    if (vidInfo.needsLed && !(device.light.cc > 0)) return 'the main LED is off'
+    if (vidMode === 'superres' && !calibration.csm) return null   // allowed: falls back to a 1-step dither
+    return null
+  })
 
   /** Parse a comma/space-separated list of positive numbers; falls back to `fallback` if empty/invalid. */
   function parseNums(text: string, fallback: number[]): number[] {
@@ -104,17 +136,25 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
   }
   function toggleRecord() {
     if (recorder.recording) { void recorder.stop().then((i) => { if (i) status = { kind: 'ok', text: `saved "${i.name}"` } }); return }
+    if (vidBlock) { status = { kind: 'err', text: `cannot start ${vidInfo.label}: ${vidBlock}` }; return }
     const useStack = liveStack.active && !!liveStack.composite
-    const opts = { container: vidContainer, codec: vidCodec, quality: vidQuality, keyframeS: vidKeyframeS, stabilize: vidStabilise, deflicker: vidDeflicker }
+    let mode
+    try { mode = createVideoMode(vidMode, $state.snapshot(vidParams) as VideoModeParams) } catch (e) { status = { kind: 'err', text: (e as Error).message }; return }
+    const opts = {
+      container: vidContainer, codec: vidCodec, quality: vidQuality, keyframeS: vidKeyframeS, stabilize: vidStabilise, deflicker: vidDeflicker,
+      mode, modeInfo: { label: vidInfo.label, params: modeParamsRecord(vidMode, $state.snapshot(vidParams) as VideoModeParams) }, burnIn: [...vidBurnIn],
+    }
+    // "Video extended depth of field 5 s" but "Video HDR (LED alternation) 5 s": only a leading capital before lowercase is lowered
+    const label = vidMode === 'plain' ? 'live view' : vidInfo.label.replace(/^[A-Z](?=[a-z])/, (c) => c.toLowerCase())
     if (useStack) {
       // the live stack is already a temporally smoothed composite (not a raw <img>), so it keeps
       // using the polled FrameSource path; stabilisation is for the raw stream's jitter.
       recorder.start(() => {
         const b = liveStack.composite
         return b ? { image: b, width: b.width, height: b.height } : null
-      }, liveStack.mode === 'average' ? 'smoothed view' : 'live stack', { ...opts, stabilize: false })
+      }, vidMode === 'plain' ? (liveStack.mode === 'average' ? 'smoothed view' : 'live stack') : label, { ...opts, stabilize: false })
     } else {
-      recorder.startStream('live view', opts)
+      recorder.startStream(label, opts)
     }
     if (recorder.status) status = { kind: 'err', text: recorder.status }
   }
@@ -143,10 +183,96 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
     <button class="rec" class:on={recorder.recording} onclick={toggleRecord} disabled={!device.connected} title="record the live view (or the live focus stack when it is on) into the gallery">
       <span class="dot"></span>{recorder.recording ? `Stop · ${recorder.seconds} s` : 'Record video'}
     </button>
-    {#if recorder.recording}<span class="muted small">recording {liveStack.active && liveStack.composite ? (liveStack.mode === 'average' ? 'the smoothed view' : 'the live stack') : 'the live view'} · {recorder.frames} frames</span>{/if}
+    {#if recorder.recording}<span class="muted small">recording {vidMode === 'plain' ? (liveStack.active && liveStack.composite ? (liveStack.mode === 'average' ? 'the smoothed view' : 'the live stack') : 'the live view') : vidInfo.label} · {recorder.frames} frames{#if recorder.modeStatus} · {recorder.modeStatus}{/if}</span>{/if}
     {#if recorder.status && !recorder.recording}<span class="muted small">{recorder.status}</span>{/if}
   </div>
   {#if !recorder.recording}
+    <div class="kv" style="margin-top:8px"><span>Video mode</span><span class="v muted" style="color:var(--muted)">{vidInfo.cost}</span></div>
+    <select bind:value={vidMode} disabled={busy} style="width:100%" aria-label="video mode" onchange={saveVideoMode}>
+      {#each ['quality', 'stage', 'motion', 'time'] as g}
+        <optgroup label={g === 'quality' ? 'Signal quality' : g === 'stage' ? 'Stage & illumination' : g === 'motion' ? 'Motion' : 'Time'}>
+          {#each VIDEO_MODES.filter((m) => m.group === g) as m}<option value={m.id}>{m.label}</option>{/each}
+        </optgroup>
+      {/each}
+    </select>
+    <p class="blurb">{vidInfo.blurb}</p>
+    {#if vidBlock}<p class="blurb" style="color:var(--warn)">Cannot start: {vidBlock}.</p>{/if}
+    {#if vidMode === 'superres' && !calibration.csm}<p class="blurb" style="color:var(--warn)">No stage↔camera calibration: the dither falls back to one raw step per axis (the frames are still registered, but the sub-pixel phases are luck).</p>{/if}
+    {#if vidMode === 'denoise'}
+      <div class="params"><label title="weight of the history, 0.5 (light) … 0.9 (strong); the ghost gate keeps moving things from smearing">Strength <input type="range" min="0.3" max="0.95" step="0.05" bind:value={vidParams.denoise.alpha} onchange={saveVideoMode} /> <span class="mono small">{vidParams.denoise.alpha}</span></label></div>
+    {:else if vidMode === 'integrate'}
+      <div class="params">
+        <label>Frames <input type="number" min="2" max="64" bind:value={vidParams.integrate.frames} onchange={saveVideoMode} /></label>
+        <label>Window
+          <select bind:value={vidParams.integrate.kind} onchange={saveVideoMode}><option value="mean">Sliding mean</option><option value="exp">Exponential (persistence)</option></select>
+        </label>
+      </div>
+    {:else if vidMode === 'median'}
+      <div class="params"><label>Frames <select bind:value={vidParams.median.frames} onchange={saveVideoMode}><option value={3}>3</option><option value={5}>5</option></select></label></div>
+    {:else if vidMode === 'bin'}
+      <div class="params">
+        <label>Factor <select bind:value={vidParams.bin.factor} onchange={saveVideoMode} aria-label="bin factor"><option value={2}>2×2</option><option value={3}>3×3</option><option value={4}>4×4</option></select></label>
+        <label>Kernel <select bind:value={vidParams.bin.kernel} onchange={saveVideoMode}><option value="mean">Mean</option><option value="edge">Edge-aware</option></select></label>
+      </div>
+    {:else if vidMode === 'lucky'}
+      <div class="params"><label title="fraction of frames kept, by sharpness rank over the last 60">Keep <input type="range" min="0.1" max="0.9" step="0.1" bind:value={vidParams.lucky.keep} onchange={saveVideoMode} /> <span class="mono small">{Math.round(vidParams.lucky.keep * 100)} %</span></label></div>
+    {:else if vidMode === 'edof'}
+      <div class="params">
+        <label>Δz (steps) <input type="number" min="5" max="500" bind:value={vidParams.edof.dz} onchange={saveVideoMode} /></label>
+        <label>Dwell (ms) <input type="number" min="50" max="2000" step="50" bind:value={vidParams.edof.dwellMs} onchange={saveVideoMode} /></label>
+      </div>
+    {:else if vidMode === 'sweep'}
+      <div class="params">
+        <label>Range ± (steps) <input type="number" min="20" max="5000" bind:value={vidParams.sweep.range} onchange={saveVideoMode} /></label>
+        <label>Stops <input type="number" min="2" max="200" bind:value={vidParams.sweep.steps} onchange={saveVideoMode} /></label>
+        <label>Dwell (ms) <input type="number" min="100" max="5000" step="100" bind:value={vidParams.sweep.dwellMs} onchange={saveVideoMode} /></label>
+      </div>
+    {:else if vidMode === 'superres'}
+      <div class="params">
+        <label title="frames drizzled per output frame">Window <input type="number" min="2" max="8" bind:value={vidParams.superres.window} onchange={saveVideoMode} /></label>
+        <label title="drizzle drop size (0.4 sharp … 1 plain average)">Pixfrac <input type="number" min="0.3" max="1" step="0.1" bind:value={vidParams.superres.pixfrac} onchange={saveVideoMode} /></label>
+      </div>
+    {:else if vidMode === 'hdr'}
+      <div class="params">
+        <label title="bright ÷ dim LED level">Ratio <select bind:value={vidParams.hdr.ratio} onchange={saveVideoMode}><option value={2}>2×</option><option value={4}>4×</option><option value={8}>8×</option></select></label>
+        <label title="frames per LED level; 1 alternates every frame">Period <input type="number" min="1" max="6" bind:value={vidParams.hdr.period} onchange={saveVideoMode} /></label>
+      </div>
+    {:else if vidMode === 'motion'}
+      <div class="params">
+        <label title="difference threshold in noise σ; lower = more sensitive">Threshold σ <input type="number" min="2" max="10" step="0.5" bind:value={vidParams.motion.sensitivity} onchange={saveVideoMode} /></label>
+        <label title="how fast the background learns (per frame)">Learn <input type="number" min="0.005" max="0.2" step="0.005" bind:value={vidParams.motion.learn} onchange={saveVideoMode} /></label>
+      </div>
+    {:else if vidMode === 'trails'}
+      <div class="params">
+        <label title="trail persistence per frame (0.9 ≈ 10 frames)">Decay <input type="number" min="0.5" max="0.99" step="0.01" bind:value={vidParams.trails.decay} onchange={saveVideoMode} /></label>
+        <label>Threshold σ <input type="number" min="2" max="10" step="0.5" bind:value={vidParams.trails.sensitivity} onchange={saveVideoMode} /></label>
+      </div>
+    {:else if vidMode === 'timecode'}
+      <div class="params">
+        <label>Hue cycle (frames) <input type="number" min="10" max="2000" bind:value={vidParams.timecode.period} onchange={saveVideoMode} /></label>
+        <label title="1 = never fade (cumulative projection)">Fade <input type="number" min="0.9" max="1" step="0.005" bind:value={vidParams.timecode.decay} onchange={saveVideoMode} /></label>
+        <label>Map <select bind:value={vidParams.timecode.map} onchange={saveVideoMode}>{#each colormaps.filter((c) => c.key !== 'grays') as c}<option value={c.key}>{c.name}</option>{/each}</select></label>
+      </div>
+    {:else if vidMode === 'magnify'}
+      <div class="params">
+        <label>Band (Hz) <span class="row" style="gap:4px"><input type="number" min="0.1" max="8" step="0.1" bind:value={vidParams.magnify.fLo} onchange={saveVideoMode} />–<input type="number" min="0.2" max="9" step="0.1" bind:value={vidParams.magnify.fHi} onchange={saveVideoMode} /></span></label>
+        <label>Gain α <input type="number" min="2" max="100" bind:value={vidParams.magnify.alpha} onchange={saveVideoMode} /></label>
+        <label title="spatial scale: coarser = amplifies larger structures, less noise">Scale <select bind:value={vidParams.magnify.factor} onchange={saveVideoMode}><option value={4}>fine</option><option value={8}>medium</option><option value={16}>coarse</option></select></label>
+        <label style="flex-direction:row;align-items:center;gap:6px" title="paint the amplified signal warm/cool instead of adding it to the intensity"><input type="checkbox" bind:checked={vidParams.magnify.colour} onchange={saveVideoMode} /> Colour</label>
+      </div>
+    {:else if vidMode === 'timelapse'}
+      <div class="params">
+        <label>Every (s) <input type="number" min="0.2" max="3600" step="0.5" bind:value={vidParams.timelapse.intervalS} onchange={saveVideoMode} /></label>
+        <label>Playback fps <input type="number" min="1" max="60" bind:value={vidParams.timelapse.fps} onchange={saveVideoMode} /></label>
+        <span class="muted small">{vidParams.timelapse.intervalS * vidParams.timelapse.fps}× faster</span>
+      </div>
+    {/if}
+    <div class="params burnin" style="margin-top:6px">
+      <span class="muted small">Burn in:</span>
+      {#each BURN_IN_KINDS as b}
+        <label style="flex-direction:row;align-items:center;gap:4px" title={b.title}><input type="checkbox" checked={vidBurnIn.includes(b.id)} onchange={(e) => toggleBurnIn(b.id, (e.currentTarget as HTMLInputElement).checked)} /> {b.label}</label>
+      {/each}
+    </div>
     <div class="params" style="margin-top:6px">
       <label>Container
         <select bind:value={vidContainer} disabled={busy} onchange={saveVideoDefaults}>
@@ -175,6 +301,9 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
       </label>
       <label style="flex-direction:row;align-items:center;gap:6px" title="normalises per-frame brightness (LED driver / mains flicker) before encoding">
         <input type="checkbox" bind:checked={vidDeflicker} disabled={busy} onchange={saveVideoDefaults} /> Deflicker
+      </label>
+      <label style="flex-direction:row;align-items:center;gap:6px" title="apply the Look panel's LUT, curves and levels (as shown on the live view) to the recorded frames, after the video mode; the look can be changed while recording">
+        <input type="checkbox" bind:checked={settings.lookBakeIntoRecording} disabled={busy} onchange={saveSettings} /> Bake look
       </label>
     </div>
   {/if}
@@ -279,6 +408,9 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
   .small { font-size: 11px; }
   .adv { margin-top: 6px; }
   .adv summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+  .burnin { gap: 6px 10px; align-items: center; }
+  .burnin label { font-size: 12px; }
+  .params input[type=range] { width: 8em; }
 
   @media (max-width: 720px) {
     .params { flex-direction: column; align-items: stretch; gap: 6px; }
