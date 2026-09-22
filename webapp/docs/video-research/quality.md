@@ -213,3 +213,12 @@ delayed by two frames).
 - FFmpeg `hqdn3d` docs, https://ayosec.github.io/ffmpeg-filters-docs/8.0/Filters/Video/hqdn3d.html (luma/chroma spatial + temporal strengths, soft difference-dependent blending).
 - AutoStakkert quality metrics (Gradient vs Edge), https://starfieldview.com/imaging-and-processing/autostakkert-high-quality-planetary-image-stacking/ ; PlanetarySystemStacker, https://github.com/Rolf-Hempel/PlanetarySystemStacker (multi-point local quality ranking).
 - Punchihewa et al., "Effective quantization by averaging and dithering", Measurement 2006, https://www.sciencedirect.com/science/article/abs/pii/S0263224106000601 (averaging only recovers levels the noise dithers).
+
+## Addendum: items from the parallel first-round report not covered above
+
+- **Chroma-heavy denoise in YCoCg at half resolution** with a Fast Guided Filter (luma as guide, r = 4, ε = (8/255)²) and a stronger temporal weight on chroma (0.95 vs 0.8): colour speckle is the most visible noise on stained brightfield and chroma is already 4:2:0. Not implemented; would slot in after the burst merge (chain order 110).
+- **Temporal noise model as a shared enabler**: σ_t² = E[(cur − prev)²]/2 per 8×8 block on a static stage, invalidated on AE/gain change; every gate should read it. The burst merge now measures its own per-luma-bin curve; a shared block map is the next step.
+- **Dark frame + hot-pixel list + live flat division** for dark-field/fluorescence (32-frame dark with the LED off, 32-frame flat, gamma-2.2 LUT for the division, hot pixels replaced by the 3×3 median). Not implemented.
+- **Temporal median latency**: a 3-tap median is one frame late; subtract one frame interval from the sample time so stage metadata stays in sync. Not done (the log keeps the input frame's time).
+- Recommended chain: deflicker (50) → dark/flat (60) → median (90) → gated temporal (100) → chroma guided (110) → high-pass refinement `out += β·(cur − blur3(cur))`, β ≈ 0.3 where the temporal weight was high (EMVD structure). Budget ≈ 37 ms at full res.
+- Position on binning: after the ISP's own 2×2 sensor binning the SNR gain is ~1.2–1.6×, and the real value is bitrate and 4× cheaper downstream filters; keep-size upscaling adds bitrate without information (the other report argues for it so calibrations stay valid — both are offered as options).

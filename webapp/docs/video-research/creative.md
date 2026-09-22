@@ -126,3 +126,13 @@ Also gate the *encoder*: frames captured during a nudge are replaced by the last
 - Speckle-reducing anisotropic diffusion for ultrasound, IEEE TBME 2002. https://ieeexplore.ieee.org/document/1028423/
 - Lucky imaging pipeline and drizzle, AutoStakkert; Fruchter & Hook drizzle. http://www.autostakkert.com/
 - Karis, *High Quality Temporal Supersampling*, SIGGRAPH 2014 course.
+
+## Addendum: items from the parallel first-round report not covered above
+
+- **Frame map** on the video item (`[{ outIndex, srcTimestamps[] }]`, length-capped) so a viewer can show which source frames made an output frame of a fusion mode.
+- **EDOF as a bounded ring** (last P frames with their z, per-block Laplacian energy weights E^γ, γ = 4, 3×3-smoothed and bilinearly upsampled, plus a motion mask that uses only the latest frame where |f_i − f_latest| > T) as an alternative to the unbounded LiveStacker; refuse periods under 4 frames since the stage cannot dither faster than ~10 Hz.
+- **HDR settling check**: toggle the LED once at mode start and watch the mean luma; refuse the mode if settling takes more than one frame. Fuse in linear with a 2-level Mertens pyramid and tone-map through the filmic curve so the look is stable.
+- **Event trigger pre-roll from encoded chunks**: a ring of the last N `EncodedVideoChunk`s with a forced keyframe every second (~5 MB for 5 s) as an alternative to a JPEG-part ring; each event its own gallery item with trigger time and peak motion score; optional detector-class trigger at 1 Hz.
+- **Dithered SR robustness weight** (Wronski et al. 2019): fall back to single-frame upsampling where local differences exceed the noise estimate, so live specimens do not smear.
+- **Panorama video speed cap**: steps/s = px_per_frame_limit · fps / pxPerStep keeps motion blur under 1 px; the mode owns the stage and cancels if the user touches it.
+- "Night video" is the temporal merge with a longer window and a stated intent, not a new algorithm.

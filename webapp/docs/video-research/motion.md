@@ -198,3 +198,11 @@ against `BackgroundModel.bg` when one exists.
 - **Pre-roll of decoded bitmaps.** 8 MB/frame, 5 s = 720 MB; keep JPEG parts.
 - **Lanczos resampling for stabilisation.** `drawImage` bilinear at fractional offsets suffices for
   8-bit video; Lanczos belongs to the stack paths that already use it.
+
+## Addendum: items from the parallel first-round report not covered above
+
+- **Constant frame rate output** as a re-timer between chain and sink (slot k at T0 + k/f_out, hold the latest frame, count duplicates in the existing meta fields); VFR stays the honest default. Also per-stage-step time-lapse (keep a frame on each settled transition) and piecewise-linear speed ramps. Only the lucky mode's "fill gaps" exists today.
+- **"Hold" edges** for the stabiliser: draw the warped frame over a persistent canvas so uncovered margins show slightly stale pixels instead of a crop. Zero cost; ghosts moving specimens at the edges.
+- **Similarity stabilisation** from four 128² corner patches (Procrustes fit, reject a patch with residual > 2 px) with a delayed (N = 12 frames) centred-Gaussian path smoother instead of an L1 path.
+- Running-median background: **warp B by the calibration-predicted pan** instead of resetting on a move, marking the uncovered strip unknown.
+- Eulerian magnification: **attenuate chroma amplification to 0.1** and halve α per finer pyramid level; use a Laplacian pyramid rather than a single box level.
