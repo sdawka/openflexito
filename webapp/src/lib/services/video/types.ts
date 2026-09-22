@@ -43,6 +43,10 @@ export interface VideoModeRun {
   /** The mode moves the stage or drives the LEDs itself; the recorder then keeps the stabiliser and
    *  the motion-reset logic quiet instead of fighting the commanded motion. */
   readonly drivesStage?: boolean
+  /** The mode compensates stage motion itself (warps its history by the known shift), so the
+   *  recorder must not reset it when `device.moving` flips — the reset would defeat the compensation
+   *  (the shift is only ever non-zero across a move). */
+  readonly compensatesStage?: boolean
   /** The mode needs the raw, un-stabilised frame geometry (it registers frames itself or dithers
    *  the stage in xy on purpose); the recorder then records with stabilisation off. */
   readonly disablesStabiliser?: boolean

@@ -4,7 +4,7 @@
  *  see a flicker worth the extra per-frame work). Reset whenever `device.moving` changes, so a real
  *  stage move never gets read as a brightness step. */
 import { frameChain, toImageData, type FrameProcessor, type FrameTarget } from './frameChain'
-import { Deflicker, applyGainRgba, defaultDeflickerOptions, frameLuma } from '../algo/deflicker'
+import { Deflicker, defaultDeflickerOptions, frameLuma, backgroundLuma, gainLut, applyLutRgba } from '../algo/deflicker'
 import { settings } from '../store/settings.svelte'
 import { device } from '../store/device.svelte'
 
@@ -15,6 +15,9 @@ class DeflickerProcessor {
 
   private deflicker = new Deflicker(defaultDeflickerOptions)
   private wasMoving = false
+  private lastLightCc = -1
+  private lut = new Uint8ClampedArray(256)
+  private lutGain = NaN
   lastGain = 1
 
   private proc: FrameProcessor = {
@@ -25,9 +28,16 @@ class DeflickerProcessor {
       const rgba = toImageData(frame)
       const moving = device.moving
       if (moving !== this.wasMoving) { this.deflicker.reset(); this.wasMoving = moving }
-      const gain = this.deflicker.nextGain(frameLuma(rgba.data))
+      // a deliberate LED change is not flicker: re-anchor instead of fighting it for ~20 frames
+      const cc = device.light.cc
+      if (cc !== this.lastLightCc) { if (this.lastLightCc >= 0) this.deflicker.reset(); this.lastLightCc = cc }
+      const luma = defaultDeflickerOptions.background ? backgroundLuma(rgba.data) : frameLuma(rgba.data, defaultDeflickerOptions.usePercentile)
+      const gain = this.deflicker.nextGain(luma)
       this.lastGain = gain
-      applyGainRgba(rgba.data, gain)
+      if (gain !== 1) {
+        if (gain !== this.lutGain) { gainLut(gain, this.lut); this.lutGain = gain }
+        applyLutRgba(rgba.data, this.lut)
+      }
       return rgba
     },
     reset: () => { this.deflicker.reset() },

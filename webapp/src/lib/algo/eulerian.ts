@@ -35,15 +35,22 @@ export class EulerianMagnifier {
   private hi: Float32Array
   private band: Float32Array
   private lastT: number | null = null
+  private t0: number | null = null
+  private smooth: Float32Array
+  /** measured frame rate (Hz) from the timestamps; `fHi` is clamped to 0.45× it (Nyquist) */
+  fps = 0
   count = 0
 
   constructor(public readonly width: number, public readonly height: number, public opts: EulerianOptions = defaultEulerianOptions) {
     this.cw = Math.max(1, Math.floor(width / opts.factor)); this.ch = Math.max(1, Math.floor(height / opts.factor))
     const n = this.cw * this.ch
-    this.coarse = new Float32Array(n); this.lo = new Float32Array(n); this.hi = new Float32Array(n); this.band = new Float32Array(n)
+    this.coarse = new Float32Array(n); this.lo = new Float32Array(n); this.hi = new Float32Array(n); this.band = new Float32Array(n); this.smooth = new Float32Array(n)
   }
 
-  reset(): void { this.count = 0; this.lastT = null }
+  reset(): void { this.count = 0; this.lastT = null; this.t0 = null }
+
+  /** The band's upper edge actually in use (after the Nyquist clamp), for the status line. */
+  effectiveFHi(): number { return this.fps > 0 ? Math.min(this.opts.fHi, 0.45 * this.fps) : this.opts.fHi }
 
   /** `tSec` is the frame time in seconds (the IIR coefficients follow the real frame interval). */
   update(frame: Uint8ClampedArray, tSec: number, out: Uint8ClampedArray): void {
@@ -59,15 +66,30 @@ export class EulerianMagnifier {
         coarse[cy * cw + ((x / factor) | 0)] += (frame[i] * 0.299 + frame[i + 1] * 0.587 + frame[i + 2] * 0.114) * inv
       }
     }
+    // 3×3 smoothing of the coarse grid: the box reduction alone aliases texture into the cells and
+    // the bilinear add-back would paint 8-px blocks
+    const sm = this.smooth
+    for (let cy = 0; cy < ch; cy++) for (let cx = 0; cx < cw; cx++) {
+      let s = 0, k = 0
+      for (let dy = -1; dy <= 1; dy++) { const yy = cy + dy; if (yy < 0 || yy >= ch) continue; for (let dx = -1; dx <= 1; dx++) { const xx = cx + dx; if (xx < 0 || xx >= cw) continue; s += coarse[yy * cw + xx]; k++ } }
+      sm[cy * cw + cx] = s / k
+    }
+    coarse.set(sm)
     const lo = this.lo, hi = this.hi, band = this.band
-    if (this.count === 0 || this.lastT == null) { lo.set(coarse); hi.set(coarse); band.fill(0); this.lastT = tSec; this.count = 1; out.set(frame); return }
+    if (this.count === 0 || this.lastT == null) { lo.set(coarse); hi.set(coarse); band.fill(0); this.lastT = tSec; this.t0 = tSec; this.count = 1; out.set(frame); return }
     const dt = Math.min(0.5, Math.max(1e-3, tSec - this.lastT))
     this.lastT = tSec
-    const aLo = 1 - Math.exp(-2 * Math.PI * fLo * dt), aHi = 1 - Math.exp(-2 * Math.PI * fHi * dt)
+    this.fps = this.fps > 0 ? 0.9 * this.fps + 0.1 / dt : 1 / dt
+    const fHiEff = Math.max(fLo * 1.2, Math.min(fHi, 0.45 * this.fps))
+    // ramp the gain in over 2/fLo s after a (re)start: the low-pass has not settled yet and any
+    // intensity trend would otherwise be amplified into a flash
+    const ramp = Math.min(1, (tSec - (this.t0 ?? tSec)) * fLo / 2)
+    const aLo = 1 - Math.exp(-2 * Math.PI * fLo * dt), aHi = 1 - Math.exp(-2 * Math.PI * fHiEff * dt)
+    const gain = alpha * ramp
     for (let p = 0; p < coarse.length; p++) {
       lo[p] += aLo * (coarse[p] - lo[p])
       hi[p] += aHi * (coarse[p] - hi[p])
-      const b = (hi[p] - lo[p]) * alpha
+      const b = (hi[p] - lo[p]) * gain
       band[p] = b > maxDelta ? maxDelta : b < -maxDelta ? -maxDelta : b
     }
     this.count++

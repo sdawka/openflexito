@@ -19,8 +19,12 @@ export class StageDither {
   index = 0
   steps = 0
   error: string | null = null
+  /** `performance.now()` when the last move completed; frames that arrive within `settleMs` of it
+   *  were (partly) exposed during the move and should be dropped by the mode's `accept` */
+  lastMoveEnd = 0
+  moving = false
 
-  constructor(private pattern: DitherStep[], private dwellMs: number) {
+  constructor(private pattern: DitherStep[], public readonly dwellMs: number) {
     if (!pattern.length) throw new Error('empty dither pattern')
   }
 
@@ -36,7 +40,10 @@ export class StageDither {
       const target = this.pattern[i % this.pattern.length]
       const d = { x: (target.x ?? 0) - this.offset.x, y: (target.y ?? 0) - this.offset.y, z: (target.z ?? 0) - this.offset.z }
       if (d.x || d.y || d.z) {
-        try { await device.moveRel(d, false) } catch (e) { this.error = (e as Error).message; break }
+        this.moving = true
+        try { await device.moveRel(d, false) } catch (e) { this.error = (e as Error).message; this.moving = false; break }
+        this.moving = false
+        this.lastMoveEnd = performance.now()
         this.offset = { x: target.x ?? 0, y: target.y ?? 0, z: target.z ?? 0 }
       }
       this.index = i % this.pattern.length
@@ -46,6 +53,11 @@ export class StageDither {
     }
     this.running = false
   }
+
+  /** True when the stage has been still for at least `settleMs`: 130 ms (≈ 2 frames at 18 fps, the
+   *  camera pipeline delay) or half the dwell when the dwell is shorter, so a short dwell still
+   *  yields its last frames instead of rejecting everything. */
+  settled(settleMs = Math.min(130, this.dwellMs * 0.5)): boolean { return !this.moving && performance.now() - this.lastMoveEnd >= settleMs }
 
   /** Stop the pattern and return to the origin. */
   async stop(): Promise<void> {

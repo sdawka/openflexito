@@ -18,39 +18,60 @@ function lumaOf(data: Uint8ClampedArray, i: number): number {
   return data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114
 }
 
+/** Robust σ of a difference field from a 256-bin histogram of a coarse sample (median × 1.4826),
+ *  allocation-free: O(n) instead of sorting a fresh array every frame. */
+const HIST = new Uint32Array(256)
+export function robustSigma(sample: (k: number) => number, count: number): number {
+  HIST.fill(0)
+  for (let k = 0; k < count; k++) { const v = sample(k); HIST[v > 255 ? 255 : v < 0 ? 0 : v | 0]++ }
+  let acc = 0
+  for (let v = 0; v < 256; v++) { acc += HIST[v]; if (acc * 2 >= count) return Math.max(1, (v + 0.5) * 1.4826) }
+  return 1
+}
+
+/** Largest per-channel change: a coloured organism on a luminance-matched background is invisible
+ *  to a luma difference; the max channel difference at ~1.2× the luma threshold catches it. */
+function colourDiff(a: Uint8ClampedArray, i: number, r: number, g: number, b: number): number {
+  const dr = Math.abs(a[i] - r), dg = Math.abs(a[i + 1] - g), db = Math.abs(a[i + 2] - b)
+  return dr > dg ? (dr > db ? dr : db) : (dg > db ? dg : db)
+}
+
 export class BackgroundModel {
+  /** background RGB (three planes) */
   private bg: Float32Array
   private diff: Float32Array
   count = 0
   /** robust noise estimate of the last difference field (median absolute difference × 1.4826) */
   sigma = 2
 
-  constructor(public readonly width: number, public readonly height: number, public alpha = 0.03) {
-    this.bg = new Float32Array(width * height)
+  /** `median` = true uses the McFarlane–Schofield running median (`bg += sign(x − bg)·step`), which
+   *  never learns a pixel occupied less than half the time: a stationary-then-moving organism is not
+   *  absorbed and a passing one leaves no ghost. `alpha` is the exponential-mean rate otherwise. */
+  constructor(public readonly width: number, public readonly height: number, public alpha = 0.03, public median = true, public step = 0.5) {
+    this.bg = new Float32Array(width * height * 3)
     this.diff = new Float32Array(width * height)
   }
 
   reset(): void { this.count = 0 }
 
-  /** Update the background with `frame` and return the |frame − background| luma field (the buffer is
-   *  reused). `learnMoving` = false freezes the model where motion is detected, so a slow organism
-   *  does not get absorbed into the background as quickly. */
+  /** Update the background with `frame` and return the colour-aware |frame − background| field (the
+   *  buffer is reused). `learnMoving` = false freezes the exponential model where motion is
+   *  detected (the running median is inherently robust and always updates). */
   update(frame: Uint8ClampedArray, learnMoving = true): Float32Array {
-    const bg = this.bg, diff = this.diff, n = bg.length
-    if (this.count === 0) { for (let p = 0; p < n; p++) { bg[p] = lumaOf(frame, p * 4); diff[p] = 0 } this.count = 1; return diff }
-    const a = Math.max(this.alpha, 1 / (this.count + 1)), b = 1 - a
-    // noise estimate from a coarse sample of the differences, before the update
-    const sample: number[] = []
-    const step = Math.max(1, Math.floor(n / 4096))
-    for (let p = 0; p < n; p++) {
-      const l = lumaOf(frame, p * 4)
-      const d = Math.abs(l - bg[p])
+    const bg = this.bg, diff = this.diff, n = diff.length
+    if (this.count === 0) { for (let p = 0, i = 0; p < n; p++, i += 4) { bg[p * 3] = frame[i]; bg[p * 3 + 1] = frame[i + 1]; bg[p * 3 + 2] = frame[i + 2]; diff[p] = 0 } this.count = 1; return diff }
+    const a = Math.max(this.alpha, 1 / (this.count + 1)), b = 1 - a, st = this.step
+    for (let p = 0, i = 0, q = 0; p < n; p++, i += 4, q += 3) {
+      const d = colourDiff(frame, i, bg[q], bg[q + 1], bg[q + 2])
       diff[p] = d
-      if (p % step === 0) sample.push(d)
-      if (learnMoving || d < 3 * this.sigma) bg[p] = b * bg[p] + a * l
+      if (this.median) {
+        for (let c = 0; c < 3; c++) { const x = frame[i + c], v = bg[q + c]; bg[q + c] = x > v ? Math.min(x, v + st) : x < v ? Math.max(x, v - st) : v }
+      } else if (learnMoving || d < 3 * this.sigma) {
+        bg[q] = b * bg[q] + a * frame[i]; bg[q + 1] = b * bg[q + 1] + a * frame[i + 1]; bg[q + 2] = b * bg[q + 2] + a * frame[i + 2]
+      }
     }
-    sample.sort((x, y) => x - y)
-    this.sigma = Math.max(1, sample[sample.length >> 1] * 1.4826)
+    const stepN = Math.max(1, Math.floor(n / 4096)), cnt = Math.floor(n / stepN)
+    this.sigma = robustSigma((k) => diff[k * stepN], cnt) * 1.2
     this.count++
     return diff
   }
@@ -75,6 +96,9 @@ export class MotionHistory {
   private mhi: Float32Array
   private prev: Float32Array
   count = 0
+  /** optional external difference field (e.g. `BackgroundModel.update()`'s), so slow movers that a
+   *  two-frame difference misses still enter the history; null = frame difference */
+  source: Float32Array | null = null
 
   /** `decay` per frame (0.92 ≈ a 12-frame trail at 18 fps); `k` × σ difference threshold. */
   constructor(public readonly width: number, public readonly height: number, public decay = 0.92, public k = 4) {
@@ -88,15 +112,12 @@ export class MotionHistory {
   update(frame: Uint8ClampedArray, out: Uint8ClampedArray, colour: [number, number, number] = [0, 200, 255]): void {
     const mhi = this.mhi, prev = this.prev, n = mhi.length
     if (this.count === 0) { for (let p = 0; p < n; p++) prev[p] = lumaOf(frame, p * 4); out.set(frame); this.count = 1; return }
-    // σ of the frame difference from a coarse sample
-    const sample: number[] = []
-    const step = Math.max(1, Math.floor(n / 4096))
-    for (let p = 0; p < n; p += step) sample.push(Math.abs(lumaOf(frame, p * 4) - prev[p]))
-    sample.sort((a, b) => a - b)
-    const sigma = Math.max(1, sample[sample.length >> 1] * 1.4826), th = this.k * sigma
+    // σ of the frame difference from a coarse histogram sample
+    const step = Math.max(1, Math.floor(n / 4096)), cnt = Math.floor(n / step)
+    const sigma = robustSigma((k) => Math.abs(lumaOf(frame, k * step * 4) - prev[k * step]), cnt), th = this.k * sigma
     for (let p = 0, i = 0; p < n; p++, i += 4) {
       const l = lumaOf(frame, i)
-      const moved = Math.abs(l - prev[p]) > th
+      const moved = (this.source ? this.source[p] : Math.abs(l - prev[p])) > th
       prev[p] = l
       const v = moved ? 1 : mhi[p] * this.decay
       mhi[p] = v < 0.02 ? 0 : v
@@ -112,10 +133,13 @@ export class TemporalColorCode {
   private prev: Float32Array
   private lut: Uint8ClampedArray
   count = 0
+  decay: number
 
   /** `period` frames per hue cycle; `decay` fades old colour so the code keeps working indefinitely
-   *  (1 = ImageJ's cumulative projection); `map` any `algo/colormaps.ts` name. */
-  constructor(public readonly width: number, public readonly height: number, public period = 90, public decay = 0.985, map = 'spectrum', public k = 4) {
+   *  (1 = ImageJ's cumulative projection; default 1 − 1/(3·period), so a whole cycle stays visible);
+   *  `map` any `algo/colormaps.ts` name. */
+  constructor(public readonly width: number, public readonly height: number, public period = 90, decay?: number, map = 'spectrum', public k = 4) {
+    this.decay = decay ?? 1 - 1 / (3 * period)
     const n = width * height
     this.accR = new Float32Array(n); this.accG = new Float32Array(n); this.accB = new Float32Array(n)
     this.prev = new Float32Array(n)
@@ -130,11 +154,8 @@ export class TemporalColorCode {
     const phase = (this.count % this.period) / this.period
     const ci = Math.min(255, Math.floor(phase * 256)) * 4
     const cr = this.lut[ci], cg = this.lut[ci + 1], cb = this.lut[ci + 2]
-    const sample: number[] = []
-    const step = Math.max(1, Math.floor(n / 4096))
-    for (let p = 0; p < n; p += step) sample.push(Math.abs(lumaOf(frame, p * 4) - prev[p]))
-    sample.sort((a, b) => a - b)
-    const th = this.k * Math.max(1, sample[sample.length >> 1] * 1.4826)
+    const step = Math.max(1, Math.floor(n / 4096)), cnt = Math.floor(n / step)
+    const th = this.k * robustSigma((k) => Math.abs(lumaOf(frame, k * step * 4) - prev[k * step]), cnt)
     const d = this.decay, R = this.accR, G = this.accG, B = this.accB
     for (let p = 0, i = 0; p < n; p++, i += 4) {
       const l = lumaOf(frame, i)
@@ -145,5 +166,32 @@ export class TemporalColorCode {
       out[i] = Math.min(255, g + R[p]); out[i + 1] = Math.min(255, g + G[p]); out[i + 2] = Math.min(255, g + B[p]); out[i + 3] = 255
     }
     this.count++
+  }
+}
+
+/** z-projection over time (Fiji's Z Project on the time axis, live): per-pixel running max, min, or
+ *  max − min ("range" = activity) with an optional decay toward the current frame so old extremes
+ *  fade. Max projection on dark-field shows the tracks of bright particles as a photo finish; min
+ *  projection on brightfield shows dark swimmers' paths. */
+export class TimeProjection {
+  private mx: Float32Array; private mn: Float32Array
+  count = 0
+  constructor(public readonly width: number, public readonly height: number, public kind: 'max' | 'min' | 'range' = 'max', public decay = 1) {
+    this.mx = new Float32Array(width * height * 3); this.mn = new Float32Array(width * height * 3)
+  }
+  reset(): void { this.count = 0 }
+  update(frame: Uint8ClampedArray, out: Uint8ClampedArray): void {
+    const mx = this.mx, mn = this.mn, d = this.decay
+    if (this.count === 0) { for (let i = 0, q = 0; i < frame.length; i += 4, q += 3) { mx[q] = mn[q] = frame[i]; mx[q + 1] = mn[q + 1] = frame[i + 1]; mx[q + 2] = mn[q + 2] = frame[i + 2] } }
+    else for (let i = 0, q = 0; i < frame.length; i += 4, q += 3) for (let c = 0; c < 3; c++) {
+      const x = frame[i + c]
+      const hi = d < 1 ? x + (mx[q + c] - x) * d : mx[q + c], lo = d < 1 ? x + (mn[q + c] - x) * d : mn[q + c]
+      mx[q + c] = x > hi ? x : hi; mn[q + c] = x < lo ? x : lo
+    }
+    this.count++
+    for (let i = 0, q = 0; i < frame.length; i += 4, q += 3) {
+      for (let c = 0; c < 3; c++) out[i + c] = this.kind === 'max' ? mx[q + c] : this.kind === 'min' ? mn[q + c] : mx[q + c] - mn[q + c]
+      out[i + 3] = 255
+    }
   }
 }

@@ -15,6 +15,28 @@ export type BinKernel = 'mean' | 'edge'
 
 export interface BinnedFrame { data: Uint8ClampedArray; width: number; height: number }
 
+// exp(x) for x in [-16, 0] through a 1024-entry table
+const EXP_N = 1024, EXP_T = new Float32Array(EXP_N + 1)
+for (let i = 0; i <= EXP_N; i++) EXP_T[i] = Math.exp(-16 * i / EXP_N)
+function expLut(x: number): number { if (x >= 0) return 1; if (x <= -16) return EXP_T[EXP_N]; return EXP_T[Math.round(-x / 16 * EXP_N)] }
+
+/** Bilinear upscale of a binned frame back to `w`×`h` (so the recording keeps the source frame size
+ *  and every calibration/scale-bar/measurement made on the stream stays valid). */
+export function upscaleRgba(src: Uint8ClampedArray, sw: number, sh: number, w: number, h: number, out?: Uint8ClampedArray): BinnedFrame {
+  if (!out || out.length !== w * h * 4) out = new Uint8ClampedArray(w * h * 4)
+  const fx = sw / w, fy = sh / h
+  for (let y = 0; y < h; y++) {
+    const sy = Math.min(sh - 1, Math.max(0, (y + 0.5) * fy - 0.5)), y0 = sy | 0, y1 = Math.min(sh - 1, y0 + 1), ty = sy - y0
+    for (let x = 0; x < w; x++) {
+      const sx = Math.min(sw - 1, Math.max(0, (x + 0.5) * fx - 0.5)), x0 = sx | 0, x1 = Math.min(sw - 1, x0 + 1), tx = sx - x0
+      const p00 = (y0 * sw + x0) * 4, p10 = (y0 * sw + x1) * 4, p01 = (y1 * sw + x0) * 4, p11 = (y1 * sw + x1) * 4, o = (y * w + x) * 4
+      for (let c = 0; c < 3; c++) out[o + c] = (src[p00 + c] * (1 - tx) + src[p10 + c] * tx) * (1 - ty) + (src[p01 + c] * (1 - tx) + src[p11 + c] * tx) * ty
+      out[o + 3] = 255
+    }
+  }
+  return { data: out, width: w, height: h }
+}
+
 export function binnedSize(width: number, height: number, factor: number): { w: number; h: number } {
   return { w: Math.max(1, Math.floor(width / factor)), h: Math.max(1, Math.floor(height / factor)) }
 }
@@ -38,25 +60,30 @@ export function binRgba(src: Uint8ClampedArray, width: number, height: number, f
     }
     return { data: out, width: w, height: h }
   }
-  // edge-aware: weight = exp(-(L - Lc)² / (2σ²)), σ = max(6, block luma spread / 4)
-  const c = factor >> 1
+  // edge-aware: weight = exp(-(L - Lref)² / (2σ²)) with Lref the luma of the block's *majority side*
+  // (the block mean's side of the median: mean-referenced, so even factors have no off-centre bias),
+  // σ = max(6, block luma spread / 4); exp through a 256-entry table on |d| (no Math.exp per pixel)
+  const lum = new Float32Array(n)
   for (let oy = 0; oy < h; oy++) {
     for (let ox = 0; ox < w; ox++) {
-      const ic = ((oy * factor + c) * width + ox * factor + c) * 4
-      const lc = src[ic] * 0.299 + src[ic + 1] * 0.587 + src[ic + 2] * 0.114
-      let lmin = 255, lmax = 0
+      let lmin = 255, lmax = 0, lsum = 0, k2 = 0
       for (let dy = 0; dy < factor; dy++) {
         let i = ((oy * factor + dy) * width + ox * factor) * 4
-        for (let dx = 0; dx < factor; dx++, i += 4) { const l = src[i] * 0.299 + src[i + 1] * 0.587 + src[i + 2] * 0.114; if (l < lmin) lmin = l; if (l > lmax) lmax = l }
+        for (let dx = 0; dx < factor; dx++, i += 4, k2++) { const l = src[i] * 0.299 + src[i + 1] * 0.587 + src[i + 2] * 0.114; lum[k2] = l; lsum += l; if (l < lmin) lmin = l; if (l > lmax) lmax = l }
       }
-      const sigma = Math.max(6, (lmax - lmin) * 0.25), k = -1 / (2 * sigma * sigma)
+      const mean = lsum * inv, mid = (lmin + lmax) * 0.5
+      // reference: mean of the pixels on the mean's side of the mid-point (the majority side of an edge)
+      let ref = 0, rn = 0
+      for (let k = 0; k < n; k++) if ((lum[k] >= mid) === (mean >= mid)) { ref += lum[k]; rn++ }
+      const lc = rn ? ref / rn : mean
+      const sigma = Math.max(6, (lmax - lmin) * 0.25), kk = -1 / (2 * sigma * sigma)
       let r = 0, g = 0, b = 0, ws = 0
+      k2 = 0
       for (let dy = 0; dy < factor; dy++) {
         let i = ((oy * factor + dy) * width + ox * factor) * 4
-        for (let dx = 0; dx < factor; dx++, i += 4) {
-          const l = src[i] * 0.299 + src[i + 1] * 0.587 + src[i + 2] * 0.114
-          const d = l - lc
-          const wgt = Math.exp(d * d * k)
+        for (let dx = 0; dx < factor; dx++, i += 4, k2++) {
+          const d = lum[k2] - lc
+          const wgt = expLut(d * d * kk)
           r += src[i] * wgt; g += src[i + 1] * wgt; b += src[i + 2] * wgt; ws += wgt
         }
       }

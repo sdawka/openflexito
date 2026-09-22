@@ -28,6 +28,8 @@ export function hdrVideoMode(p: HdrVideoParams): VideoModeRun {
   let level: 'bright' | 'dim' = 'bright'
   let switching: Promise<void> | null = null
   let bright: Uint8ClampedArray | null = null, dim: Uint8ClampedArray | null = null
+  let brightN = -1, dimN = -1   // frame index of each partner, to cap staleness
+  let stale = 0
   let meanHi = -1, meanLo = -1
   /** commanded level per processed frame, so a frame can be attributed to the level set ~LATENCY
    *  frames earlier while the bright/dim means have not separated yet (start-up, or an LED that does
@@ -56,8 +58,9 @@ export function hdrVideoMode(p: HdrVideoParams): VideoModeRun {
         ld += d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114
         k++
       }
+      const clippedB = lb / k >= 250   // the bright frame has nothing to offer where it clipped
       lb = lb / k / 255 - 0.5; ld = ld / k / 255 - 0.5
-      const wb = Math.exp(-(lb * lb) / (2 * 0.2 * 0.2)) + 1e-3, wd = Math.exp(-(ld * ld) / (2 * 0.2 * 0.2)) + 1e-3
+      const wb = (clippedB ? 0 : Math.exp(-(lb * lb) / (2 * 0.2 * 0.2))) + 1e-3, wd = Math.exp(-(ld * ld) / (2 * 0.2 * 0.2)) + 1e-3
       wgt[cy * cw + cx] = wb / (wb + wd)
     }
     for (let y = 0; y < h; y++) {
@@ -94,10 +97,12 @@ export function hdrVideoMode(p: HdrVideoParams): VideoModeRun {
       // classify by luma once the two levels are clearly apart, else by the commanded level
       const separated = meanHi - meanLo > 0.05 * Math.max(1, meanHi)
       const isBright = separated ? mean >= (meanHi + meanLo) / 2 : commanded === 'bright'
-      if (isBright) { meanHi = 0.8 * meanHi + 0.2 * mean; bright = bright?.length === f.data.length ? bright : new Uint8ClampedArray(f.data.length); bright.set(f.data) }
-      else { meanLo = 0.8 * meanLo + 0.2 * mean; dim = dim?.length === f.data.length ? dim : new Uint8ClampedArray(f.data.length); dim.set(f.data) }
+      if (isBright) { meanHi = 0.8 * meanHi + 0.2 * mean; bright = bright?.length === f.data.length ? bright : new Uint8ClampedArray(f.data.length); bright.set(f.data); brightN = n }
+      else { meanLo = 0.8 * meanLo + 0.2 * mean; dim = dim?.length === f.data.length ? dim : new Uint8ClampedArray(f.data.length); dim.set(f.data); dimN = n }
       if (meanLo > meanHi) { const t = meanLo; meanLo = meanHi; meanHi = t }
       if (!bright || !dim) return { frame: f }
+      // a partner older than period + 3 frames would double a moving organism: pass the frame through
+      if (Math.abs(brightN - dimN) > p.period + 3) { stale++; return { frame: f } }
       const o = out.get(f.width, f.height)
       fuse(bright, dim, f.width, f.height, o)
       fused++
@@ -109,7 +114,7 @@ export function hdrVideoMode(p: HdrVideoParams): VideoModeRun {
       await lock?.release()
       lock = null
     },
-    status: () => `LED ${level} · ${fused} fused · levels ${meanLo.toFixed(0)}/${meanHi.toFixed(0)}`,
-    stats: () => ({ fused, frames: n, ratio: p.ratio, period: p.period, lockedAe: lock?.locked.ae ?? false }),
+    status: () => `LED ${level} · ${fused} fused · levels ${meanLo.toFixed(0)}/${meanHi.toFixed(0)}${stale ? ` · ${stale} passed through (stale partner)` : ''}${meanHi - meanLo < 5 && n > 20 ? ' · levels look identical (does the LED change the picture?)' : ''}`,
+    stats: () => ({ fused, frames: n, stale, ratio: p.ratio, period: p.period, lockedAe: lock?.locked.ae ?? false }),
   }
 }

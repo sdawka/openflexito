@@ -10,7 +10,7 @@ page.on('pageerror', (e) => console.log('[pageerror]', e.message.slice(0, 300)))
 page.on('console', (m) => { if (m.type() === 'error' || m.type() === 'warning') console.log('[console]', m.text().slice(0, 300)) })
 await page.goto(`${base}/#/live`, { waitUntil: 'load' })
 await page.waitForFunction(() => /\d+ fps/.test(document.querySelector('nav')?.textContent || ''), null, { timeout: 15000 })
-if ((process.argv[2] || '') === 'hdr') {
+if (['hdr', 'illum'].includes(process.argv[2] || '')) {
   await page.locator('.tool-rail button[data-tool="camera"]').click()
   await page.locator('.panel:has(h3:has-text("Illumination")) button:has-text("32 %")').click()
   await page.waitForTimeout(500)
@@ -20,9 +20,11 @@ const panel = page.locator('.panel:has(h3:has-text("Photo"))')
 const stab = panel.locator('label:has-text("Stabilise") input'); if (await stab.isChecked()) await stab.uncheck()
 const mode = process.argv[2] || 'edof'
 await panel.locator('select[aria-label="video mode"]').selectOption(mode)
+if (mode === 'servo') { const every = panel.locator('label:has-text("Every (s)") input'); await every.click({ clickCount: 3 }); await every.pressSequentially('3'); await every.dispatchEvent('change') }
 await page.click('button:has-text("Record video")')
 await page.waitForFunction(() => /Stop · \d+ s/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 8000 })
-for (let i = 0; i < 5; i++) { await page.waitForTimeout(1000); console.log('status:', (await panel.innerText()).match(/recording[^\n]*/)?.[0]) }
+const secs = +(process.env.SECS || 5)
+for (let i = 0; i < secs; i++) { await page.waitForTimeout(1000); console.log('status:', (await panel.innerText()).match(/recording[^\n]*/)?.[0]) }
 await page.click('button:has-text("Stop ·")')
 await page.waitForFunction(() => /saved "Video/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 20000 })
 console.log('saved:', (await panel.innerText()).match(/saved[^\n]*/)?.[0])

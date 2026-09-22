@@ -61,3 +61,19 @@ describe('Deflicker', () => {
     expect(d.nextGain(30)).toBe(1)
   })
 })
+
+import { backgroundLuma, gainLut } from '../deflicker'
+
+describe('backgroundLuma / gainLut', () => {
+  it('measures the bright background, ignoring a dark object and clipped pixels', () => {
+    const d = new Uint8ClampedArray(1000 * 4)
+    for (let p = 0; p < 1000; p++) { const v = p < 300 ? 40 : p < 900 ? 200 : 255; d[p * 4] = d[p * 4 + 1] = d[p * 4 + 2] = v; d[p * 4 + 3] = 255 }
+    expect(backgroundLuma(d)).toBeCloseTo(200, 0)
+  })
+  it('gain table is identity at 1 and rolls off softly into 255', () => {
+    const one = gainLut(1)
+    expect(one[128]).toBe(128); expect(one[255]).toBe(255)
+    const up = gainLut(1.3)
+    expect(up[128]).toBeGreaterThan(128); expect(up[250]).toBeLessThanOrEqual(255); expect(up[240]).toBeLessThan(up[250] + 1)
+  })
+})

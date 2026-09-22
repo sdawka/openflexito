@@ -740,6 +740,65 @@ if (moves) await step('super-resolution video dithers xy, drizzles and returns t
   await panel.locator('label:has-text("Stabilise") input[type=checkbox]').check()
 })
 
+await step('projection and optical-flow modes record at the stream size with their stats', async () => {
+  const sw = await streamWidth()
+  await recordMode('project', 2, /saved "Video projection over time/)
+  let r = await openLatestVideo('Video projection over time')
+  expect(r.size.w === sw && /kind max/.test(r.details), `projection: width ${r.size.w}, details ${r.details.slice(0, 120)}`)
+  await recordMode('flow', 2, /saved "Video optical flow/)
+  r = await openLatestVideo('Video optical flow')
+  expect(r.size.w === sw && /mode Optical flow/.test(r.details), `flow: width ${r.size.w}`)
+})
+
+await step('kymograph mode outputs a side-by-side space–time image', async () => {
+  const sw = await streamWidth()
+  await recordMode('kymograph', 2, /saved "Video kymograph/)
+  const { size, details } = await openLatestVideo('Video kymograph')
+  expect(size.w > sw, `kymograph side-by-side width ${size.w} should exceed the stream's ${sw}`)
+  expect(/rows 600/.test(details) && /length \d+/.test(details), `kymograph stats missing: ${details.slice(0, 160)}`)
+})
+
+await step('motion-triggered mode arms and records the fake specimen when it moves', async () => {
+  // the fake scene is static: trigger by jogging (the mode inhibits during the move, so the trigger
+  // happens on the settle frames afterwards) — expect at least one event and some kept frames
+  await nav('live')
+  const panel = await tool('Photo')
+  const sens = panel.locator('label:has-text("Trigger (%)") input')
+  await panel.locator('select[aria-label="video mode"]').selectOption('trigger')
+  await sens.click({ clickCount: 3 }); await sens.pressSequentially('0.05'); await sens.dispatchEvent('change')
+  const stabilise = panel.locator('label:has-text("Stabilise") input[type=checkbox]')
+  if (await stabilise.isChecked()) await stabilise.uncheck()
+  await page.click('button:has-text("Record video")')
+  await page.waitForFunction(() => /Stop · \d+ s/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 8000 })
+  await page.waitForTimeout(2500)   // arm
+  if (moves) { await tool('Stage'); await page.click('button[title="D / →"]'); await page.waitForTimeout(1500); await page.click('button[title="A / ←"]'); await page.waitForTimeout(2500); await tool('Photo') }
+  else await page.waitForTimeout(3000)
+  await page.click('button:has-text("Stop ·")')
+  await page.waitForFunction(() => /saved "Video motion-triggered|nothing recorded/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 20000 })
+  const txt = await panel.innerText()
+  if (moves) {
+    expect(/saved "Video motion-triggered/.test(txt), `trigger did not fire on the jog: ${txt.match(/(saved|nothing)[^\n]*/)?.[0]}`)
+    const { details } = await openLatestVideo('Video motion-triggered')
+    expect(/events [1-9]/.test(details), `trigger stats: ${details.slice(0, 160)}`)
+  } else expect(/nothing recorded/.test(txt), 'a static scene must not trigger')
+})
+
+if (moves) await step('focus servo mode probes z and returns to the starting z', async () => {
+  await nav('live')
+  const panel = await tool('Photo')
+  await panel.locator('select[aria-label="video mode"]').selectOption('servo')
+  const every = panel.locator('label:has-text("Every (s)") input')
+  await every.click({ clickCount: 3 }); await every.pressSequentially('5'); await every.dispatchEvent('change')
+  const z0 = (await position()).z
+  await recordMode('servo', 7, /saved "Video focus servo/)
+  await page.waitForFunction((z) => { const m = document.querySelector('nav')?.textContent?.match(/z\s+(-?\d+)/); return m && +m[1] === z }, z0, { timeout: 8000 })
+    .catch(async () => { throw new Error(`servo left z at ${(await position()).z}, started at ${z0}`) })
+  const { details } = await openLatestVideo('Video focus servo')
+  expect(/nudges [1-9]/.test(details), `servo did not nudge: ${details.slice(0, 160)}`)
+  await nav('live'); await (await tool('Photo')).locator('select[aria-label="video mode"]').selectOption('plain')
+  await panel.locator('label:has-text("Stabilise") input[type=checkbox]').check()
+})
+
 await step('time-lapse exports to MP4 via WebCodecs', async () => {
   await nav('gallery'); await page.waitForTimeout(600)
   await page.locator('.card:has-text("Time-lapse") button:has-text("Open")').first().click()

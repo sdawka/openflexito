@@ -13,6 +13,7 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
   import { BURN_IN_KINDS, type BurnInKind } from '../lib/services/video/burnIn'
   import { calibration } from '../lib/store/calibration.svelte'
   import { listColormaps } from '../lib/algo/colormaps'
+  import { measure } from '../lib/services/measureService.svelte'
 
   let mode = $state<PhotoMode>('single')
   let slices = $state(5)
@@ -189,8 +190,8 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
   {#if !recorder.recording}
     <div class="kv" style="margin-top:8px"><span>Video mode</span><span class="v muted" style="color:var(--muted)">{vidInfo.cost}</span></div>
     <select bind:value={vidMode} disabled={busy} style="width:100%" aria-label="video mode" onchange={saveVideoMode}>
-      {#each ['quality', 'stage', 'motion', 'time'] as g}
-        <optgroup label={g === 'quality' ? 'Signal quality' : g === 'stage' ? 'Stage & illumination' : g === 'motion' ? 'Motion' : 'Time'}>
+      {#each ['quality', 'tone', 'stage', 'motion', 'analysis', 'time'] as g}
+        <optgroup label={g === 'quality' ? 'Signal quality' : g === 'tone' ? 'Tone & structure' : g === 'stage' ? 'Stage & illumination' : g === 'motion' ? 'Motion' : g === 'analysis' ? 'Analysis' : 'Time'}>
           {#each VIDEO_MODES.filter((m) => m.group === g) as m}<option value={m.id}>{m.label}</option>{/each}
         </optgroup>
       {/each}
@@ -199,23 +200,36 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
     {#if vidBlock}<p class="blurb" style="color:var(--warn)">Cannot start: {vidBlock}.</p>{/if}
     {#if vidMode === 'superres' && !calibration.csm}<p class="blurb" style="color:var(--warn)">No stage↔camera calibration: the dither falls back to one raw step per axis (the frames are still registered, but the sub-pixel phases are luck).</p>{/if}
     {#if vidMode === 'denoise'}
-      <div class="params"><label title="weight of the history, 0.5 (light) … 0.9 (strong); the ghost gate keeps moving things from smearing">Strength <input type="range" min="0.3" max="0.95" step="0.05" bind:value={vidParams.denoise.alpha} onchange={saveVideoMode} /> <span class="mono small">{vidParams.denoise.alpha}</span></label></div>
+      <div class="params">
+        <label title="the longest effective average a steady pixel reaches (the strength)">Strength (frames) <input type="number" min="2" max="32" bind:value={vidParams.denoise.frames} onchange={saveVideoMode} /></label>
+        <label title="motion robustness: 2 cautious (movers stay crisp), 8 smooth">Robustness <select bind:value={vidParams.denoise.c} onchange={saveVideoMode}><option value={2}>2 · cautious</option><option value={4}>4</option><option value={8}>8 · smooth</option></select></label>
+        <label style="flex-direction:row;align-items:center;gap:6px" title="lock AE/AWB for the recording so every frame shares one gain"><input type="checkbox" bind:checked={vidParams.denoise.lockExposure} onchange={saveVideoMode} /> Lock exposure</label>
+      </div>
     {:else if vidMode === 'integrate'}
       <div class="params">
-        <label>Frames <input type="number" min="2" max="64" bind:value={vidParams.integrate.frames} onchange={saveVideoMode} /></label>
+        <label title={vidParams.integrate.kind === 'exp' ? 'memory in frames (1/α)' : 'frames in the sliding window'}>{vidParams.integrate.kind === 'exp' ? 'Memory (frames)' : 'Frames'} <input type="number" min="2" max="64" bind:value={vidParams.integrate.frames} onchange={saveVideoMode} /></label>
         <label>Window
           <select bind:value={vidParams.integrate.kind} onchange={saveVideoMode}><option value="mean">Sliding mean</option><option value="exp">Exponential (persistence)</option></select>
         </label>
+        <label style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" bind:checked={vidParams.integrate.lockExposure} onchange={saveVideoMode} /> Lock exposure</label>
       </div>
     {:else if vidMode === 'median'}
-      <div class="params"><label>Frames <select bind:value={vidParams.median.frames} onchange={saveVideoMode}><option value={3}>3</option><option value={5}>5</option></select></label></div>
+      <div class="params">
+        <label>Frames <select bind:value={vidParams.median.frames} onchange={saveVideoMode}><option value={3}>3</option><option value={5}>5</option></select></label>
+        <label style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" bind:checked={vidParams.median.lockExposure} onchange={saveVideoMode} /> Lock exposure</label>
+      </div>
     {:else if vidMode === 'bin'}
       <div class="params">
         <label>Factor <select bind:value={vidParams.bin.factor} onchange={saveVideoMode} aria-label="bin factor"><option value={2}>2×2</option><option value={3}>3×3</option><option value={4}>4×4</option></select></label>
         <label>Kernel <select bind:value={vidParams.bin.kernel} onchange={saveVideoMode}><option value="mean">Mean</option><option value="edge">Edge-aware</option></select></label>
+        <label style="flex-direction:row;align-items:center;gap:6px" title="upscale back to the source size so scale bars and calibrations stay valid (larger file)"><input type="checkbox" bind:checked={vidParams.bin.keepSize} onchange={saveVideoMode} /> Keep size</label>
       </div>
     {:else if vidMode === 'lucky'}
-      <div class="params"><label title="fraction of frames kept, by sharpness rank over the last 60">Keep <input type="range" min="0.1" max="0.9" step="0.1" bind:value={vidParams.lucky.keep} onchange={saveVideoMode} /> <span class="mono small">{Math.round(vidParams.lucky.keep * 100)} %</span></label></div>
+      <div class="params">
+        <label title="fraction of frames kept, by sharpness rank over the last 200">Keep <input type="range" min="0.1" max="0.9" step="0.1" bind:value={vidParams.lucky.keep} onchange={saveVideoMode} /> <span class="mono small">{Math.round(vidParams.lucky.keep * 100)} %</span></label>
+        <label style="flex-direction:row;align-items:center;gap:6px" title="repeat the last kept frame for a dropped one (constant-rate playback) instead of keeping true frame times"><input type="checkbox" bind:checked={vidParams.lucky.fill} onchange={saveVideoMode} /> Fill gaps</label>
+        <label style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" bind:checked={vidParams.lucky.lockExposure} onchange={saveVideoMode} /> Lock exposure</label>
+      </div>
     {:else if vidMode === 'edof'}
       <div class="params">
         <label>Δz (steps) <input type="number" min="5" max="500" bind:value={vidParams.edof.dz} onchange={saveVideoMode} /></label>
@@ -229,28 +243,76 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
       </div>
     {:else if vidMode === 'superres'}
       <div class="params">
-        <label title="frames drizzled per output frame">Window <input type="number" min="2" max="8" bind:value={vidParams.superres.window} onchange={saveVideoMode} /></label>
+        <label>Scale <select bind:value={vidParams.superres.scale} onchange={saveVideoMode}><option value={1.5}>1.5×</option><option value={2}>2×</option></select></label>
+        <label title="frames drizzled per output frame">Window <input type="number" min="2" max="12" bind:value={vidParams.superres.window} onchange={saveVideoMode} /></label>
         <label title="drizzle drop size (0.4 sharp … 1 plain average)">Pixfrac <input type="number" min="0.3" max="1" step="0.1" bind:value={vidParams.superres.pixfrac} onchange={saveVideoMode} /></label>
+        <label style="flex-direction:row;align-items:center;gap:6px" title="move the stage in a sub-pixel pattern (needs a still specimen); off = lucky drizzle from the specimen's own jitter with a sharpness gate"><input type="checkbox" bind:checked={vidParams.superres.dither} onchange={saveVideoMode} /> Stage dither</label>
+        {#if !vidParams.superres.dither}<label title="fraction of frames kept by sharpness">Keep <input type="range" min="0.2" max="1" step="0.1" bind:value={vidParams.superres.keep} onchange={saveVideoMode} /> <span class="mono small">{Math.round(vidParams.superres.keep * 100)} %</span></label>{/if}
       </div>
     {:else if vidMode === 'hdr'}
       <div class="params">
         <label title="bright ÷ dim LED level">Ratio <select bind:value={vidParams.hdr.ratio} onchange={saveVideoMode}><option value={2}>2×</option><option value={4}>4×</option><option value={8}>8×</option></select></label>
         <label title="frames per LED level; 1 alternates every frame">Period <input type="number" min="1" max="6" bind:value={vidParams.hdr.period} onchange={saveVideoMode} /></label>
       </div>
+    {:else if vidMode === 'illum'}
+      <div class="params">
+        <label>Preset A <select bind:value={vidParams.illum.presetA} onchange={saveVideoMode}>{#each Object.keys(settings.lightPresets) as name}<option value={name}>{name}</option>{/each}</select></label>
+        <label>Preset B <select bind:value={vidParams.illum.presetB} onchange={saveVideoMode}>{#each Object.keys(settings.lightPresets) as name}<option value={name}>{name}</option>{/each}</select></label>
+        <label>Output <select bind:value={vidParams.illum.output} onchange={saveVideoMode}><option value="dpc">Pseudo-DPC (A − B)</option><option value="rheinberg">Rheinberg colour</option><option value="split">Split view</option></select></label>
+        <label title="frames each preset is held; the last frame of a hold is used (camera pipeline delay)">Hold <input type="number" min="1" max="6" bind:value={vidParams.illum.hold} onchange={saveVideoMode} /></label>
+        {#if vidParams.illum.output === 'dpc'}<label>Gain <input type="number" min="1" max="16" bind:value={vidParams.illum.gain} onchange={saveVideoMode} /></label>{/if}
+        {#if vidParams.illum.output === 'rheinberg'}
+          <label>Tint A <input type="color" bind:value={vidParams.illum.tintA} onchange={saveVideoMode} /></label>
+          <label>Tint B <input type="color" bind:value={vidParams.illum.tintB} onchange={saveVideoMode} /></label>
+        {/if}
+      </div>
+    {:else if vidMode === 'servo'}
+      <div class="params">
+        <label>Every (s) <input type="number" min="5" max="600" bind:value={vidParams.servo.periodS} onchange={saveVideoMode} /></label>
+        <label title="probe amplitude in z steps (about half the depth of field)">δ (steps) <input type="number" min="1" max="50" bind:value={vidParams.servo.delta} onchange={saveVideoMode} /></label>
+        <label title="stop correcting beyond this total z offset">Max offset <input type="number" min="5" max="1000" bind:value={vidParams.servo.maxExcursion} onchange={saveVideoMode} /></label>
+        <label style="flex-direction:row;align-items:center;gap:6px" title="replace the frames taken during a probe by the last good frame"><input type="checkbox" bind:checked={vidParams.servo.hideProbe} onchange={saveVideoMode} /> Hide probe</label>
+      </div>
     {:else if vidMode === 'motion'}
       <div class="params">
         <label title="difference threshold in noise σ; lower = more sensitive">Threshold σ <input type="number" min="2" max="10" step="0.5" bind:value={vidParams.motion.sensitivity} onchange={saveVideoMode} /></label>
+        <label>Background <select bind:value={vidParams.motion.background} onchange={saveVideoMode}><option value="median">Running median</option><option value="mean">Exponential mean</option></select></label>
         <label title="how fast the background learns (per frame)">Learn <input type="number" min="0.005" max="0.2" step="0.005" bind:value={vidParams.motion.learn} onchange={saveVideoMode} /></label>
       </div>
     {:else if vidMode === 'trails'}
       <div class="params">
         <label title="trail persistence per frame (0.9 ≈ 10 frames)">Decay <input type="number" min="0.5" max="0.99" step="0.01" bind:value={vidParams.trails.decay} onchange={saveVideoMode} /></label>
         <label>Threshold σ <input type="number" min="2" max="10" step="0.5" bind:value={vidParams.trails.sensitivity} onchange={saveVideoMode} /></label>
+        <label title="frame difference (fast movers) or difference to a running-median background (also slow movers)">Source <select bind:value={vidParams.trails.source} onchange={saveVideoMode}><option value="frame">Frame difference</option><option value="background">Background difference</option></select></label>
+      </div>
+    {:else if vidMode === 'project'}
+      <div class="params">
+        <label>Kind <select bind:value={vidParams.project.kind} onchange={saveVideoMode}><option value="max">Max (bright tracks)</option><option value="min">Min (dark tracks)</option><option value="range">Range (activity)</option></select></label>
+        <label title="1 = never fade; 0.99 ≈ 100-frame memory">Fade <input type="number" min="0.9" max="1" step="0.005" bind:value={vidParams.project.decay} onchange={saveVideoMode} /></label>
+      </div>
+    {:else if vidMode === 'flow'}
+      <div class="params">
+        <label title="analysis cell size (on a 205-px copy)">Cell <select bind:value={vidParams.flow.cell} onchange={saveVideoMode}><option value={6}>fine</option><option value={8}>medium</option><option value={12}>coarse</option></select></label>
+        <label title="temporal smoothing of the vectors (1 = none)">Smoothing <input type="number" min="0.1" max="1" step="0.1" bind:value={vidParams.flow.alpha} onchange={saveVideoMode} /></label>
+        <label title="speed at full brightness in analysis px/frame; 0 = auto (95th percentile)">Full speed <input type="number" min="0" max="20" step="0.5" bind:value={vidParams.flow.vMax} onchange={saveVideoMode} /></label>
+      </div>
+    {:else if vidMode === 'kymograph'}
+      <div class="params">
+        <label title="perpendicular averaging width in px">Band <input type="number" min="1" max="15" step="2" bind:value={vidParams.kymograph.band} onchange={saveVideoMode} /></label>
+        <label title="rows (frames) kept in the space–time image">Rows <input type="number" min="100" max="2000" step="50" bind:value={vidParams.kymograph.rows} onchange={saveVideoMode} /></label>
+        <label style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" bind:checked={vidParams.kymograph.sideBySide} onchange={saveVideoMode} /> Side by side</label>
+        <span class="muted small">{measure.points.length >= 2 ? 'line: the Distance measurement' : 'line: centre (draw a Distance measurement first to choose one)'}</span>
+      </div>
+    {:else if vidMode === 'trigger'}
+      <div class="params">
+        <label title="fraction of the field that must move">Trigger (%) <input type="number" min="0.05" max="20" step="0.05" bind:value={vidParams.trigger.sensitivity} onchange={saveVideoMode} /></label>
+        <label>Post-roll (s) <input type="number" min="0.5" max="60" step="0.5" bind:value={vidParams.trigger.postRollS} onchange={saveVideoMode} /></label>
+        <label style="flex-direction:row;align-items:center;gap:6px" title="cut the idle stretches from the timeline (off = true times, gaps visible in the player)"><input type="checkbox" bind:checked={vidParams.trigger.compressGaps} onchange={saveVideoMode} /> Compress gaps</label>
       </div>
     {:else if vidMode === 'timecode'}
       <div class="params">
         <label>Hue cycle (frames) <input type="number" min="10" max="2000" bind:value={vidParams.timecode.period} onchange={saveVideoMode} /></label>
-        <label title="1 = never fade (cumulative projection)">Fade <input type="number" min="0.9" max="1" step="0.005" bind:value={vidParams.timecode.decay} onchange={saveVideoMode} /></label>
+        <label title="0 = auto (a whole cycle stays visible), 1 = never fade (cumulative projection)">Fade <input type="number" min="0" max="1" step="0.005" bind:value={vidParams.timecode.decay} onchange={saveVideoMode} /></label>
         <label>Map <select bind:value={vidParams.timecode.map} onchange={saveVideoMode}>{#each colormaps.filter((c) => c.key !== 'grays') as c}<option value={c.key}>{c.name}</option>{/each}</select></label>
       </div>
     {:else if vidMode === 'magnify'}
@@ -260,10 +322,32 @@ import { fetchSnapshot, fetchSnapshotBitmap } from '../lib/api/snapshot'
         <label title="spatial scale: coarser = amplifies larger structures, less noise">Scale <select bind:value={vidParams.magnify.factor} onchange={saveVideoMode}><option value={4}>fine</option><option value={8}>medium</option><option value={16}>coarse</option></select></label>
         <label style="flex-direction:row;align-items:center;gap:6px" title="paint the amplified signal warm/cool instead of adding it to the intensity"><input type="checkbox" bind:checked={vidParams.magnify.colour} onchange={saveVideoMode} /> Colour</label>
       </div>
+    {:else if vidMode === 'enhance'}
+      <div class="params">
+        <label style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" bind:checked={vidParams.enhance.levels} onchange={saveVideoMode} /> Auto-levels</label>
+        <label title="percentile clipped to black / white">Clip % <span class="row" style="gap:4px"><input type="number" min="0" max="5" step="0.1" bind:value={vidParams.enhance.lowPct} onchange={saveVideoMode} />–<input type="number" min="95" max="100" step="0.1" bind:value={vidParams.enhance.highPct} onchange={saveVideoMode} /></span></label>
+        <label style="flex-direction:row;align-items:center;gap:6px" title="soft roll-off into white instead of a hard clip"><input type="checkbox" bind:checked={vidParams.enhance.knee} onchange={saveVideoMode} /> Soft knee</label>
+        <label style="flex-direction:row;align-items:center;gap:6px" title="per-channel gains that keep the bright background the colour it had on the first frame; lock the camera's AWB first or the two controllers fight"><input type="checkbox" bind:checked={vidParams.enhance.wb} onchange={saveVideoMode} /> Anchor WB</label>
+        <label style="flex-direction:row;align-items:center;gap:6px" title="divide out the slowly varying illumination (rolling estimate; a sample filling the whole field is partly flattened too)"><input type="checkbox" bind:checked={vidParams.enhance.flatten} onchange={saveVideoMode} /> Flatten background</label>
+        <label title="local contrast amount (0 = off)">Clarity <input type="number" min="0" max="2" step="0.1" bind:value={vidParams.enhance.clarity} onchange={saveVideoMode} /></label>
+        <label title="scale of the local contrast in pixels">Scale <select bind:value={vidParams.enhance.scale} onchange={saveVideoMode}><option value={8}>8 px</option><option value={16}>16 px</option><option value={32}>32 px</option><option value={64}>64 px</option></select></label>
+      </div>
+    {:else if vidMode === 'relief'}
+      <div class="params">
+        <label>Style <select bind:value={vidParams.relief.style} onchange={saveVideoMode}><option value="relief">Relief (DIC look)</option><option value="darkfield">Digital dark-field</option><option value="phase">Pseudo-phase</option></select></label>
+        {#if vidParams.relief.style === 'relief'}
+          <label>Light from (°) <input type="number" min="0" max="359" step="15" bind:value={vidParams.relief.angle} onchange={saveVideoMode} /></label>
+          <label title="0 = pure grey relief, 1 = original picture with shading added">Mix <input type="range" min="0" max="1" step="0.1" bind:value={vidParams.relief.mix} onchange={saveVideoMode} /> <span class="mono small">{vidParams.relief.mix}</span></label>
+        {:else}
+          <label title="scale of the background the high-pass removes">Scale <select bind:value={vidParams.relief.scale} onchange={saveVideoMode}><option value={4}>4 px</option><option value={8}>8 px</option><option value={16}>16 px</option><option value={32}>32 px</option></select></label>
+        {/if}
+        <label>Strength <input type="number" min="0.5" max="8" step="0.5" bind:value={vidParams.relief.strength} onchange={saveVideoMode} /></label>
+      </div>
     {:else if vidMode === 'timelapse'}
       <div class="params">
         <label>Every (s) <input type="number" min="0.2" max="3600" step="0.5" bind:value={vidParams.timelapse.intervalS} onchange={saveVideoMode} /></label>
         <label>Playback fps <input type="number" min="1" max="60" bind:value={vidParams.timelapse.fps} onchange={saveVideoMode} /></label>
+        <label style="flex-direction:row;align-items:center;gap:6px" title="each kept frame is the mean of its whole interval (movers smear)"><input type="checkbox" bind:checked={vidParams.timelapse.average} onchange={saveVideoMode} /> Average interval</label>
         <span class="muted small">{vidParams.timelapse.intervalS * vidParams.timelapse.fps}× faster</span>
       </div>
     {/if}

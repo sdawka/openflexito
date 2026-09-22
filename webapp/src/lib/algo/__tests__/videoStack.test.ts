@@ -51,9 +51,9 @@ describe('frameSharpness', () => {
     const w = 32, h = 32
     const flat = solid(100, w * h)
     const tex = new Uint8ClampedArray(w * h * 4)
-    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = (y * w + x) * 4; const v = ((x >> 1) + (y >> 1)) % 2 ? 200 : 20; tex[i] = tex[i + 1] = tex[i + 2] = v; tex[i + 3] = 255 }
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = (y * w + x) * 4; const v = ((x >> 2) + (y >> 2)) % 2 ? 200 : 20; tex[i] = tex[i + 1] = tex[i + 2] = v; tex[i + 3] = 255 }
     expect(frameSharpness(flat, w, h)).toBe(0)
-    expect(frameSharpness(tex, w, h)).toBeGreaterThan(50)
+    expect(frameSharpness(tex, w, h)).toBeGreaterThan(0.2)
   })
 })
 

@@ -73,6 +73,7 @@ export interface RecorderOptions {
 }
 
 const GRAY_WIDTH = 480   // downscale width for the stabiliser's tracking frame (register.ts refines from here)
+const STAB_MARGIN_PX = 40   // crop margin (full-resolution px) the stabiliser's correction is clamped to
 
 export class Recorder {
   recording = $state(false)
@@ -102,6 +103,9 @@ export class Recorder {
   private off: (() => void) | null = null
   private mjpeg: MjpegStream | null = null
   private stabilizer: Stabilizer | null = null
+  private stabilizeWanted = false
+  /** tracking-frame px → full-frame px for the stabiliser's shifts */
+  private grayScale = 1
   private wasMoving = false
   private margin = 0
   private srcW = 0
@@ -182,8 +186,11 @@ export class Recorder {
     const o = { ...this.options, ...opts }
     this.label = label
     if (o.mode?.disablesStabiliser) o.stabilize = false
-    this.stabilizer = o.stabilize ? new Stabilizer(defaultStabilizeOptions) : null
-    this.margin = o.stabilize ? Math.ceil(defaultStabilizeOptions.maxShiftPx) + 2 : 0
+    // the Stabilizer itself is created on the first frame (its shift clamp is in tracking-frame px,
+    // which depend on the stream size); `stabilizeWanted` remembers the choice
+    this.stabilizeWanted = o.stabilize
+    this.stabilizer = null
+    this.margin = o.stabilize ? STAB_MARGIN_PX + 2 : 0
     this.wasMoving = device.moving
     let started = false
     this.mjpeg = new MjpegStream()
@@ -256,21 +263,31 @@ export class Recorder {
     if (this.canvas!.width !== cw || this.canvas!.height !== ch) { this.canvas!.width = cw; this.canvas!.height = ch; this.srcW = w; this.srcH = h }
   }
 
-  /** Track the frame's displacement (unless the stage is moving — a real move is not jitter, and the
-   *  reference is dropped so the settled frame after the move becomes a fresh anchor) and draw it
-   *  translated into the canvas, cropped by `this.margin` on each side. */
+  /** Track the frame's displacement (unless the stage is moving — a real move is not jitter; the
+   *  reference is re-anchored at both ends of the move while the one-euro filters keep their state,
+   *  so the settled frame after the move becomes a fresh anchor without a cold filter) and draw it
+   *  translated into the canvas, cropped by `this.margin` on each side. The stabiliser works on a
+   *  `GRAY_WIDTH`-px copy; its shift is scaled back to full-frame pixels here and its clamp is set so
+   *  the scaled correction never exceeds the crop margin (the previous version applied the tracking-
+   *  frame shift unscaled: ~0.3× the needed correction, `docs/video-research/motion.md`). */
   private drawStreamFrame(frame: MjpegFrame): void {
     const { bitmap } = frame
     this.resizeIfNeeded(bitmap.width, bitmap.height)
     let dx = 0, dy = 0
-    if (this.stabilizer) {
+    if (this.stabilizeWanted) {
+      if (!this.stabilizer) {
+        this.grayScale = bitmap.width / Math.max(1, Math.round(bitmap.width * Math.min(1, GRAY_WIDTH / bitmap.width)))
+        this.stabilizer = new Stabilizer({ ...defaultStabilizeOptions, maxShiftPx: STAB_MARGIN_PX / this.grayScale, reanchorPx: 20 / this.grayScale })
+      }
       const moving = device.moving && !this.mode?.drivesStage
-      if (moving) { if (!this.wasMoving) this.stabilizer.reset(); this.wasMoving = true }
+      if (moving) { if (!this.wasMoving) this.stabilizer.reanchor(); this.wasMoving = true }
       else {
+        if (this.wasMoving) this.stabilizer.reanchor()
         this.wasMoving = false
         const g = this.grayOf(bitmap)
-        const r = this.stabilizer.track(g, performance.now() / 1000)
-        dx = r.dx; dy = r.dy
+        const r = this.stabilizer.track(g, frame.ts != null ? frame.ts / 1e9 : performance.now() / 1000)
+        // quantised to 1/8 px so the encoder does not see resampling noise on a still scene
+        dx = Math.round(r.dx * this.grayScale * 8) / 8; dy = Math.round(r.dy * this.grayScale * 8) / 8
       }
     }
     const ctx = this.ctx!
@@ -294,7 +311,7 @@ export class Recorder {
   private processFrame(tNs: number | null, seq: number): { t: number | null } | null {
     const mode = this.mode
     const chainT = tNs ?? performance.now() * 1e6
-    if (mode?.reset && !mode.drivesStage) {
+    if (mode?.reset && !mode.drivesStage && !mode.compensatesStage) {
       const moving = device.moving
       if (moving !== this.modeWasMoving) { this.modeWasMoving = moving; mode.reset() }
     }
@@ -359,7 +376,7 @@ export class Recorder {
   }
 
   private finishStart(): void {
-    this.stabiliseUsed = !!this.stabilizer
+    this.stabiliseUsed = this.stabilizeWanted
     this.deflickerUsed = this.optsUsed.deflicker
     this.startedAt = performance.now(); this.seconds = 0
     this.clock = setInterval(() => { this.seconds = Math.round((performance.now() - this.startedAt) / 1000); this.modeStatus = this.mode?.status?.() ?? '' }, 500)
@@ -394,7 +411,7 @@ export class Recorder {
       await modeStop
       const thumb = this.thumb ?? (await new Promise<Blob | null>((r) => this.outCanvas!.toBlob(r, 'image/jpeg', 0.8)))
       const log = this.log
-      this.thumb = null; this.log = []; this.stabilizer = null
+      this.thumb = null; this.log = []; this.stabilizer = null; this.stabilizeWanted = false
       if (!log.length) { this.status = `nothing recorded: ${modeMeta ? `the ${modeMeta.label} mode produced no frames` : 'no frames arrived'}${mode?.status ? ` (${mode.status()})` : ''}`; return null }
       this.status = 'saving…'
       const fps = result.durationS > 0 ? Math.round((log.length / result.durationS) * 10) / 10 : 0

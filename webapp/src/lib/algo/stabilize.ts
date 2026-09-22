@@ -101,7 +101,18 @@ export class Stabilizer {
     this.fx.reset(); this.fy.reset()
   }
 
-  /** Feed the next frame (in order; `tSec` monotonic, e.g. `performance.now() / 1000`). */
+  /** Drop only the reference and origin (a deliberate stage move ended: the scene is new) but keep
+   *  the one-euro filter state, so the frames after a jog are not over-smoothed from a cold filter.
+   *  The next frame becomes the anchor and its correction is 0. */
+  reanchor(): void {
+    this.reference = null
+    this.origin = { x: 0, y: 0 }
+    this.lastRaw = { x: 0, y: 0 }
+  }
+
+  /** Feed the next frame (in order; `tSec` monotonic — the frame's *device* time, so decode jitter
+   *  is not filtered as motion). Shifts are in the pixels of `gray`; the caller scales them to the
+   *  frame it draws (see `recorder.svelte.ts#drawStreamFrame`). */
   track(gray: Gray, tSec: number): StabilizeResult {
     if (!this.reference) {
       this.reference = gray
