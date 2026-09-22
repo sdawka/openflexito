@@ -9,6 +9,7 @@
   import Scan from './routes/Scan.svelte'
   import Gallery from './routes/Gallery.svelte'
   import Settings from './routes/Settings.svelte'
+  import { ui } from './lib/store/ui.svelte'
 
   const routes = {
     live: { label: 'Live', component: Live },
@@ -39,14 +40,14 @@
 </script>
 
 <div class="shell">
-  <nav>
+  <nav class:hidden={ui.immersive}>
     <div class="topbar">
       <div class="brand"><span class="full">openflexito</span><span class="mark" aria-hidden="true">OF</span></div>
       <PowerButton />
       <div class="spacer"></div>
       <StatusBar />
     </div>
-    <div class="tabs">
+    <div class="tabs" class:hidden={ui.immersive}>
       {#each Object.entries(routes) as [key, r]}
         <a href={'#/' + key} class:active={route === key}>{r.label}</a>
       {/each}
@@ -71,7 +72,8 @@
 
 <style>
   .shell { display: grid; grid-template-rows: auto 1fr; height: 100%; }
-  nav { display: flex; align-items: center; gap: 4px; padding: 6px 12px; background: var(--panel); border-bottom: 1px solid var(--border); }
+  nav { display: flex; align-items: center; gap: 4px; padding: 3px 10px; background: var(--panel); border-bottom: 1px solid var(--border); }
+  nav.hidden { display: none; }
   /* .topbar/.tabs are pure grouping wrappers on desktop (`display: contents`) so their children
    * become flex items of `nav` directly; `order` puts them back in the original brand/links/spacer
    * /status sequence regardless of the brand/power/spacer/status vs. tabs DOM split below. */
@@ -80,11 +82,19 @@
   .brand .mark { display: none; }
   :global(nav .power-btn) { order: 2; }
   .tabs { display: contents; }
-  .tabs a { color: var(--muted); text-decoration: none; padding: 6px 10px; border-radius: 6px; order: 3; }
+  .tabs a { color: var(--muted); text-decoration: none; padding: 4px 10px; border-radius: 6px; order: 3; }
   .tabs a.active, .tabs a:hover { color: var(--text); background: var(--panel2); }
+  .tabs.hidden { display: none; }
   .spacer { flex: 1; order: 4; }
   :global(nav .status-row) { order: 5; }
   main { min-height: 0; overflow: auto; }
+
+  /* Compact desktop nav: hide the wordmark for the "OF" mark once the tab labels + status start
+     crowding a laptop-width window; the mobile column layout below (<=720px) overrides this again. */
+  @media (max-width: 1000px) {
+    .brand .full { display: none; }
+    .brand .mark { display: inline; font-size: 13px; }
+  }
 
   .standby { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; text-align: center; padding: 24px; }
   .standby p { margin: 0; font-size: 18px; }

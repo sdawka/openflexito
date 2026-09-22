@@ -29,6 +29,20 @@ async function position() {
 const logHas = (re, timeout) => page.waitForFunction((src) => new RegExp(src).test(document.querySelector('pre.log')?.textContent || ''), re.source, { timeout })
 const expect = (cond, msg) => { if (!cond) throw new Error(msg) }
 
+// Live's right-hand panels live behind a one-panel drawer opened from the tool rail
+// (components/ToolRail.svelte); inactive panels are `display: none`, so open the right tool before
+// touching one. Calling it on an already-open tool is a no-op.
+const TOOL_OF = {
+  Stage: 'stage', Focus: 'focus', Camera: 'camera', Illumination: 'camera', Look: 'look',
+  Photo: 'photo', Measure: 'measure', 'Time-lapse': 'timelapse', Tracking: 'tracking', Intelligence: 'ai',
+  Sample: 'sample', Macro: 'macro', Help: 'help',
+}
+async function tool(name) {
+  const btn = page.locator(`.tool-rail button[data-tool="${TOOL_OF[name]}"]`)
+  if (await btn.getAttribute('aria-pressed') !== 'true') await btn.click()
+  return page.locator(`.panel:has(h3:has-text("${name}"))`)
+}
+
 await page.goto(`${base}/#/live`, { waitUntil: 'load' })
 
 await step('connects and streams', async () => {
@@ -55,6 +69,7 @@ await step('all tabs render without errors', async () => {
 
 if (moves) await step('jog buttons move the stage by the step size', async () => {
   await nav('live')
+  await tool('Stage')
   const p0 = await position()
   await page.selectOption('select:near(:text("XY step"))', '500').catch(() => {})
   await page.click('button[title="D / →"]')
@@ -69,6 +84,7 @@ await step('photo (full resolution) lands in the gallery', async () => {
   await nav('gallery'); await page.waitForTimeout(500)
   const before = await page.locator('.card').count()
   await nav('live')
+  await tool('Photo')
   await page.click('button:has-text("Take photo")')
   await page.waitForFunction(() => /saved "Photo/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 30000 })
   await nav('gallery')
@@ -78,6 +94,7 @@ await step('photo (full resolution) lands in the gallery', async () => {
 
 await step('RAW photo develops to a 16-bit PNG in the gallery', async () => {
   await nav('live')
+  await tool('Photo')
   await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'raw')
   await page.click('button:has-text("Take photo")')
   await page.waitForFunction(() => /saved "RAW 10-bit/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 120000 })
@@ -91,6 +108,7 @@ await step('RAW photo develops to a 16-bit PNG in the gallery', async () => {
 
 await step('RAW average photo (device-side frame averaging)', async () => {
   await nav('live')
+  await tool('Photo')
   await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'rawavg')
   await page.click('button:has-text("Take photo")')
   await page.waitForFunction(() => /saved "RAW average/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 120000 })
@@ -102,6 +120,7 @@ await step('RAW average photo (device-side frame averaging)', async () => {
 
 await step('HDR (RAW) photo merges a linear exposure bracket', async () => {
   await nav('live')
+  await tool('Photo')
   await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'hdrraw')
   await page.click('button:has-text("Take photo")')
   await page.waitForFunction(() => /saved "HDR RAW/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 120000 })
@@ -113,6 +132,7 @@ await step('HDR (RAW) photo merges a linear exposure bracket', async () => {
 
 if (moves) await step('focus stack photo returns to the starting z', async () => {
   await nav('live')
+  await tool('Photo')
   const z0 = (await position()).z
   await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'focus')
   const n = page.locator('.panel:has(h3:has-text("Photo")) input[aria-label="focus stack slices"]')
@@ -134,6 +154,7 @@ if (moves) await step('focus stack photo returns to the starting z', async () =>
 
 await step('camera controls: manual exposure slider and auto toggles', async () => {
   await nav('live')
+  await tool('Camera')
   const ae = page.locator('label:has-text("auto exposure") input')
   if (await ae.isChecked()) await ae.uncheck()
   await page.waitForTimeout(400)
@@ -202,10 +223,12 @@ if (moves) await step('click-hold-drag pans the stage like a map', async () => {
 
 if (moves) await step('autofocus returns to focus', async () => {
   await nav('live')
+  await tool('Stage')
   const p0 = await position()
   await page.selectOption('select:near(:text("Z step"))', '500').catch(() => {})
   await page.click('button:has-text("Z+")')
   await page.waitForFunction((z0) => { const m = document.querySelector('nav')?.textContent?.match(/z\s+(-?\d+)/); return m && +m[1] !== z0 }, p0.z, { timeout: 8000 })
+  await tool('Focus')
   await page.click('button:has-text("Autofocus")')
   await page.waitForSelector('button:has-text("Cancel")', { timeout: 5000 })
   await page.waitForSelector('button:has-text("Autofocus")', { timeout: 90000 })
@@ -234,6 +257,7 @@ if (moves) await step('scan 2×2 stitches into the gallery', async () => {
 
 if (moves) await step('fine focus stack centres on the focus plane and fuses several slices', async () => {
   await nav('live')
+  await tool('Photo')
   await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'focusfine')
   const n = page.locator('.panel:has(h3:has-text("Photo")) input[aria-label="focus stack slices"]')
   await n.click({ clickCount: 3 }); await n.pressSequentially('5')
@@ -257,6 +281,7 @@ if (moves) await step('fine focus stack from RAW fuses 16-bit slices and renders
   // encode still used full width/height -> "Failed to construct 'ImageData'". `focusfine` (8-bit)
   // cannot catch it, so this mode needs its own step.
   await nav('live')
+  await tool('Photo')
   const panel = '.panel:has(h3:has-text("Photo"))'
   await page.selectOption(`${panel} select[aria-label="capture mode"]`, 'focusfineraw')
   const n = page.locator(`${panel} input[aria-label="focus stack slices"]`)
@@ -272,6 +297,7 @@ if (moves) await step('fine focus stack from RAW fuses 16-bit slices and renders
 
 await step('live focus stack builds a composite and saves it', async () => {
   await nav('live')
+  await tool('Focus')
   await page.click('.panel:has(h3:has-text("Focus")) .seg button:has-text("Smooth")')
   await page.waitForFunction(() => /\d+ frames averaged/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 15000 })
   await page.click('.panel:has(h3:has-text("Focus")) .seg button:has-text("Stack")')
@@ -284,12 +310,14 @@ await step('live focus stack builds a composite and saves it', async () => {
     const frames = () => page.evaluate(() => +(document.querySelector('main')?.textContent?.match(/(\d+) frames · /)?.[1] ?? 0))
     const before = await frames()
     expect(before >= 5, `expected a few frames stacked before the jog, got ${before}`)
+    await tool('Stage')
     await page.click('button[title="D / →"]')
     await page.waitForFunction((n) => { const m = document.querySelector('main')?.textContent?.match(/(\d+) frames · /); return m && +m[1] < n }, before, { timeout: 8000 })
       .catch(async () => { throw new Error(`live stack kept its ${before} frames across a jog (now ${await frames()})`) })
     await page.waitForFunction(() => /\d+ frames · \d+ % of blocks/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 15000 })
     await page.click('button[title="A / ←"]')
     await page.waitForTimeout(1500)
+    await tool('Focus')
   }
   await page.click('.panel:has(h3:has-text("Focus")) button:has-text("Save")')
   await page.waitForFunction(() => /saved "Live stack/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 10000 })
@@ -298,6 +326,7 @@ await step('live focus stack builds a composite and saves it', async () => {
 
 await step('video recording (stabilise on) lands in the gallery and opens in the viewer', async () => {
   await nav('live')
+  await tool('Photo')
   const stabilise = page.locator('.panel:has(h3:has-text("Photo")) label:has-text("Stabilise") input[type=checkbox]')
   if (!(await stabilise.isChecked())) await stabilise.check()
   await page.click('button:has-text("Record video")')
@@ -352,6 +381,7 @@ await step('distance measurement records a result', async () => {
   await nav('live')
   await page.waitForFunction(() => /\d+ fps/.test(document.querySelector('nav')?.textContent || ''), null, { timeout: 10000 })
   await page.waitForTimeout(500)   // let the re-mounted <img> load its first MJPEG frame (naturalWidth)
+  await tool('Measure')
   await page.click('.panel:has(h3:has-text("Measure")) button:has-text("Distance")')
   const box = await page.locator('.view').boundingBox()
   await page.mouse.click(box.x + box.width * 0.4, box.y + box.height * 0.4)
@@ -362,6 +392,7 @@ await step('distance measurement records a result', async () => {
 
 await step('histogram samples the live view in the Camera panel', async () => {
   await nav('live')
+  await tool('Camera')
   await page.locator('.panel:has(h3:has-text("Camera"))').scrollIntoViewIfNeeded()
   await page.waitForFunction(() => /mean \d+\/255/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 10000 })
 })
@@ -451,6 +482,7 @@ if (moves) await step('scan between two corners survives a tab switch; cancel ke
 
 if (moves) await step('super-resolution captures a dithered pattern and drizzles it, sharpened', async () => {
   await nav('live')
+  await tool('Photo')
   const panel = '.panel:has(h3:has-text("Photo"))'
   await page.selectOption(`${panel} select[aria-label="capture mode"]`, 'superres')
   // scale 2 (not 3): a 3x drizzle of a full-resolution crop is memory-heavy and this step already
@@ -472,6 +504,7 @@ if (moves) await step('super-resolution captures a dithered pattern and drizzles
 
 if (moves) await step('super-resolution RAW planes (no demosaic) drizzles a 2x2 grid', async () => {
   await nav('live')
+  await tool('Photo')
   const panel = '.panel:has(h3:has-text("Photo"))'
   await page.selectOption(`${panel} select[aria-label="capture mode"]`, 'superres')
   await page.selectOption(`${panel} select:near(:text("Scale"))`, '2')
@@ -494,6 +527,7 @@ if (moves) await step('super-resolution RAW planes (no demosaic) drizzles a 2x2 
 
 if (moves) await step('fine focus stack produces a depth map with an image/depth/relief toggle', async () => {
   await nav('live')
+  await tool('Photo')
   await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'focusfine')
   const n = page.locator('.panel:has(h3:has-text("Photo")) input[aria-label="focus stack slices"]')
   await n.click({ clickCount: 3 }); await n.pressSequentially('5')
@@ -516,6 +550,7 @@ if (moves) await step('fine focus stack produces a depth map with an image/depth
 
 await step('time-lapse captures 3 frames and opens in the viewer', async () => {
   await nav('live')
+  await tool('Time-lapse')
   const panel = page.locator('.panel:has(h3:has-text("Time-lapse"))')
   const intervalInput = panel.locator('.row').first().locator('input[type=number]')
   await intervalInput.click({ clickCount: 3 }); await intervalInput.pressSequentially('1')
@@ -534,6 +569,7 @@ await step('time-lapse captures 3 frames and opens in the viewer', async () => {
 
 await step('organism tracking finds tracks on the live stream and exports a CSV', async () => {
   await nav('live')
+  await tool('Tracking')
   const panel = '.panel:has(h3:has-text("Tracking"))'
   await page.click(`${panel} button:has-text("Start tracking")`)
   await page.waitForTimeout(2000)
@@ -544,10 +580,12 @@ await step('organism tracking finds tracks on the live stream and exports a CSV'
 
 await step('sample metadata is captured on a quick frame and shown in the gallery', async () => {
   await nav('live')
+  await tool('Sample')
   const samplePanel = page.locator('.panel:has(h3:has-text("Sample"))')
   await samplePanel.locator('summary').click()
   const nameInput = samplePanel.locator('input').first()
   await nameInput.fill('E2E sample A1')
+  await tool('Photo')   // Quick frame lives in the Photo panel; the sample store keeps the name across the switch
   await page.click('button:has-text("Quick frame")')
   await page.waitForFunction(() => /saved "Quick frame/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 10000 })
   await nav('gallery'); await page.waitForTimeout(600)
@@ -556,14 +594,17 @@ await step('sample metadata is captured on a quick frame and shown in the galler
 
 if (moves) await step('a recorded macro of two jogs replays and returns the stage', async () => {
   await nav('live')
+  await tool('Macro')
   const macroPanel = page.locator('.panel:has(h3:has-text("Macro"))')
   await macroPanel.locator('summary').click()
   const p0 = await position()
   await macroPanel.locator('button:has-text("Record")').click()
+  await tool('Stage')
   await page.click('button[title="D / →"]')
   await page.waitForFunction((x1) => { const m = document.querySelector('nav')?.textContent?.match(/x\s+(-?\d+)/); return m && +m[1] === x1 }, p0.x + 500, { timeout: 8000 })
   await page.click('button[title="A / ←"]')
   await page.waitForFunction((x0) => { const m = document.querySelector('nav')?.textContent?.match(/x\s+(-?\d+)/); return m && +m[1] === x0 }, p0.x, { timeout: 8000 })
+  await tool('Macro')
   await macroPanel.locator('button:has-text("Stop")').click()
   await macroPanel.locator('input[placeholder="macro name"]').fill('E2E jog macro')
   await macroPanel.locator('button:has-text("Save")').click()
@@ -584,6 +625,7 @@ if (moves) await step('a recorded macro of two jogs replays and returns the stag
 
 await step('recording with a non-default container/codec still lands in the gallery as a playable video', async () => {
   await nav('live')
+  await tool('Photo')
   const panel = page.locator('.panel:has(h3:has-text("Photo"))')
   await panel.locator('label:has-text("Container") select').selectOption('webm')
   await panel.locator('label:has-text("Codec") select').selectOption('vp9')
@@ -600,6 +642,7 @@ await step('recording with a non-default container/codec still lands in the gall
   await page.click('button:has-text("close")')
   // restore the defaults the other steps (and PhotoPanel's own persisted settings) expect
   await nav('live')
+  await tool('Photo')
   await panel.locator('label:has-text("Container") select').selectOption('mp4')
   await panel.locator('label:has-text("Codec") select').selectOption('auto')
 })
@@ -627,6 +670,7 @@ await step('time-lapse exports to MP4 via WebCodecs', async () => {
 
 await step('Look panel applies a built-in colour map to the live canvas', async () => {
   await nav('live')
+  await tool('Look')
   const panel = page.locator('.panel:has(h3:has-text("Look"))')
   await panel.locator('label.chk:has-text("enabled") input[type=checkbox]').check()
   await page.selectOption('.panel:has(h3:has-text("Look")) select[aria-label="LUT"]', { label: 'Fire' })
@@ -760,6 +804,7 @@ await step('Enhance panel applies the "Crisp" preset to a gallery photo and save
 await step('Live denoise shows the processed canvas while enabled, and stops it when disabled', async () => {
   if (await page.locator('.overlay button.close').count()) await page.click('.overlay button.close')   // a failed viewer step must not mask this one
   await nav('live')
+  await tool('Camera')
   const chk = page.locator('.panel:has(h3:has-text("Camera")) label:has-text("live denoise") input[type=checkbox]')
   await chk.check()
   await page.waitForSelector('canvas.processed', { timeout: 8000 })
