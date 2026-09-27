@@ -43,6 +43,15 @@ class CameraConfig:
     # Upper bound for `/raw.bin?frames=N` (each frame is a 16 MB uint16 mosaic on the Pi 3).
     max_raw_frames: int = 8
     max_bracket_frames: int = 8
+    # Video recording (`/record.h264`, camera.py `start_recording`): the IMX219's 2x2-binned
+    # 1640x1232 mode (every photosite contributes, full field of view, up to ~40 fps) into the Pi's
+    # hardware H.264 encoder at full size; the live view keeps running from the second ISP output.
+    # The browser writes the H.264 into an MP4 as it arrives, without re-encoding. 1640x1232 x 30 fps
+    # is just inside H.264 level 4.1, the vc4 encoder's limit.
+    record_sensor_size: tuple[int, int] = (1640, 1232)
+    record_size: tuple[int, int] = (1640, 1232)
+    record_max_fps: int = 30
+    record_max_bitrate: int = 25_000_000
 
 
 @dataclass

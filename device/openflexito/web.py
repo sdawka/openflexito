@@ -1,10 +1,11 @@
-"""HTTP/WebSocket surface: static webapp, MJPEG streams, snapshot, raw capture, JSON-RPC."""
+"""HTTP/WebSocket surface: static webapp, MJPEG streams, snapshot, raw capture, H.264 recording, JSON-RPC."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import struct
 from importlib import resources
 from pathlib import Path
 
@@ -28,7 +29,7 @@ async def cors_middleware(request: web.Request, handler):
     resp.headers["Access-Control-Allow-Origin"] = "*"
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
     resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    resp.headers["Access-Control-Expose-Headers"] = "X-Timestamp, X-Seq, X-Frame"
+    resp.headers["Access-Control-Expose-Headers"] = "X-Timestamp, X-Seq, X-Frame, X-Record"
     return resp
 
 
@@ -50,6 +51,7 @@ def build_app(rpc: RpcRegistry, events: EventBus, camera: CameraBase | None, web
         app.router.add_get("/raw.bin", raw)
         app.router.add_get("/flat.bin", flat)
         app.router.add_get("/bracket.bin", bracket)
+        app.router.add_get("/record.h264", record)
 
     if webapp_dir and (webapp_dir / "index.html").is_file():
         async def index(r): return web.FileResponse(webapp_dir / "index.html")
@@ -148,6 +150,13 @@ def _require_power(request: web.Request) -> None:
         raise web.HTTPServiceUnavailable(text="device is in standby")
 
 
+def _require_not_recording(request: web.Request) -> None:
+    """Stills, RAW and brackets switch the camera mode, which a running recording holds."""
+    camera: CameraBase = request.app["camera"]
+    if camera.recording is not None:
+        raise web.HTTPConflict(text="a video recording is running; stop it first")
+
+
 def _bump_activity(request: web.Request) -> None:
     """A still/raw/bracket fetch is a discrete user action (unlike the mere existence of an MJPEG
     stream connection, which does not count - power.py's module docstring) so it resets the
@@ -201,6 +210,7 @@ async def snapshot(request: web.Request) -> web.Response:
     camera: CameraBase = request.app["camera"]
     full = request.query.get("full") in ("1", "true")
     if full:
+        _require_not_recording(request)
         try:
             jpeg, meta = await camera.still()
         except RuntimeError as e:
@@ -223,6 +233,7 @@ def _int_query(request: web.Request, name: str, default: int) -> int:
 
 async def _raw_response(request: web.Request, flat: bool, default_frames: int, filename: str) -> web.Response:
     _require_power(request)
+    _require_not_recording(request)
     _bump_activity(request)
     camera: CameraBase = request.app["camera"]
     frames = _int_query(request, "frames", default_frames)
@@ -255,6 +266,7 @@ async def bracket(request: web.Request) -> web.Response:
     JPEG. One mode switch, gain and colour gains locked. OFBK container (rawfmt.py); `X-Frame`
     carries the summary (factors, exposures, per-frame metadata)."""
     _require_power(request)
+    _require_not_recording(request)
     _bump_activity(request)
     camera: CameraBase = request.app["camera"]
     try:
@@ -270,6 +282,53 @@ async def bracket(request: web.Request) -> web.Response:
         raise web.HTTPServiceUnavailable(text=str(e))
     return web.Response(body=data, content_type="application/octet-stream",
                         headers=_frame_headers(summary, {"Content-Disposition": "inline; filename=bracket.bin"}))
+
+
+RECORD_MAGIC = b"OFVP"
+RECORD_HEADER = struct.Struct("<4sIqI")  # magic, payload length, timestamp ns (-1 = unknown), flags (bit 0 = keyframe)
+
+
+async def record(request: web.Request) -> web.StreamResponse:
+    """Video recording: the camera switches to its recording configuration (config.py
+    `record_*`) for as long as this response is being read, and every H.264 access unit the
+    hardware encoder produces is written as `RECORD_HEADER` + Annex B payload. `X-Record` describes
+    the stream (codec, size, fps, bitrate, keyframe period). Closing the connection ends the
+    recording, so a crashed tab can never leave the camera in the recording mode. Query: `fps`
+    (1..record_max_fps, default max), `bitrate` in bit/s (default max), `keyframe` seconds (default 1)."""
+    _require_power(request)
+    _bump_activity(request)
+    camera: CameraBase = request.app["camera"]
+    try:
+        fps = int(request.query.get("fps", camera.cfg.record_max_fps))
+        bitrate = int(request.query.get("bitrate", camera.cfg.record_max_bitrate))
+        keyframe = float(request.query.get("keyframe", 1))
+    except ValueError:
+        raise web.HTTPBadRequest(text="fps and bitrate must be integers, keyframe a number")
+    try:
+        tap, info = await camera.start_recording(fps, bitrate, keyframe)
+    except RuntimeError as e:
+        raise web.HTTPConflict(text=str(e))
+    request.app["status"](changed=True)
+    resp = web.StreamResponse(status=200, headers={
+        "Content-Type": "application/octet-stream", "Cache-Control": "no-cache, no-store", "Connection": "close",
+        "X-Record": json.dumps(info, separators=(",", ":")),
+    })
+    try:
+        await resp.prepare(request)
+        while True:
+            item = await tap.queue.get()
+            if item is None:
+                if tap.overflowed:
+                    log.warning("recording ended: the client fell %d packets behind", tap.MAX_QUEUED)
+                break
+            data, ts_ns, key = item
+            await resp.write(RECORD_HEADER.pack(RECORD_MAGIC, len(data), -1 if ts_ns is None else int(ts_ns), 1 if key else 0) + data)
+    except (ConnectionResetError, asyncio.CancelledError, ConnectionError):
+        pass
+    finally:
+        await camera.stop_recording()
+        request.app["status"](changed=True)
+    return resp
 
 
 async def fallback_page(request: web.Request) -> web.Response:

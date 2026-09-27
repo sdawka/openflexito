@@ -40,10 +40,15 @@ Related: **RAW flat field** (a measured flat replaces the tuning file's shading 
 
 ## 2. Video recording
 
-**Photo → Record video** records what the live view shows: the stream (or the live focus stack when
-it is on), through the same frame chain as the view, so live denoise and the look are recorded when
-their "into recording" switches are on. There are no video modes; slow processes go through the
-Time-lapse tool.
+**Photo → Record video**, two sources. **Sensor** (default): the camera switches to the IMX219's
+2×2-binned 1640×1232 mode and records through the Pi's hardware H.264 encoder at up to 25 Mbit/s /
+30 fps; the browser writes those packets straight into an MP4, no decode, no re-encode
+([`api/recordStream.ts`](webapp/src/lib/api/recordStream.ts), [`videoEncoder.ts`](webapp/src/lib/services/videoEncoder.ts) `H264PassthroughMux`,
+[`recorder.svelte.ts`](webapp/src/lib/services/recorder.svelte.ts) `startSensor`, device `web.py` `record`, `camera.py` `start_recording`).
+If any option below that changes pixels or timing is on, the H.264 is decoded in the browser at full
+size, processed and re-encoded at 1.5× the camera bitrate. **Live view**: records the 820×616 stream
+(or the live focus stack) through the same frame chain as the view. There are no video modes; slow
+processes go through the Time-lapse tool.
 
 ```
 MJPEG part → stabilise → frame chain (deflicker, live denoise, look/LUT) → burn-in → encoder

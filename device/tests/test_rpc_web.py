@@ -165,3 +165,48 @@ async def test_bracket_endpoint(client):
         assert header["bit_depth"] == 10 and trailer["exposure"] == meta["exposure"] and meta["kind"] == "raw"
     assert (await c.get("/bracket.bin?factors=1,2,3,4,5,6,7,8,9")).status == 400
     assert (await c.get("/bracket.bin?factors=abc")).status == 400
+
+
+async def test_record_streams_h264_and_blocks_stills(tmp_path):
+    """`/record.h264` holds the recording configuration while it is read: framed Annex B packets,
+    a keyframe first, device timestamps increasing; stills are refused meanwhile, the live stream
+    keeps running, and closing the connection ends the recording."""
+    av = pytest.importorskip("av")
+    if "libx264" not in av.codecs_available:
+        pytest.skip("PyAV without libx264")
+    from openflexito.web import RECORD_HEADER, RECORD_MAGIC
+    events = EventBus()
+    events.bind(asyncio.get_running_loop())
+    cam = FakeCamera(CameraConfig(fake=True, stream_size=(160, 120), lores_size=(40, 30), full_size=(64, 48),
+                                  record_size=(320, 240)), tmp_path, events, fps=30)
+    cam.bind(asyncio.get_running_loop())
+    app = build_app(RpcRegistry(), events, cam, None, lambda changed=False: {})
+    await cam.start()
+    try:
+        async with TestClient(TestServer(app)) as c:
+            assert cam.status()["record"]["available"] is True
+            async with c.get("/record.h264?fps=30&bitrate=2000000") as r:
+                assert r.status == 200
+                info = json.loads(r.headers["X-Record"])
+                assert (info["codec"], info["width"], info["height"]) == ("h264", 320, 240)
+                assert cam.recording is not None
+                packets = []
+                while len(packets) < 5:
+                    head = await r.content.readexactly(RECORD_HEADER.size)
+                    magic, n, ts, flags = RECORD_HEADER.unpack(head)
+                    assert magic == RECORD_MAGIC
+                    packets.append((await r.content.readexactly(n), ts, flags))
+                assert packets[0][2] & 1 and packets[0][0][:4] == b"\0\0\0\1"  # keyframe with a start code
+                assert all(b[1] > a[1] for a, b in zip(packets, packets[1:]))
+                assert (await c.get("/snapshot.jpg?full=1")).status == 409
+                assert (await c.get("/raw.bin")).status == 409
+                assert (await c.get("/record.h264")).status == 409  # one recording at a time
+                assert (await c.get("/snapshot.jpg")).status == 200  # the live view carries on
+            for _ in range(40):
+                if cam.recording is None:
+                    break
+                await asyncio.sleep(0.05)
+            assert cam.recording is None
+            assert (await c.get("/snapshot.jpg?full=1")).status == 200
+    finally:
+        await cam.stop()

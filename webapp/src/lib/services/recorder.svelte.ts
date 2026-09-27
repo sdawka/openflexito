@@ -20,6 +20,14 @@
  *  handed to the sink — skipped entirely when nothing is registered/enabled, so a plain recording pays
  *  no extra readback cost.
  *
+ *  Best quality comes from `startSensor()`: the device records in its binned 1640×1232 sensor mode
+ *  through the Pi's hardware H.264 encoder (`api/recordStream.ts`), 4× the pixels of the 820×616
+ *  MJPEG preview, from every photosite, with inter-frame compression instead of ~100 kB JPEGs. With
+ *  no processing asked for, those packets go straight into the MP4 (`H264PassthroughMux`): nothing
+ *  is decoded or re-encoded. When stabilise, deflicker, burn-in, constant-rate timing or a `record`
+ *  frame-chain processor is on, the H.264 is decoded (WebCodecs `VideoDecoder`) at full size, run
+ *  through the same path as the stream and re-encoded at a higher bitrate than the camera's.
+ *
  *  What is recorded is what the live view shows: the frame chain's `record` target carries the same
  *  processors as the view (deflicker, live denoise when "also apply while recording" is on, the look
  *  when `settings.lookBakeIntoRecording`). Burn-in overlays (`services/burnIn.ts`) are drawn last, so
@@ -38,7 +46,9 @@ import { toGray } from '../algo/sharpness'
 import { activity } from './activity.svelte'
 import { frameChain, toImageData, type FrameInput } from './frameChain'
 import { deflickerProcessor } from './deflickerProcessor'
-import { createVideoSink, type VideoSink, type Container, type VideoCodecPref, type VideoQuality } from './videoEncoder'
+import { createVideoSink, H264PassthroughMux, type VideoSink, type Container, type VideoCodecPref, type VideoQuality } from './videoEncoder'
+import { RecordStream, avcCodecString, type RecordInfo, type RecordPacket } from '../api/recordStream'
+import { fetchSnapshot } from '../api/snapshot'
 import { drawBurnIn, type BurnInKind } from './burnIn'
 import { umPerPxAt } from '../store/scaleCal.svelte'
 import { sample } from '../store/sample.svelte'
@@ -76,10 +86,19 @@ export interface RecorderOptions {
   deflicker: boolean
   /** overlays to draw into the frames */
   burnIn?: BurnInKind[]
+  /** `startSensor()`: frame rate and bit rate asked of the camera's H.264 encoder (clamped by the device) */
+  recordFps?: number
+  recordBitrate?: number
+}
+
+/** Whether a recording with these options needs its frames decoded and re-encoded: anything that
+ *  changes pixels or timing does; a plain recording keeps the camera's own H.264. */
+export function needsProcessing(o: Pick<RecorderOptions, 'stabilize' | 'deflicker' | 'burnIn' | 'retime'>): boolean {
+  return o.stabilize || o.deflicker || (o.burnIn?.length ?? 0) > 0 || (!!o.retime && o.retime !== 'vfr') || frameChain.active('record')
 }
 
 const GRAY_WIDTH = 480   // downscale width for the stabiliser's tracking frame (register.ts refines from here)
-const STAB_MARGIN_PX = 40   // crop margin (full-resolution px) the stabiliser's correction is clamped to
+const STAB_MARGIN_PX = 40   // crop margin (px of an 820-px-wide frame, scaled with the width) the stabiliser's correction is clamped to
 const STAB_THETA_MAX_DEG = 2
 
 export class Recorder {
@@ -120,6 +139,18 @@ export class Recorder {
   private deflickerUsed = false
   private optsUsed: RecorderOptions = this.options
   private releaseActivity: (() => void) | null = null
+  /** margin the stabiliser may use, in px of the frame being recorded */
+  private stabMarginPx = STAB_MARGIN_PX
+  // ---- startSensor() state ----
+  private recStream: RecordStream | null = null
+  private recInfo: RecordInfo | null = null
+  private mux: H264PassthroughMux | null = null
+  private decoder: VideoDecoder | null = null
+  private skipUntilKey = false
+  private recSeq = 0
+  private recError: Error | null = null
+  /** packets that arrive while the muxer/encoder is still being set up (the first keyframe among them) */
+  private pending: RecordPacket[] | null = null
 
   /** Best-effort browser support probe; `VideoEncoder` (WebCodecs) or `MediaRecorder`. */
   static supported(): boolean { return typeof VideoEncoder !== 'undefined' || typeof MediaRecorder !== 'undefined' }
@@ -189,7 +220,8 @@ export class Recorder {
     this.stabilizeWanted = o.stabilize
     this.stabilizer = null
     this.holdEdges = o.stabilize && o.stabilizeEdges === 'hold'
-    this.margin = o.stabilize && !this.holdEdges ? STAB_MARGIN_PX + 2 : 0
+    this.stabMarginPx = STAB_MARGIN_PX
+    this.margin = o.stabilize && !this.holdEdges ? this.stabMarginPx + 2 : 0
     this.wasMoving = device.moving
     let started = false
     this.mjpeg = new MjpegStream()
@@ -201,11 +233,110 @@ export class Recorder {
           .then((sink) => { this.sink = sink; this.finishStart() })
           .catch((e) => { this.status = `could not start the recorder: ${(e as Error).message}`; this.mjpeg?.stop() })
       }
-      this.drawStreamFrame(frame)
+      this.drawFrame(frame.bitmap, frame.bitmap.width, frame.bitmap.height, frame.ts)
       this.pushFrame(frame.ts, frame.seq)
       frame.bitmap.close()
     }, (e) => { if (this.recording || this.sink) this.status = `stream error: ${e.message}` })
     void run.then(() => { if (this.recording) { this.status = 'stream ended'; void this.stop() } })
+  }
+
+  /** Whether the device can record H.264 from the sensor (`camera.record.available`). */
+  static sensorAvailable(): boolean { return !!device.status?.camera?.record?.available }
+
+  /** Whether this browser can decode the camera's H.264, which the processed sensor path needs. */
+  static async canDecodeSensor(): Promise<boolean> {
+    if (typeof VideoDecoder === 'undefined') return false
+    const size = device.status?.camera?.record?.size ?? [1640, 1232]
+    try { return !!(await VideoDecoder.isConfigSupported({ codec: 'avc1.640029', codedWidth: size[0], codedHeight: size[1] })).supported } catch { return false }
+  }
+
+  /** Record from the camera's hardware H.264 (see the file comment). Resolves once recording has
+   *  started; throws (and leaves the recorder idle) when the device refuses. */
+  async startSensor(label: string, opts: Partial<RecorderOptions> = {}): Promise<void> {
+    if (this.recording || this.recStream) return
+    const o = { ...this.options, ...opts }
+    const processed = needsProcessing(o)
+    this.label = label
+    this.recSeq = 0; this.recError = null; this.skipUntilKey = false
+    this.log = []; this.frames = 0; this.thumb = null; this.firstOutT = null; this.optsUsed = o
+    const q = new URLSearchParams({ keyframe: String(o.keyframeS || 1) })
+    if (o.recordFps) q.set('fps', String(Math.round(o.recordFps)))
+    if (o.recordBitrate) q.set('bitrate', String(Math.round(o.recordBitrate)))
+    const stream = new RecordStream()
+    this.recStream = stream
+    this.pending = []
+    // the thumbnail of an untouched recording is the live frame at the start (nothing is decoded)
+    const thumb = processed ? null : fetchSnapshot().catch(() => null)
+    let info: RecordInfo, done: Promise<void>
+    try {
+      ({ info, done } = await stream.start(device.url(`/record.h264?${q}`), (p) => this.onSensorPacket(p), (e) => { this.recError = e; this.status = `recording stream error: ${e.message}` }))
+    } catch (e) {
+      this.recStream = null; this.pending = null
+      throw e
+    }
+    this.recInfo = info
+    try {
+      if (processed) {
+        this.stabilizeWanted = o.stabilize
+        this.stabilizer = null
+        this.holdEdges = o.stabilize && o.stabilizeEdges === 'hold'
+        this.stabMarginPx = Math.round(STAB_MARGIN_PX * info.width / 820)
+        this.margin = o.stabilize && !this.holdEdges ? this.stabMarginPx + 2 : 0
+        this.wasMoving = device.moving
+        this.beginCanvas(info.width, info.height, o)
+        // re-encode above the camera's own rate so the second generation costs as little as possible
+        const quality = { bitrateMbps: Math.max(8, (info.bitrate / 1e6) * 1.5) }
+        this.sink = await createVideoSink(this.canvas!, { ...this.sinkOptions(o, info.fps), quality })
+      } else {
+        this.stabilizeWanted = false
+        this.mux = await H264PassthroughMux.create(info)
+        void thumb?.then((b) => { if (b && !this.thumb) this.thumb = b })
+      }
+    } catch (e) {
+      stream.stop(); this.recStream = null; this.recInfo = null; this.mux = null; this.pending = null
+      throw e
+    }
+    this.finishStart()
+    const early = this.pending ?? []
+    this.pending = null
+    for (const p of early) this.onSensorPacket(p)
+    void done.then(() => { if (this.recording) { this.status ||= 'the device ended the recording'; void this.stop() } })
+  }
+
+  private onSensorPacket(p: RecordPacket): void {
+    if (!this.recording) { this.pending?.push(p); return }
+    const tSec = p.ts != null ? p.ts / 1e9 : performance.now() / 1000
+    const seq = this.recSeq++
+    if (this.mux) {
+      try {
+        if (this.mux.add(p, tSec)) {
+          this.frames++
+          this.log.push({ t: p.ts ?? 0, seq, position: { ...device.position } })
+        }
+      } catch (e) { this.status = `muxing failed: ${(e as Error).message}`; void this.stop() }
+      return
+    }
+    // processed: decode, then the same draw → chain → encode path as the stream
+    if (!this.decoder) {
+      if (!p.key) return
+      const info = this.recInfo!
+      this.decoder = new VideoDecoder({
+        output: (vf) => {
+          try {
+            const ts = vf.timestamp != null ? vf.timestamp * 1000 : null
+            this.drawFrame(vf, vf.displayWidth, vf.displayHeight, ts)
+            this.pushFrame(ts, this.frames)
+          } finally { vf.close() }
+        },
+        error: (e) => { this.status = `decoding failed: ${e.message}`; void this.stop() },
+      })
+      this.decoder.configure({ codec: avcCodecString(p.data) ?? 'avc1.640029', codedWidth: info.width, codedHeight: info.height, optimizeForLatency: true })
+    }
+    // a decoder that falls behind drops the rest of the group of pictures, not arbitrary frames
+    if (this.decoder.decodeQueueSize > 8) this.skipUntilKey = true
+    if (this.skipUntilKey && !p.key) return
+    this.skipUntilKey = false
+    this.decoder.decode(new EncodedVideoChunk({ type: p.key ? 'key' : 'delta', timestamp: Math.round(tSec * 1e6), data: p.data }))
   }
 
   private sinkOptions(o: RecorderOptions, fpsHint: number) {
@@ -216,7 +347,7 @@ export class Recorder {
     this.srcW = w; this.srcH = h
     // rotation needs a wider crop (exact for a rectangle about its centre); decided here, where the
     // frame size is known, so the output canvas and the encoder are configured with the final size
-    if (this.stabilizeWanted && !this.holdEdges && o.stabilizeRotation) this.margin = STAB_MARGIN_PX + 2 + rotationMargin(w, h, (STAB_THETA_MAX_DEG * Math.PI) / 180)
+    if (this.stabilizeWanted && !this.holdEdges && o.stabilizeRotation) this.margin = this.stabMarginPx + 2 + rotationMargin(w, h, (STAB_THETA_MAX_DEG * Math.PI) / 180)
     const cw = Math.max(1, w - 2 * this.margin), ch = Math.max(1, h - 2 * this.margin)
     const canvas = document.createElement('canvas')
     canvas.width = cw; canvas.height = ch
@@ -243,15 +374,15 @@ export class Recorder {
    *  `GRAY_WIDTH`-px copy; its shift is scaled back to full-frame pixels here and its clamp is set so
    *  the scaled correction never exceeds the crop margin (the previous version applied the tracking-
    *  frame shift unscaled: ~0.3× the needed correction). */
-  private drawStreamFrame(frame: MjpegFrame): void {
-    const { bitmap } = frame
+  private drawFrame(src: CanvasImageSource, width: number, height: number, tsNs: number | null): void {
+    const bitmap = { width, height }
     let dx = 0, dy = 0, theta = 0
     if (this.stabilizeWanted) {
       if (!this.stabilizer) {
         this.grayScale = bitmap.width / Math.max(1, Math.round(bitmap.width * Math.min(1, GRAY_WIDTH / bitmap.width)))
         const rotation = !!this.optsUsed.stabilizeRotation
         const opts = stabilizeOptionsFor(this.optsUsed.stabilizeStrength ?? 'normal', {
-          ...defaultStabilizeOptions, maxShiftPx: STAB_MARGIN_PX / this.grayScale, reanchorPx: 20 / this.grayScale, rotation, maxThetaDeg: STAB_THETA_MAX_DEG,
+          ...defaultStabilizeOptions, maxShiftPx: this.stabMarginPx / this.grayScale, reanchorPx: (20 * this.stabMarginPx / STAB_MARGIN_PX) / this.grayScale, rotation, maxThetaDeg: STAB_THETA_MAX_DEG,
         })
         this.stabilizer = new Stabilizer(opts)
       }
@@ -260,8 +391,8 @@ export class Recorder {
       else {
         if (this.wasMoving) this.stabilizer.reanchor()
         this.wasMoving = false
-        const g = this.grayOf(bitmap)
-        const r = this.stabilizer.track(g, frame.ts != null ? frame.ts / 1e9 : performance.now() / 1000)
+        const g = this.grayOf(src, width, height)
+        const r = this.stabilizer.track(g, tsNs != null ? tsNs / 1e9 : performance.now() / 1000)
         // quantised to 1/8 px so the encoder does not see resampling noise on a still scene
         dx = Math.round(r.dx * this.grayScale * 8) / 8; dy = Math.round(r.dy * this.grayScale * 8) / 8
         theta = r.theta
@@ -274,19 +405,19 @@ export class Recorder {
     if (theta !== 0) {
       const cx = bitmap.width / 2 - this.margin, cy = bitmap.height / 2 - this.margin
       ctx.translate(cx, cy); ctx.rotate(theta); ctx.translate(-cx - dx, -cy - dy)
-      ctx.drawImage(bitmap, -this.margin, -this.margin, bitmap.width, bitmap.height)
+      ctx.drawImage(src, -this.margin, -this.margin, bitmap.width, bitmap.height)
       ctx.setTransform(1, 0, 0, 1, 0, 0)
     } else {
-      ctx.drawImage(bitmap, -this.margin - dx, -this.margin - dy, bitmap.width, bitmap.height)
+      ctx.drawImage(src, -this.margin - dx, -this.margin - dy, bitmap.width, bitmap.height)
     }
   }
 
-  private grayOf(bitmap: ImageBitmap) {
-    const scale = Math.min(1, GRAY_WIDTH / bitmap.width)
-    const w = Math.max(1, Math.round(bitmap.width * scale)), h = Math.max(1, Math.round(bitmap.height * scale))
+  private grayOf(src: CanvasImageSource, width: number, height: number) {
+    const scale = Math.min(1, GRAY_WIDTH / width)
+    const w = Math.max(1, Math.round(width * scale)), h = Math.max(1, Math.round(height * scale))
     if (!this.grayCanvas || this.grayCanvas.width !== w || this.grayCanvas.height !== h) this.grayCanvas = new OffscreenCanvas(w, h)
     const gctx = this.grayCanvas.getContext('2d', { willReadFrequently: true })!
-    gctx.drawImage(bitmap, 0, 0, w, h)
+    gctx.drawImage(src, 0, 0, w, h)
     return toGray(gctx.getImageData(0, 0, w, h))
   }
 
@@ -356,11 +487,23 @@ export class Recorder {
   /** Stop and save to the gallery. Releases the activity hold taken in `finishStart` no matter how
    *  recording ends (normal stop, stream error, unmount) so a hold can never pin the device awake. */
   async stop(): Promise<GalleryItem | null> {
-    if (!this.sink || !this.recording) {
+    const recInfo = this.recInfo
+    // closing the /record.h264 connection is what returns the camera to its stream configuration
+    this.recStream?.stop(); this.recStream = null; this.recInfo = null
+    if (this.decoder) {
+      // frames already queued still reach the encoder (pushFrame needs `recording` true)
+      try { if (this.recording && this.decoder.state === 'configured') await this.decoder.flush() } catch { /* closed by an error */ }
+      try { this.decoder.close() } catch { /* already closed */ }
+      this.decoder = null
+    }
+    const mux = this.mux; this.mux = null
+    if ((!this.sink && !mux) || !this.recording) {
       this.recording = false
       this.sink = null
+      void mux?.close().catch(() => {})
       this.mjpeg?.stop(); this.mjpeg = null
       this.off?.(); this.off = null
+      clearInterval(this.clock)
       this.releaseActivity?.(); this.releaseActivity = null
       return null
     }
@@ -369,8 +512,28 @@ export class Recorder {
     this.mjpeg?.stop(); this.mjpeg = null
     clearInterval(this.clock)
     deflickerProcessor.recordEnabled = false
+    const sensorMeta = (reencoded: boolean) => recInfo ? { width: recInfo.width, height: recInfo.height, sensorSize: recInfo.sensor_size, fps: recInfo.fps, bitrate: recInfo.bitrate, reencoded } : undefined
     try {
-      const sink = this.sink; this.sink = null
+      if (mux) {
+        const r = await mux.close()
+        const log = this.log
+        this.log = []
+        if (!r.frames) { this.status = 'nothing recorded: no frames arrived'; return null }
+        this.status = 'saving…'
+        const thumb = this.thumb ?? (await fetchSnapshot().catch(() => null))
+        this.thumb = null
+        const fps = r.durationS > 0 ? Math.round((r.frames / r.durationS) * 10) / 10 : 0
+        const item = await saveVideo(r.blob, thumb, {
+          durationS: r.durationS, fps, source: this.label, width: recInfo!.width, height: recInfo!.height, position: { ...device.position },
+          codec: r.codec, bitrateBps: recInfo!.bitrate, frames: log, encoder: 'device-h264', container: 'mp4',
+          quality: `${(recInfo!.bitrate / 1e6).toFixed(0)} Mbit/s`, keyframeS: recInfo!.iperiod / Math.max(1, recInfo!.fps),
+          stabilised: false, deflickered: false, sensor: sensorMeta(false),
+        })
+        this.status = `saved "${item.name}" (${r.durationS.toFixed(0)} s, ${r.frames} frames, ${(r.blob.size / 1048576).toFixed(1)} MB, the camera's own H.264)`
+        setTimeout(() => (this.status = ''), 5000)
+        return item
+      }
+      const sink = this.sink!; this.sink = null
       const result = await sink.close()
       const thumb = this.thumb ?? (await new Promise<Blob | null>((r) => this.canvas!.toBlob(r, 'image/jpeg', 0.8)))
       const log = this.log
@@ -387,7 +550,7 @@ export class Recorder {
         keyframeS: this.optsUsed.keyframeS, stabilised: this.stabiliseUsed, deflickered: this.deflickerUsed,
         framesDropped: result.dropped + this.retimeDropped, framesDuplicated: result.duplicated + this.retimeDuplicated,
         stabiliser: this.stabiliseUsed ? { strength: this.optsUsed.stabilizeStrength ?? 'normal', rotation: !!this.optsUsed.stabilizeRotation, edges: this.optsUsed.stabilizeEdges ?? 'crop' } : undefined,
-        retime: retimeMeta,
+        retime: retimeMeta, sensor: sensorMeta(true),
       })
       this.status = `saved "${item.name}" (${result.durationS.toFixed(0)} s, ${log.length} frames${result.dropped ? `, ${result.dropped} dropped` : ''}, ${(result.blob.size / 1048576).toFixed(1)} MB)`
       setTimeout(() => (this.status = ''), 5000)

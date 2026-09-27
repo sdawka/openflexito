@@ -86,6 +86,42 @@ class FrameHub:
             return self.jpeg, self.meta
 
 
+class VideoTap:
+    """The H.264 packets of one recording, handed from the encoder thread to the `/record.h264`
+    handler. `None` in the queue ends the recording: the camera stopped, or the reader fell so far
+    behind (a stalled network) that packets would have to be dropped, which H.264 cannot survive."""
+
+    MAX_QUEUED = 300  # ~10 s at 30 fps
+
+    def __init__(self, loop: asyncio.AbstractEventLoop):
+        self.loop = loop
+        self.queue: asyncio.Queue = asyncio.Queue()
+        self.closed = False
+        self.overflowed = False
+
+    def put_threadsafe(self, data: bytes, ts_ns: int | None, keyframe: bool) -> None:
+        try:
+            self.loop.call_soon_threadsafe(self._put, (data, ts_ns, keyframe))
+        except RuntimeError:  # loop closed during shutdown
+            pass
+
+    def close_threadsafe(self) -> None:
+        try:
+            self.loop.call_soon_threadsafe(self._put, None)
+        except RuntimeError:
+            pass
+
+    def _put(self, item) -> None:
+        if self.closed:
+            return
+        if item is not None and self.queue.qsize() >= self.MAX_QUEUED:
+            self.overflowed = True
+            item = None
+        if item is None:
+            self.closed = True
+        self.queue.put_nowait(item)
+
+
 class CameraBase:
     is_fake = False
     def __init__(self, cfg: CameraConfig, state_dir: Path, events: EventBus):
@@ -100,6 +136,9 @@ class CameraBase:
         self.stream_size = tuple(cfg.stream_size)
         self.still_clean = bool(cfg.still_clean)
         self.sensor: dict = {}
+        self.recording: dict | None = None
+        self._tap: VideoTap | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._load_controls()
         self.tuning = self._load_tuning()
 
@@ -147,6 +186,7 @@ class CameraBase:
     # ---- API shared by real and fake -------------------------------------------------------
 
     def bind(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
         self.main.bind(loop)
         self.lores.bind(loop)
 
@@ -160,6 +200,9 @@ class CameraBase:
             "frame_duration_limits_us": {"stream": list(self.cfg.stream_frame_duration_us),
                                          "still": list(self.cfg.still_frame_duration_us)},
             "max_raw_frames": self.cfg.max_raw_frames, "max_bracket_frames": self.cfg.max_bracket_frames,
+            "record": {"available": self.record_available(), "size": list(self.cfg.record_size),
+                       "max_fps": self.cfg.record_max_fps, "max_bitrate": self.cfg.record_max_bitrate,
+                       "active": self.recording},
         }
 
     async def get_controls(self) -> dict:
@@ -185,6 +228,7 @@ class CameraBase:
         return self.tuning
 
     async def set_tuning(self, tuning: dict) -> dict:
+        self.require_not_recording()
         if not isinstance(tuning, dict) or "algorithms" not in tuning and "rpi.alsc" not in tuning:
             raise ValueError("tuning must be a libcamera tuning JSON object")
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -194,6 +238,7 @@ class CameraBase:
         return {"ok": True}
 
     async def reset_tuning(self) -> dict:
+        self.require_not_recording()
         try:
             self.tuning_file.unlink()
         except FileNotFoundError:
@@ -203,10 +248,64 @@ class CameraBase:
         return {"ok": True}
 
     async def set_stream_size(self, width: int, height: int) -> dict:
+        self.require_not_recording()
         self.stream_size = (int(width), int(height))
         self._save_controls()
         await self._reinit()
         return {"stream_size": list(self.stream_size)}
+
+    # ---- video recording -------------------------------------------------------------------
+
+    def record_available(self) -> bool:
+        return True
+
+    def require_not_recording(self) -> None:
+        """Stills, RAW, brackets and reconfiguration switch the camera mode; while a recording holds
+        the recording configuration they are refused rather than cutting the video."""
+        if self.recording is not None:
+            raise RuntimeError("a video recording is running")
+
+    async def start_recording(self, fps: int, bitrate: int, keyframe_s: float = 1.0) -> tuple[VideoTap, dict]:
+        """Switch to the recording configuration and start the H.264 encoder on the full-size
+        output. Returns the packet tap and a description of the stream. One recording at a time."""
+        if not self.record_available():
+            raise RuntimeError("video recording is not available on this camera")
+        if self.recording is not None:
+            raise RuntimeError("a video recording is already running")
+        if self._loop is None:
+            raise RuntimeError("camera not bound to an event loop")
+        fps = max(1, min(int(fps), int(self.cfg.record_max_fps)))
+        bitrate = max(1_000_000, min(int(bitrate), int(self.cfg.record_max_bitrate)))
+        iperiod = max(1, round(fps * float(keyframe_s)))
+        tap = VideoTap(self._loop)
+        w, h = self.cfg.record_size
+        info = {"codec": "h264", "width": int(w), "height": int(h), "fps": fps, "bitrate": bitrate,
+                "iperiod": iperiod, "sensor_size": list(self.cfg.record_sensor_size), "started": now_ns()}
+        self.recording = info
+        self._tap = tap
+        try:
+            await self._start_recording(tap, fps, bitrate, iperiod)
+        except Exception:
+            self.recording = None
+            self._tap = None
+            raise
+        log.info("recording %sx%s at %s fps, %.1f Mbit/s", w, h, fps, bitrate / 1e6)
+        return tap, info
+
+    async def stop_recording(self) -> None:
+        if self.recording is None:
+            return
+        tap, self._tap = self._tap, None
+        try:
+            await self._stop_recording()
+        finally:
+            self.recording = None
+            if tap is not None:
+                tap.close_threadsafe()
+            log.info("recording stopped")
+
+    async def _start_recording(self, tap: VideoTap, fps: int, bitrate: int, iperiod: int) -> None: ...
+    async def _stop_recording(self) -> None: ...
 
     # ---- helpers shared by real and fake ---------------------------------------------------
 
@@ -279,6 +378,7 @@ class PiCamera(CameraBase):
         self._picam = None
         self._video_config: dict | None = None
         self._encoders: dict = {}
+        self._rec_encoders: list = []
         self._meta_ring: deque = deque(maxlen=8)
         self._meta_lock = threading.Lock()
         self._lock = asyncio.Lock()
@@ -397,6 +497,8 @@ class PiCamera(CameraBase):
                 log.exception("%s encoder failed to start", name)
 
     def _sync_encoders_sync(self) -> None:
+        if self._rec_encoders:  # the recording owns the encoders until it stops
+            return
         wanted = self._wanted_encoders()
         for name in list(self._encoders):
             if name not in wanted:
@@ -456,6 +558,11 @@ class PiCamera(CameraBase):
     def _stop_sync(self) -> None:
         if self._picam is None:
             return
+        self._stop_rec_encoders()
+        if self._tap is not None:  # standby or reinit ends a running recording
+            self._tap.close_threadsafe()
+            self._tap = None
+            self.recording = None
         self._stop_encoders()
         try:
             self._picam.stop()
@@ -503,6 +610,85 @@ class PiCamera(CameraBase):
             self._picam.set_controls(self._libcamera_controls(self.controls))
         except Exception:  # noqa: BLE001
             log.exception("could not restore camera controls after the still")
+
+    # ---- video recording -------------------------------------------------------------------
+
+    def _make_tap_output(self, tap: VideoTap, encoder):
+        from picamera2.outputs import Output
+
+        class TapOutput(Output):
+            def outputframe(self, frame, keyframe=True, timestamp=None, packet=None, audio=False):  # noqa: D401
+                # same timestamp convention as HubOutput: relative to the encoder's first frame,
+                # so adding firsttimestamp back gives SensorTimestamp/1000 (CLOCK_BOOTTIME)
+                try:
+                    abs_us = None if timestamp is None else int(timestamp) + int(encoder.firsttimestamp or 0)
+                    tap.put_threadsafe(bytes(frame), None if abs_us is None else abs_us * 1000, bool(keyframe))
+                except Exception:  # noqa: BLE001  an exception here would end the encoder thread for good
+                    log.exception("recording output failed")
+        return TapOutput()
+
+    async def _start_recording(self, tap: VideoTap, fps: int, bitrate: int, iperiod: int) -> None:
+        async with self._lock:
+            await asyncio.to_thread(self._start_recording_sync, tap, fps, bitrate, iperiod)
+
+    def _start_recording_sync(self, tap: VideoTap, fps: int, bitrate: int, iperiod: int) -> None:
+        """Binned 1640x1232 sensor mode; `main` at the recording size into the hardware H.264
+        encoder, `lores` at the stream size into the MJPEG encoder that feeds `/stream.mjpg`, so the
+        live view carries on (the 410x308 lores stream pauses meanwhile). The frame duration is
+        pinned at the top end to 1/fps so the file has the rate it says; long exposures still work,
+        they just lower the rate as they do on the live view."""
+        from picamera2.encoders import H264Encoder, MJPEGEncoder
+        picam = self._require_camera()
+        self._stop_encoders()
+        frame_us = int(1_000_000 / fps)
+        controls = self._stream_controls()
+        controls["FrameDurationLimits"] = (frame_us, max(frame_us, int(self.cfg.stream_frame_duration_us[1])))
+        try:
+            picam.stop()
+            rec = picam.create_video_configuration(
+                main={"size": tuple(self.cfg.record_size), "format": "YUV420"},
+                lores={"size": tuple(self.stream_size), "format": "YUV420"},
+                raw=None, sensor={"output_size": tuple(self.cfg.record_sensor_size), "bit_depth": 10},
+                controls=controls, buffer_count=6,
+            )
+            picam.configure(rec)
+            picam.start()
+            picam.set_controls(self._libcamera_controls(self.controls))
+            h264 = H264Encoder(bitrate=bitrate, repeat=True, iperiod=iperiod, profile="high")
+            picam.start_encoder(h264, self._make_tap_output(tap, h264), name="main")
+            self._rec_encoders.append(h264)
+            mjpeg = MJPEGEncoder(bitrate=self.cfg.bitrate)
+            picam.start_encoder(mjpeg, self._make_output(self.main, mjpeg), name="lores")
+            self._rec_encoders.append(mjpeg)
+        except Exception:
+            log.exception("could not start the recording configuration")
+            self._back_to_stream_sync()
+            raise
+
+    def _stop_rec_encoders(self) -> None:
+        for enc in self._rec_encoders:
+            try:
+                self._picam.stop_encoder(enc)
+            except Exception:  # noqa: BLE001
+                pass
+        self._rec_encoders.clear()
+
+    async def _stop_recording(self) -> None:
+        async with self._lock:
+            await asyncio.to_thread(self._back_to_stream_sync)
+
+    def _back_to_stream_sync(self) -> None:
+        if self._picam is None:
+            return
+        self._stop_rec_encoders()
+        try:
+            self._picam.stop()
+            self._picam.configure(self._video_config)
+            self._picam.start()
+            self._restore_controls_sync()
+        except Exception:  # noqa: BLE001
+            log.exception("could not return to the stream configuration after recording")
+        self._start_encoders()
 
     # ---- still mode ------------------------------------------------------------------------
 
@@ -585,7 +771,7 @@ class PiCamera(CameraBase):
         if full:
             return (await self.still())[0]
         fresh = self.main.jpeg and now_ns() - int(self.main.meta.get("t") or 0) < 1_000_000_000
-        if "main" in self._encoders and fresh:
+        if ("main" in self._encoders or self._rec_encoders) and fresh:
             return self.main.jpeg
         async with self._lock:  # encoder idle (no clients): software JPEG of the current frame
             return await asyncio.to_thread(self._jpeg_sync)

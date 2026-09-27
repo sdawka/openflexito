@@ -65,7 +65,11 @@ export interface GalleryItem {
      *  blob's `mime` actually is, the quality preset/keyframe interval requested, whether the
      *  deflicker processor was baked in, and how many frames the encoder backlog dropped or (WebM
      *  fallback only) the browser's own captureStream(fps) timer duplicated. */
-    encoder?: 'webcodecs' | 'mediarecorder'
+    encoder?: 'webcodecs' | 'mediarecorder' | 'device-h264'
+    /** additive: recorded from the camera's hardware H.264 (`/record.h264`): the recorded size, the
+     *  sensor mode it was read out in, the rate/bitrate asked of the camera, and whether the browser
+     *  decoded and re-encoded it (processing on) or wrote the camera's packets as they came */
+    sensor?: { width: number; height: number; sensorSize: [number, number]; fps: number; bitrate: number; reencoded: boolean }
     container?: 'mp4' | 'webm'
     quality?: string
     keyframeS?: number
@@ -236,7 +240,8 @@ export async function saveSnapshot(blob: Blob, meta: { position?: GalleryItem['p
 
 export async function saveVideo(blob: Blob, thumb: Blob | null, meta: { durationS: number; fps: number; source: string; width: number; height: number; position?: GalleryItem['position']
   codec?: string; bitrateBps?: number; frames?: VideoFrameLog[]
-  encoder?: 'webcodecs' | 'mediarecorder'; container?: 'mp4' | 'webm'; quality?: string; keyframeS?: number
+  encoder?: 'webcodecs' | 'mediarecorder' | 'device-h264'; container?: 'mp4' | 'webm'; quality?: string; keyframeS?: number
+  sensor?: NonNullable<GalleryItem['video']>['sensor']
   stabilised?: boolean; deflickered?: boolean; framesDropped?: number; framesDuplicated?: number
   mode?: NonNullable<GalleryItem['video']>['mode']; burnIn?: string[]
   stabiliser?: NonNullable<GalleryItem['video']>['stabiliser']; retime?: NonNullable<GalleryItem['video']>['retime'] }): Promise<GalleryItem> {
@@ -248,7 +253,7 @@ export async function saveVideo(blob: Blob, thumb: Blob | null, meta: { duration
     video: {
       durationS: meta.durationS, fps: meta.fps, source: meta.source, mime: blob.type, codec: meta.codec, bitrateBps: meta.bitrateBps, frameCount: frames?.length, frameLog: frames ? 'frames' : undefined,
       stabilised: meta.stabilised, encoder: meta.encoder, container: meta.container, quality: meta.quality, keyframeS: meta.keyframeS, deflickered: meta.deflickered, framesDropped: meta.framesDropped, framesDuplicated: meta.framesDuplicated,
-      mode: meta.mode, burnIn: meta.burnIn?.length ? meta.burnIn : undefined, stabiliser: meta.stabiliser, retime: meta.retime,
+      mode: meta.mode, burnIn: meta.burnIn?.length ? meta.burnIn : undefined, stabiliser: meta.stabiliser, retime: meta.retime, sensor: meta.sensor,
     },
     sample: currentSample(),
   }

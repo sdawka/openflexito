@@ -24,8 +24,7 @@ export interface MjpegFrame {
   meta: FrameMeta | null
   /** JPEG byte size of this part, for diagnostics/bitrate estimates. */
   size: number
-  /** The part's JPEG bytes (a view valid until the handler returns; copy to keep). A recorder's
-   *  pre-roll ring keeps these instead of decoded bitmaps: ~100 kB per frame instead of 8 MB. */
+  /** The part's JPEG bytes (a view valid until the handler returns; copy to keep). */
   bytes: Uint8Array
 }
 

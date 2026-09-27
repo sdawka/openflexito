@@ -288,6 +288,7 @@
           <div>mode {item.video.mode.label}{item.video.mode.params && Object.keys(item.video.mode.params).length ? ` (${Object.entries(item.video.mode.params).map(([k, v]) => `${k} ${Array.isArray(v) ? v.join('/') : v}`).join(', ')})` : ''}</div>
           {#if item.video.mode.stats && Object.keys(item.video.mode.stats).length}<div class="muted">{Object.entries(item.video.mode.stats).map(([k, v]) => `${k} ${typeof v === 'number' ? (Number.isInteger(v) ? v : v.toFixed(2)) : v}`).join(' · ')}</div>{/if}
         {/if}
+        {#if item.video.sensor}<div class="muted">sensor {item.video.sensor.sensorSize.join('×')} mode → {item.video.sensor.width}×{item.video.sensor.height} · camera H.264 {(item.video.sensor.bitrate / 1e6).toFixed(0)} Mbit/s · {item.video.sensor.reencoded ? 'decoded, processed and re-encoded' : 'written as recorded, not re-encoded'}</div>{/if}
         {#if item.video.burnIn?.length}<div class="muted">burn-in: {item.video.burnIn.join(', ')}</div>{/if}
         {#if item.video.stabiliser}<div class="muted">stabiliser {item.video.stabiliser.strength}{item.video.stabiliser.rotation ? ' + rotation' : ''} · {item.video.stabiliser.edges} edges</div>{/if}
         {#if item.video.retime}<div class="muted">timing {item.video.retime.mode} {item.video.retime.fps} fps · {item.video.retime.duplicates} duplicated · {item.video.retime.dropped} dropped</div>{/if}

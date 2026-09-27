@@ -46,6 +46,11 @@ export interface Settings {
   videoRetimeFps: number
   /** burn-in overlays (`services/burnIn.ts#BurnInKind`) */
   videoBurnIn: string[]
+  /** 'sensor': the camera's hardware H.264 from the binned full-field mode (`recorder.startSensor`);
+   *  'view': the 820×616 live view as shown (`recorder.startStream`) */
+  videoSource: 'sensor' | 'view'
+  /** frame rate asked of the camera for sensor recordings (clamped by the device) */
+  videoRecordFps: number
   /** run the deflicker processor on the live view too (off by default: most users never see a
    *  flicker worth the per-frame cost) */
   deflickerLive: boolean
@@ -88,10 +93,10 @@ const defaults: Settings = {
   },
   stageStepUm: { x: 0.088, y: 0.088, z: 0.050 },
   showScaleBar: true,
-  videoCodec: 'vp9', videoBitrateMbps: 12, videoStabilise: true,
+  videoCodec: 'vp9', videoBitrateMbps: 12, videoStabilise: false,
   videoCodecPref: 'auto', videoContainer: 'mp4', videoQuality: 'high', videoKeyframeS: 2, videoDeflicker: false, deflickerLive: false,
   videoRetime: 'vfr', videoRetimeFps: 18,
-  videoBurnIn: [],
+  videoBurnIn: [], videoSource: 'sensor', videoRecordFps: 30,
   superresScale: 2, superresPixfrac: 0.5, superresSharpen: false,
   liveDenoise: false, liveDenoiseRecord: false, liveDenoiseAlpha: 0.7, enhancePreviewWidth: 1024,
   lookBakeIntoRecording: false, lookApplyInGallery: true,

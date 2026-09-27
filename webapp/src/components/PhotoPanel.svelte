@@ -8,7 +8,7 @@
   import { saveSnapshot } from '../lib/store/gallery'
   import { settings, saveSettings } from '../lib/store/settings.svelte'
   import { takePhoto, type PhotoMode } from '../lib/services/photoService'
-  import { recorder, Recorder, type VideoCodec, type VideoContainer, type VideoQuality } from '../lib/services/recorder.svelte'
+  import { recorder, Recorder, needsProcessing, type VideoCodec, type VideoContainer, type VideoQuality } from '../lib/services/recorder.svelte'
   import { liveStack } from '../lib/services/liveStack.svelte'
   import { macroService } from '../lib/services/macro.svelte'
   import { BURN_IN_KINDS, type BurnInKind } from '../lib/services/burnIn'
@@ -106,7 +106,7 @@
   }
   function saveSuperresDefaults() { settings.superresScale = superresScale; settings.superresPixfrac = superresPixfrac; settings.superresSharpen = superresSharpen; saveSettings() }
 
-  // ---- video: records what the live view shows ----
+  // ---- video: the camera's own H.264 from the full sensor field, or the live view as shown ----
   let vidCodec = $state<VideoCodec>(settings.videoCodecPref as VideoCodec)
   let vidContainer = $state<VideoContainer>(settings.videoContainer)
   let vidQuality = $state<Exclude<VideoQuality, object>>(settings.videoQuality)
@@ -115,26 +115,53 @@
   let vidRetime = $state(settings.videoRetime)
   let vidRetimeFps = $state(settings.videoRetimeFps)
   let vidBurnIn = $state<BurnInKind[]>((settings.videoBurnIn ?? []).filter((k) => BURN_IN_KINDS.some((b) => b.id === k)) as BurnInKind[])
+  let vidSource = $state<'sensor' | 'view'>(settings.videoSource ?? 'sensor')
+  let vidFps = $state(settings.videoRecordFps ?? 30)
   const codecSupport = Recorder.codecSupport()
   const recordingStack = $derived(liveStack.active && !!liveStack.composite)
-  const sourceLabel = $derived(recordingStack ? (liveStack.mode === 'average' ? 'smoothed view' : 'live stack') : 'live view')
+  const recordCaps = $derived(device.status?.camera?.record)
+  /** the camera's H.264 path applies: the device offers it, it is chosen, and no live stack is running */
+  const useSensor = $derived(vidSource === 'sensor' && !!recordCaps?.available && !recordingStack)
+  const sensorSize = $derived(recordCaps?.size ?? [1640, 1232])
+  const sourceLabel = $derived(recordingStack ? (liveStack.mode === 'average' ? 'smoothed view' : 'live stack') : useSensor ? `${sensorSize[0]}×${sensorSize[1]}` : 'live view')
+  /** camera bitrate for the quality preset, capped by what the device allows */
+  const SENSOR_MBPS = { high: 25, medium: 16, low: 8 } as const
+  const sensorBitrate = $derived(Math.min(SENSOR_MBPS[vidQuality] * 1e6, recordCaps?.max_bitrate ?? 25e6))
+  const reencodes = $derived(needsProcessing({ stabilize: vidStabilise, deflicker: vidDeflicker, burnIn: vidBurnIn, retime: vidRetime }))
 
   function saveVideoDefaults() {
     settings.videoCodecPref = vidCodec; settings.videoContainer = vidContainer; settings.videoQuality = vidQuality
     settings.videoStabilise = vidStabilise; settings.videoDeflicker = vidDeflicker
     settings.videoRetime = vidRetime; settings.videoRetimeFps = vidRetimeFps
     settings.videoBurnIn = [...vidBurnIn]
+    settings.videoSource = vidSource; settings.videoRecordFps = vidFps
     saveSettings()
   }
   function toggleBurnIn(k: BurnInKind, on: boolean) {
     vidBurnIn = on ? [...new Set([...vidBurnIn, k])] : vidBurnIn.filter((x) => x !== k)
     saveVideoDefaults()
   }
-  function toggleRecord() {
+  let starting = $state(false)
+  async function toggleRecord() {
     if (recorder.recording) { void recorder.stop().then((i) => { if (i) status = { kind: 'ok', text: `saved "${i.name}"` } }); return }
+    if (starting) return
     const opts = {
       container: vidContainer, codec: vidCodec, quality: vidQuality, keyframeS: settings.videoKeyframeS,
       stabilize: vidStabilise, deflicker: vidDeflicker, retime: vidRetime, retimeFps: vidRetimeFps, burnIn: [...vidBurnIn],
+      recordFps: vidFps, recordBitrate: sensorBitrate,
+    }
+    if (useSensor) {
+      // processing needs the camera's H.264 decoded in the browser; without a decoder, record the live view
+      if (!reencodes || await Recorder.canDecodeSensor()) {
+        starting = true
+        try { await recorder.startSensor(sourceLabel, opts); status = null; return }
+        catch (e) { status = { kind: 'err', text: `sensor recording refused (${(e as Error).message}); recording the live view instead` } }
+        finally { starting = false }
+      } else {
+        status = { kind: 'err', text: 'this browser cannot decode H.264 for stabilise/deflicker/burn-in/look; recording the live view instead' }
+      }
+      recorder.startStream('live view', opts)
+      return
     }
     if (recordingStack) {
       // the live stack is already a temporally smoothed composite (not a raw <img>), so it keeps
@@ -233,14 +260,38 @@
 
   <h4>Video</h4>
   <div class="row">
-    <button class="rec" class:on={recorder.recording} onclick={toggleRecord} disabled={!device.connected} title="record what the live view shows (the live focus stack when it is on) into the gallery">
-      <span class="dot"></span>{recorder.recording ? `Stop · ${recorder.seconds} s` : 'Record video'}
+    <button class="rec" class:on={recorder.recording} onclick={toggleRecord} disabled={!device.connected || starting} title="record into the gallery: the camera's own H.264 from the full sensor field, or the live view (the live focus stack when it is on)">
+      <span class="dot"></span>{recorder.recording ? `Stop · ${recorder.seconds} s` : starting ? 'Starting…' : 'Record video'}
     </button>
     {#if recorder.recording}<span class="muted small">recording the {sourceLabel} · {recorder.frames} frames{#if recorder.detail} · {recorder.detail}{/if}</span>{/if}
     {#if recorder.status && !recorder.recording}<span class="muted small">{recorder.status}</span>{/if}
   </div>
   {#if !recorder.recording}
-    <p class="blurb">Records what the live view shows, including live denoise (Camera panel, "also apply while recording") and, if baked, the look. For slow processes use the Time-lapse tool.</p>
+    {#if recordCaps?.available && !recordingStack}
+      <div class="params">
+        <label>Source
+          <select bind:value={vidSource} onchange={saveVideoDefaults} aria-label="video source">
+            <option value="sensor">Sensor {sensorSize[0]}×{sensorSize[1]} (best)</option>
+            <option value="view">Live view {device.status?.camera?.stream_size?.join('×') ?? ''}</option>
+          </select>
+        </label>
+        {#if vidSource === 'sensor'}
+          <label title="frames per second asked of the camera; exposures longer than a frame lower it">fps
+            <select bind:value={vidFps} onchange={saveVideoDefaults}>
+              {#each [10, 15, 24, 30].filter((f) => f <= (recordCaps?.max_fps ?? 30)) as f}<option value={f}>{f}</option>{/each}
+            </select>
+          </label>
+        {/if}
+      </div>
+    {/if}
+    {#if useSensor}
+      <p class="blurb">
+        Every photosite of the full field (2×2-binned {recordCaps?.size?.join('×')} readout) through the camera's hardware H.264 at {(sensorBitrate / 1e6).toFixed(0)} Mbit/s, 4× the pixels of the live view.
+        {#if reencodes}<span style="color:var(--warn)">Stabilise, deflicker, burn-in, constant-rate timing, live denoise or the baked look are on, so the browser decodes, processes and re-encodes it; turn them off to keep the camera's own encoding.</span>{:else}Written into the MP4 as the camera encoded it, nothing re-encoded.{/if}
+      </p>
+    {:else}
+      <p class="blurb">Records what the live view shows, including live denoise (Camera panel, "also apply while recording") and, if baked, the look. For slow processes use the Time-lapse tool.</p>
+    {/if}
     <div class="params">
       <label class="chk" title="removes vibration jitter from the live view with a small crop margin; suspended while the stage moves"><input type="checkbox" bind:checked={vidStabilise} onchange={saveVideoDefaults} /> Stabilise</label>
       <label class="chk" title="normalises per-frame brightness (LED driver / mains flicker) before encoding"><input type="checkbox" bind:checked={vidDeflicker} onchange={saveVideoDefaults} /> Deflicker</label>

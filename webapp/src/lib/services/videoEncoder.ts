@@ -15,8 +15,9 @@
  *  and settings UI use the more familiar `'h264'` and map it to `'avc'` at this boundary. */
 import {
   Output, Mp4OutputFormat, WebMOutputFormat, BufferTarget, VideoSampleSource, VideoSample,
-  canEncodeVideo, type VideoCodec as MbVideoCodec,
+  EncodedVideoPacketSource, EncodedPacket, canEncodeVideo, type VideoCodec as MbVideoCodec,
 } from 'mediabunny'
+import { avcCodecString, type RecordInfo, type RecordPacket } from '../api/recordStream'
 
 export type Container = 'mp4' | 'webm'
 export type VideoCodecPref = 'h264' | 'vp9' | 'av1' | 'auto'
@@ -267,4 +268,66 @@ export async function createVideoSink(canvas: HTMLCanvasElement, opts: VideoSink
   const mr = MediaRecorderSink.create(canvas, opts)
   if (mr) return mr
   throw new Error('video recording is not supported by this browser')
+}
+
+/** The camera's own H.264 (`api/recordStream.ts`) written into a fast-start MP4 as it arrives, with
+ *  no decode and no re-encode: the file holds exactly what the Pi's hardware encoder produced from
+ *  the sensor. Packets before the first keyframe are skipped; each packet's duration is the gap to
+ *  the next one (device frame times), the last one gets 1/fps. The codec string is read from the SPS. */
+export class H264PassthroughMux {
+  private chain: Promise<void> = Promise.resolve()
+  private error: Error | null = null
+  private prev: { data: Uint8Array; key: boolean; t: number } | null = null
+  private t0: number | null = null
+  private configured = false
+  codec = ''
+  frames = 0
+  bytes = 0
+
+  private constructor(private info: RecordInfo, private output: Output, private target: BufferTarget, private source: EncodedVideoPacketSource) {}
+
+  static async create(info: RecordInfo): Promise<H264PassthroughMux> {
+    const target = new BufferTarget()
+    const output = new Output({ format: new Mp4OutputFormat({ fastStart: 'in-memory' }), target })
+    const source = new EncodedVideoPacketSource('avc')
+    output.addVideoTrack(source)
+    await output.start()
+    return new H264PassthroughMux(info, output, target, source)
+  }
+
+  /** Queue one access unit at `tSec` (device time, seconds). False when it was skipped (no keyframe yet). */
+  add(p: RecordPacket, tSec: number): boolean {
+    if (this.error) throw this.error
+    if (!this.prev && !p.key) return false
+    if (this.t0 === null) this.t0 = tSec
+    const t = Math.max(tSec - this.t0, this.prev ? this.prev.t + 1e-4 : 0)
+    if (this.prev) this.write(this.prev, t - this.prev.t)
+    this.prev = { data: p.data, key: p.key, t }
+    return true
+  }
+
+  private write(pk: { data: Uint8Array; key: boolean; t: number }, duration: number): void {
+    let meta: EncodedVideoChunkMetadata | undefined
+    if (!this.configured) {
+      this.configured = true
+      this.codec = avcCodecString(pk.data) ?? 'avc1.640029'
+      meta = { decoderConfig: { codec: this.codec, codedWidth: this.info.width, codedHeight: this.info.height } }
+    }
+    const packet = new EncodedPacket(pk.data, pk.key ? 'key' : 'delta', pk.t, duration)
+    this.frames++
+    this.bytes += pk.data.length
+    this.chain = this.chain.then(() => this.source.add(packet, meta)).catch((e) => { this.error ??= e as Error })
+  }
+
+  get durationS(): number { return this.prev ? this.prev.t + 1 / Math.max(1, this.info.fps) : 0 }
+
+  async close(): Promise<{ blob: Blob; durationS: number; frames: number; codec: string }> {
+    if (this.prev) this.write(this.prev, 1 / Math.max(1, this.info.fps))
+    const durationS = this.durationS
+    await this.chain
+    if (this.error) throw this.error
+    if (!this.frames) { await this.output.cancel().catch(() => {}); return { blob: new Blob([], { type: 'video/mp4' }), durationS: 0, frames: 0, codec: this.codec } }
+    await this.output.finalize()
+    return { blob: new Blob([this.target.buffer!], { type: 'video/mp4' }), durationS, frames: this.frames, codec: this.codec }
+  }
 }

@@ -52,6 +52,9 @@ export interface CameraStatus {
   max_raw_frames?: number
   max_bracket_frames?: number
   frame_duration_limits_us?: { stream?: [number, number]; still?: [number, number] }
+  /** `/record.h264` (device web.py#record): hardware H.264 from the binned sensor mode; `active` is
+   *  the running recording's description, null when idle. Absent on older devices. */
+  record?: { available: boolean; size: [number, number]; max_fps: number; max_bitrate: number; active: Record<string, unknown> | null }
 }
 
 export type LedState = 'booting' | 'offline' | 'hotspot' | 'online' | 'streaming' | 'error' | 'off'

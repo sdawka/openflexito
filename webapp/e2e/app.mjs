@@ -312,6 +312,7 @@ await step('live focus stack builds a composite and saves it', async () => {
 await step('video recording (stabilise on) lands in the gallery and opens in the viewer', async () => {
   await nav('live')
   await tool('Photo')
+  await videoSource(page.locator('.panel:has(h3:has-text("Photo"))'), 'view')
   const stabilise = page.locator('.panel:has(h3:has-text("Photo")) label:has-text("Stabilise") input[type=checkbox]')
   if (!(await stabilise.isChecked())) await stabilise.check()
   await page.click('button:has-text("Record video")')
@@ -608,6 +609,11 @@ if (moves) await step('a recorded macro of two jogs replays and returns the stag
 // (same UI, unchanged text: "Record video" / "Stop · N s" / "saved \"Video live view ...\"" / the
 // gallery's "video · N s · live view" chip); these add container/codec choice, constant-rate timing
 // with a burn-in, and the new export.
+/** Pick the recording source when the device offers the sensor path (fake with PyAV, or the Pi). */
+async function videoSource(panel, value) {
+  const sel = panel.locator('select[aria-label="video source"]')
+  if (await sel.count()) await sel.selectOption(value)
+}
 async function openEncoding(panel) {
   const d = panel.locator('details:has(summary:has-text("Encoding and overlays"))')
   if (!(await d.evaluate((el) => el.open))) await d.locator('summary').click()
@@ -617,6 +623,7 @@ await step('recording with a non-default container/codec still lands in the gall
   await nav('live')
   await tool('Photo')
   const panel = page.locator('.panel:has(h3:has-text("Photo"))')
+  await videoSource(panel, 'view')
   await openEncoding(panel)
   await panel.locator('label:has-text("Container") select').selectOption('webm')
   await panel.locator('label:has-text("Codec") select').selectOption('vp9')
@@ -655,6 +662,7 @@ async function openLatestVideo(cardText) {
 await step('constant-rate timing with the elapsed-time burn-in records a playable video with its meta', async () => {
   await nav('live')
   const panel = await tool('Photo')
+  await videoSource(panel, 'view')
   await openEncoding(panel)
   await panel.locator('label:has-text("Timing") select').selectOption('cfr')
   const fps = panel.locator('label:has-text("fps") input[type=number]')
@@ -701,6 +709,45 @@ await step('focus peaking paints the live canvas only while enabled', async () =
   await page.waitForSelector('canvas.processed', { timeout: 8000 })
   await chk.uncheck()
   await page.waitForTimeout(600)
+})
+
+await step('sensor recording writes the camera\'s own H.264 into an MP4 without re-encoding', async () => {
+  await nav('live')
+  const panel = await tool('Photo')
+  const src = panel.locator('select[aria-label="video source"]')
+  if (!(await src.count())) { console.log('     (device offers no sensor recording: skipped)'); return }
+  await src.selectOption('sensor')
+  for (const label of ['Stabilise', 'Deflicker', 'Bake look']) {
+    const box = panel.locator(`label:has-text("${label}") input[type=checkbox]`)
+    if (await box.isChecked()) await box.uncheck()
+  }
+  expect(/nothing re-encoded/.test(await panel.innerText()), 'panel does not say the recording is written as encoded')
+  await page.click('button:has-text("Record video")')
+  await page.waitForFunction(() => /Stop · \d+ s/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 10000 })
+  // stills are refused while the camera holds the recording mode
+  const still = await page.evaluate(async () => (await fetch('/snapshot.jpg?full=1')).status)
+  expect(still === 409, `full-res still during a recording answered ${still}, expected 409`)
+  await page.waitForTimeout(3000)
+  await page.click('button:has-text("Stop ·")')
+  await page.waitForFunction(() => /saved "Video \d+×\d+/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 20000 })
+    .catch(async () => { throw new Error('sensor recording did not save: ' + (await panel.innerText()).replace(/\s+/g, ' ').slice(-200)) })
+  const m = (await panel.innerText()).match(/saved "Video (\d+)×(\d+)/)
+  expect(m && +m[1] > 820, `sensor recording is ${m?.[1]} px wide, expected more than the 820-px live view`)
+  // the device is back in its stream configuration
+  await page.waitForFunction(async () => (await fetch('/snapshot.jpg?full=1')).status === 200, null, { timeout: 10000, polling: 500 })
+  await nav('gallery'); await page.waitForTimeout(600)
+  await page.locator(`.card:has-text("Video ${m[1]}×${m[2]}") button:has-text("Open")`).first().click()
+  await page.waitForSelector('.overlay button.details-toggle', { timeout: 5000 })
+  await page.click('.overlay button.details-toggle')
+  const details = await page.locator('.overlay .details').innerText()
+  expect(/written as recorded, not re-encoded/.test(details) && /avc1\./.test(details), `details: ${details.replace(/\s+/g, ' ').slice(0, 240)}`)
+  const playable = await page.evaluate(() => document.createElement('video').canPlayType('video/mp4; codecs="avc1.640029"'))
+  if (playable) {
+    const dur = await page.locator('video.video').evaluate((v) => new Promise((r) => { if (v.readyState >= 1) r(v.duration); else v.onloadedmetadata = () => r(v.duration) }))
+    expect(dur > 2, `sensor video duration ${dur}`)
+  }
+  await page.click('.overlay button.details-toggle')
+  await page.click('button:has-text("close")')
 })
 
 await step('time-lapse exports to MP4 via WebCodecs', async () => {

@@ -169,3 +169,11 @@ on hardware.
   (`gamepad.py` slot in the plan), fan on GPIO18 with `gpio-fan` if the Pi runs hot at 1640×1232.
 - Colour-checker CCM calibration and CA/distortion correction from a grid target (CAPTURE_AUDIT.md
   Tier C).
+
+- **Sensor video recording on the Pi** (`/record.h264`, `camera.py` `_start_recording_sync`): written
+  against picamera2's documented API and exercised only with the fake camera (PyAV libx264). On the
+  Pi 3B+ check: the 1640×1232 `main` + 820×616 `lores` configuration starts; H.264 (`profile="high"`)
+  and MJPEG encoders run together at 30 fps without dropping frames (CPU, bcm2835-codec throughput,
+  level 4.1 limit); encoder timestamps line up with SensorTimestamp; the MP4 plays in Chrome/Safari; the
+  stream configuration comes back cleanly after stop, standby and a closed tab; real throughput on
+  WiFi at 25 Mbit/s + the preview stream.
