@@ -721,11 +721,16 @@ await step('sensor recording writes the camera\'s own H.264 into an MP4 without 
     const box = panel.locator(`label:has-text("${label}") input[type=checkbox]`)
     if (await box.isChecked()) await box.uncheck()
   }
+  // anything that changes pixels or timing makes the browser re-encode; an earlier step may have left some on
+  await openEncoding(panel)
+  await panel.locator('label:has-text("Timing") select').selectOption('vfr')
+  for (const box of await panel.locator('.burnin input[type=checkbox]').all()) if (await box.isChecked()) await box.uncheck()
   expect(/nothing re-encoded/.test(await panel.innerText()), 'panel does not say the recording is written as encoded')
   await page.click('button:has-text("Record video")')
   await page.waitForFunction(() => /Stop · \d+ s/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 10000 })
-  // stills are refused while the camera holds the recording mode
-  const still = await page.evaluate(async () => (await fetch('/snapshot.jpg?full=1')).status)
+  // stills are refused while the camera holds the recording mode (asked from Node, not the page, so the
+  // expected 409 does not land in the page console the final step checks)
+  const still = (await page.request.get(`${base}/snapshot.jpg?full=1`)).status()
   expect(still === 409, `full-res still during a recording answered ${still}, expected 409`)
   await page.waitForTimeout(3000)
   await page.click('button:has-text("Stop ·")')
@@ -734,7 +739,9 @@ await step('sensor recording writes the camera\'s own H.264 into an MP4 without 
   const m = (await panel.innerText()).match(/saved "Video (\d+)×(\d+)/)
   expect(m && +m[1] > 820, `sensor recording is ${m?.[1]} px wide, expected more than the 820-px live view`)
   // the device is back in its stream configuration
-  await page.waitForFunction(async () => (await fetch('/snapshot.jpg?full=1')).status === 200, null, { timeout: 10000, polling: 500 })
+  let back = 0
+  for (let i = 0; i < 20 && back !== 200; i++) { back = (await page.request.get(`${base}/snapshot.jpg?full=1`)).status(); if (back !== 200) await page.waitForTimeout(500) }
+  expect(back === 200, `full-res still after the recording answered ${back}`)
   await nav('gallery'); await page.waitForTimeout(600)
   await page.locator(`.card:has-text("Video ${m[1]}×${m[2]}") button:has-text("Open")`).first().click()
   await page.waitForSelector('.overlay button.details-toggle', { timeout: 5000 })
