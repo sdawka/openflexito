@@ -10,9 +10,9 @@ pure TypeScript with vitest coverage, services orchestrate, components render).
 |---|---|
 | **automatic** | always on, no control; the user only notices the result |
 | **setting** | a persistent toggle or value (Settings page or a panel), off or on by default as noted |
-| **mode** | chosen per capture from the Photo panel's *capture mode* or *video mode* picker, with a blurb, a cost line and its own parameters |
+| **mode** | chosen per capture from the Photo panel's *capture mode* picker, with a blurb, a time estimate and its own parameters |
 | **tool** | an explicit action with its own button or gesture (calibrate, measure, autofocus, …) |
-| **option** | a per-capture checkbox next to the mode picker |
+| **option** | a per-capture checkbox or choice in the Photo panel |
 | **gallery** | applied after the fact to a saved item, saving a new item |
 
 Links go to `main`; function names are given so a symbol search lands on the code.
@@ -26,14 +26,11 @@ camera's auto exposure and white balance for the run ([`cameraLock.ts`](webapp/s
 
 | mode | technique | UX | code |
 |---|---|---|---|
-| Single | Full-resolution still with its own `X-Frame` metadata attached | mode (default) | [`photoService.ts`](webapp/src/lib/services/photoService.ts) `takePhoto`, [`api/snapshot.ts`](webapp/src/lib/api/snapshot.ts) `fetchSnapshotWithMeta` |
-| RAW | 10-bit Bayer record (OFRW v2) developed in the browser: black/white level, the tuning file's lens-shading tables or a measured flat, the record's own colour gains and CCM, camera gamma → 16-bit PNG + DNG | mode | [`photo/rawPhoto.ts`](webapp/src/lib/services/photo/rawPhoto.ts) `rawPhoto`, [`algo/rawdev.ts`](webapp/src/lib/algo/rawdev.ts) `develop` `developLinear`, [`algo/demosaic.ts`](webapp/src/lib/algo/demosaic.ts), [`algo/dng.ts`](webapp/src/lib/algo/dng.ts) `encodeDng`, [`algo/png16.ts`](webapp/src/lib/algo/png16.ts) |
-| RAW average | N raw frames averaged on the device in one mode switch (√N less shot noise), then developed like RAW | mode | [`photo/rawPhoto.ts`](webapp/src/lib/services/photo/rawPhoto.ts) `rawAveragePhoto`, device `rawfmt.py` `frames=N` |
-| Quick stack | Slices around the current z, aligned, merged by per-block sharpness (smoothed weights, single blend) | mode | [`photo/focusStack.ts`](webapp/src/lib/services/photo/focusStack.ts) `takeFocusStack`, [`algo/stack.ts`](webapp/src/lib/algo/stack.ts) `focusStack` |
-| Fine stack | Autofocus locates the focus plane and the sharpness-peak depth; slices spread over it are sub-pixel aligned (phase correlation ≤ 410 px, NCC refinement, Lanczos-3) and fused in a Laplacian pyramid with noise-floor averaging; optional Zerene-style DMap hybrid; depth map, height legend and relief rendering | mode + Fusion method (Advanced) | [`photo/focusStack.ts`](webapp/src/lib/services/photo/focusStack.ts) `takeFineFocusStack`, [`algo/align.ts`](webapp/src/lib/algo/align.ts) `SliceAligner`, [`algo/pyramidFuse.ts`](webapp/src/lib/algo/pyramidFuse.ts) `PyramidFuser`, [`algo/depthMap.ts`](webapp/src/lib/algo/depthMap.ts) `colorizeDepth` `reliefShade`, [`workers/stackWorker.ts`](webapp/src/lib/workers/stackWorker.ts) |
-| Fine stack from RAW | The fine stack with every slice developed from RAW and fused at 16 bits | mode | [`photo/focusStack.ts`](webapp/src/lib/services/photo/focusStack.ts) `takeFineFocusStack('raw')`, [`workers/rawWorker.ts`](webapp/src/lib/workers/rawWorker.ts) |
-| LED exposure stack | The scene at several LED and/or exposure-time levels, exposure-fused (Mertens weights: contrast, saturation, well-exposedness) | mode + Bracket (LED / exposure / both), levels (Advanced) | [`photo/exposureStack.ts`](webapp/src/lib/services/photo/exposureStack.ts) `exposureStackPhoto`, [`algo/exposureFuse.ts`](webapp/src/lib/algo/exposureFuse.ts) `mertensFuse`, device `/bracket.bin` |
-| HDR (RAW) | A linear-RAW exposure bracket merged to radiance (Debevec hat weights, exposure ratios from means), tone-mapped (Reinhard or Mertens) to 16-bit | mode + exposure factors | [`photo/rawPhoto.ts`](webapp/src/lib/services/photo/rawPhoto.ts) `hdrRawPhoto`, [`algo/hdr.ts`](webapp/src/lib/algo/hdr.ts) `mergeHdr` `toneMapReinhard` `toneMapMertens` |
+| Photo | Full-resolution still with its own `X-Frame` metadata attached | mode (default) | [`photoService.ts`](webapp/src/lib/services/photoService.ts) `takePhoto`, [`api/snapshot.ts`](webapp/src/lib/api/snapshot.ts) `fetchSnapshotWithMeta` |
+| RAW | 10-bit Bayer record (OFRW v2) developed in the browser: black/white level, the tuning file's lens-shading tables or a measured flat, the record's own colour gains and CCM, camera gamma → 16-bit PNG + DNG. With Frames > 1, N raw frames are averaged on the device in one mode switch (√N less shot noise) first | mode + Frames | [`photo/rawPhoto.ts`](webapp/src/lib/services/photo/rawPhoto.ts) `rawPhoto` `rawAveragePhoto`, [`algo/rawdev.ts`](webapp/src/lib/algo/rawdev.ts) `develop` `developLinear`, [`algo/demosaic.ts`](webapp/src/lib/algo/demosaic.ts), [`algo/dng.ts`](webapp/src/lib/algo/dng.ts) `encodeDng`, [`algo/png16.ts`](webapp/src/lib/algo/png16.ts), device `rawfmt.py` `frames=N` |
+| Focus stack | Autofocus locates the focus plane and the sharpness-peak depth; slices spread over it are sub-pixel aligned (phase correlation ≤ 410 px, NCC refinement, Lanczos-3) and fused in a Laplacian pyramid with noise-floor averaging; optional Zerene-style DMap hybrid; depth map, height legend and relief rendering. *From RAW* develops every slice from RAW and fuses at 16 bits | mode + Slices, Search range, From RAW, Fusion method (Advanced) | [`photo/focusStack.ts`](webapp/src/lib/services/photo/focusStack.ts) `takeFineFocusStack`, [`algo/align.ts`](webapp/src/lib/algo/align.ts) `SliceAligner`, [`algo/pyramidFuse.ts`](webapp/src/lib/algo/pyramidFuse.ts) `PyramidFuser`, [`algo/depthMap.ts`](webapp/src/lib/algo/depthMap.ts) `colorizeDepth` `reliefShade`, [`workers/stackWorker.ts`](webapp/src/lib/workers/stackWorker.ts), [`workers/rawWorker.ts`](webapp/src/lib/workers/rawWorker.ts) |
+| HDR, JPEG source | The scene at several LED levels, exposure-fused (Mertens weights: contrast, saturation, well-exposedness) | mode HDR + Source, LED levels (Advanced) | [`photo/exposureStack.ts`](webapp/src/lib/services/photo/exposureStack.ts) `exposureStackPhoto`, [`algo/exposureFuse.ts`](webapp/src/lib/algo/exposureFuse.ts) `mertensFuse`, device `/bracket.bin` |
+| HDR, RAW source | A linear-RAW exposure bracket merged to radiance (Debevec hat weights, exposure ratios from means), tone-mapped (Reinhard or Mertens) to 16-bit | mode HDR + Source, exposure factors (Advanced) | [`photo/rawPhoto.ts`](webapp/src/lib/services/photo/rawPhoto.ts) `hdrRawPhoto`, [`algo/hdr.ts`](webapp/src/lib/algo/hdr.ts) `mergeHdr` `toneMapReinhard` `toneMapMertens` |
 | Super-resolution | A 2×2 or 3×3 pattern of stills shifted by sub-pixel stage offsets (through the stage↔camera calibration), registered, drizzled onto a finer grid; optional Wiener sharpening against the drizzle-drop + pixel PSF; RAW-plane variant with no demosaic | mode + Scale, Sharpen, Pixfrac, Extra frames, RAW planes | [`photo/superres.ts`](webapp/src/lib/services/photo/superres.ts) `superresPhoto`, [`algo/drizzle.ts`](webapp/src/lib/algo/drizzle.ts) `drizzle` `drizzleBayer` `drizzleRawSuperres`, [`algo/register.ts`](webapp/src/lib/algo/register.ts) `register`, [`algo/deconvolve.ts`](webapp/src/lib/algo/deconvolve.ts) `wiener`, [`workers/superresWorker.ts`](webapp/src/lib/workers/superresWorker.ts) |
 | Quick frame | Saves the current stream frame as it is | tool (button) | [`PhotoPanel.svelte`](webapp/src/components/PhotoPanel.svelte) `quickFrame` |
 
@@ -41,80 +38,26 @@ Related: **RAW flat field** (a measured flat replaces the tuning file's shading 
 
 ---
 
-## 2. Video capture modes
+## 2. Video recording
 
-Chosen in **Photo → video mode** under *Record video*. Every mode is a `VideoModeRun`
-([`video/types.ts`](webapp/src/lib/services/video/types.ts)) driven by the recorder
-([`recorder.svelte.ts`](webapp/src/lib/services/recorder.svelte.ts) `pushFrame` `processFrame`); the catalogue, blurbs and defaults are in
-[`video/videoModes.ts`](webapp/src/lib/services/video/videoModes.ts). Design and verification notes: [`webapp/docs/video-modes.md`](webapp/docs/video-modes.md); the research behind the list: [`webapp/docs/video-research/`](webapp/docs/video-research/).
-
-Where a mode sits in a frame's path:
+**Photo → Record video** records what the live view shows: the stream (or the live focus stack when
+it is on), through the same frame chain as the view, so live denoise and the look are recorded when
+their "into recording" switches are on. There are no video modes; slow processes go through the
+Time-lapse tool.
 
 ```
-MJPEG part → stabilise → frame chain < 900 (deflicker, live denoise) → MODE → frame chain ≥ 900 (look/LUT) → burn-in → encoder
+MJPEG part → stabilise → frame chain (deflicker, live denoise, look/LUT) → burn-in → encoder
 ```
-
-### 2.1 Signal quality
-
-| mode | technique | UX | code |
-|---|---|---|---|
-| Temporal denoise | HDR+-style soft Wiener merge, recursive per pixel: shrinkage `s = cσ²/(m + cσ²)` on the noise-corrected patch difference, a per-pixel effective frame count, a per-luma-bin noise curve measured from the residuals; history warped by the known stage shift so it survives pans (`compensatesStage`). Then a chroma-only stage: Cb/Cr at half resolution through a luma-guided filter with a soft temporal EMA, so colour speckle goes while luma detail stays | mode + Strength (frames), Robustness, Chroma, Lock exposure | [`video/stackModes.ts`](webapp/src/lib/services/video/stackModes.ts) `denoiseMode`, [`algo/burstMerge.ts`](webapp/src/lib/algo/burstMerge.ts) `BurstMerge`, [`algo/chromaDenoise.ts`](webapp/src/lib/algo/chromaDenoise.ts) `ChromaDenoiser` |
-| Long exposure | Sliding mean of N frames (ring + running sum) or exponential persistence; TPDF-dithered re-quantisation | mode + Frames, Window, Lock exposure | [`video/stackModes.ts`](webapp/src/lib/services/video/stackModes.ts) `integrateMode`, [`algo/videoStack.ts`](webapp/src/lib/algo/videoStack.ts) `SlidingMean` `ExpIntegrator` `dither` |
-| Temporal median | Per-pixel median of 3 or 5 frames, median index found on luma and that frame's RGB copied (no colour fringes) | mode + Frames | [`algo/videoStack.ts`](webapp/src/lib/algo/videoStack.ts) `TemporalMedian` |
-| Binned | 2×2 / 3×3 / 4×4 software binning, plain mean or an edge-aware kernel weighting pixels by closeness to the block's majority side; optional bilinear upscale back so calibrations made on the stream stay valid | mode + Factor, Kernel, Keep size | [`algo/binning.ts`](webapp/src/lib/algo/binning.ts) `binRgba` `upscaleRgba` |
-| Lucky imaging | Keep only the sharpest fraction of frames: exposure-invariant gradient metric on a 2×2 reduction, running percentile over 200 frames; optional gap filling for constant-rate playback | mode + Keep, Fill gaps | [`algo/videoStack.ts`](webapp/src/lib/algo/videoStack.ts) `frameSharpness` `QualityGate`, [`video/stackModes.ts`](webapp/src/lib/services/video/stackModes.ts) `luckyMode` |
-
-### 2.2 Tone and structure
-
-| mode | technique | UX | code |
-|---|---|---|---|
-| Enhance (stable) | Auto-levels whose black/white points ease asymmetrically (fast when content would clip, slow otherwise) with a dead band, snap on scene change and freeze while the stage moves; a bounded stretch (at most 25 % of the range remapped by default, so an empty field is not stretched into noise) and a strength mix; soft highlight knee; software white balance anchored to the first frame's bright background (EMA, clamped, auto-idle without a bright background); background flattening either as a rolling estimate (coarse per-channel mean, smoothed in space and time, divided out) or by a **captured reference**: 32 frames of a blank field (and optionally 32 dark frames with the LED off) build a gain map, a dark map and a hot-pixel list applied in a gamma-2.2 linear domain; clarity (luma minus its large-scale mean) | mode + Auto-levels, Clip %, Max stretch, Levels strength, Soft knee, Anchor WB, Flatten (rolling / reference), Flat strength, *Capture blank field* / *Capture dark* / *Clear* buttons, Clarity, Scale | [`video/toneModes.ts`](webapp/src/lib/services/video/toneModes.ts) `enhanceVideoMode`, [`algo/videoTone.ts`](webapp/src/lib/algo/videoTone.ts) `StableLevels` `AnchoredWhiteBalance` `BackgroundFlattener` `localContrast`, [`algo/videoFlat.ts`](webapp/src/lib/algo/videoFlat.ts) `VideoFlat`, [`video/videoFlatCapture.svelte.ts`](webapp/src/lib/services/video/videoFlatCapture.svelte.ts) |
-| Relief / dark-field / phase | Pseudo-DIC: directional derivative of a 3×3-blurred luma rendered as light and shadow on grey; digital dark-field: |high-pass| on black; pseudo-phase: high-pass on grey. Visualisations, not phase data | mode + Style, Light angle, Strength, Mix, Scale | [`algo/videoTone.ts`](webapp/src/lib/algo/videoTone.ts) `relief` `highPassView` |
-
-### 2.3 Stage and illumination
-
-All of these lock AE/AWB, refuse to start while the stage is moving, drop frames exposed during a
-move ([`video/stageDither.ts`](webapp/src/lib/services/video/stageDither.ts) `StageDither.settled`) and return the stage to its origin on stop.
-
-| mode | technique | UX | code |
-|---|---|---|---|
-| Extended depth of field | z dither ±Δz while a block-wise sharpest-over-time stack (aligned by phase correlation, feathered, slowly forgetting) builds an all-in-focus view in a worker | mode + Δz, Dwell | [`video/stageModes.ts`](webapp/src/lib/services/video/stageModes.ts) `edofMode`, [`algo/liveStack.ts`](webapp/src/lib/algo/liveStack.ts) `LiveStacker`, [`workers/liveStackWorker.ts`](webapp/src/lib/workers/liveStackWorker.ts) |
-| Focus sweep | Triangular z sweep over ±range in N stops, recorded as it goes (turn on the position burn-in to read z) | mode + Range, Stops, Dwell | [`video/stageModes.ts`](webapp/src/lib/services/video/stageModes.ts) `sweepMode` |
-| Super-resolution zoom | Stage dithered by the smallest integer steps whose image offsets are near ½ px (through the calibration, `halfPixelSteps`); the last N frames of the central crop are registered and drizzled onto a 1.5×/2× grid in a worker, with a robustness weight (Wronski et al. 2019) that down-weights a frame wherever it differs from the newest one beyond the noise, so a mover is not smeared. Without the dither: *lucky drizzle*, the specimen's own jitter supplies the phases and a sharpness gate rejects blur | mode + Scale, Window, Pixfrac, Stage dither, Reject movers (σ), Keep | [`video/stageModes.ts`](webapp/src/lib/services/video/stageModes.ts) `superresVideoMode` `halfPixelSteps`, [`workers/videoSrWorker.ts`](webapp/src/lib/workers/videoSrWorker.ts), [`algo/drizzle.ts`](webapp/src/lib/algo/drizzle.ts), [`algo/drizzleRobust.ts`](webapp/src/lib/algo/drizzleRobust.ts) |
-| HDR (LED alternation) | LED alternated between a bright and a dim level with exposure locked; each frame is attributed to a level by its exposure window against a timed log of the light switches (`StateLog`, browser→device clock mapped from frame arrivals), frames straddling a switch dropped, with the commanded-level latency queue plus luma validation as the fallback; a settling check on the first frames measures the LED latency and warns when the LED does not change the picture; fusion in linear light by well-exposedness on a coarse grid, clipped bright pixels weight 0, stale partners passed through | mode + Ratio, Period | [`video/hdrVideo.ts`](webapp/src/lib/services/video/hdrVideo.ts) `hdrVideoMode`, [`algo/frameAttrib.ts`](webapp/src/lib/algo/frameAttrib.ts) `StateLog` `ClockMap` |
-| Interleaved illumination | Two illumination presets (extra LED channels: oblique pairs, dark-field) alternated with a hold, frames attributed by exposure window as above (`LightAttributor`); pseudo differential phase contrast `(A−B)/(A+B)` after per-channel mean normalisation, a Rheinberg colour composite, or a split view | mode + Preset A/B, Output, Hold, Gain, Tints | [`video/illumModes.ts`](webapp/src/lib/services/video/illumModes.ts) `illumMode` `LightAttributor` |
-| Focus servo | Every N s, in a quiet moment, z is probed ±δ, the sharpness at the three positions is fitted by a parabola and z moves to the vertex (clamped, backlash-compensated final approach); probe frames are replaced by the last good frame | mode + Every, δ, Max offset, Hide probe | [`video/stageModes.ts`](webapp/src/lib/services/video/stageModes.ts) `servoMode` |
-
-### 2.4 Motion
-
-| mode | technique | UX | code |
-|---|---|---|---|
-| Motion highlight | Running-median background (McFarlane–Schofield sign increment; never learns what is present less than half the time) or exponential mean; colour-aware `max(|ΔR|,|ΔG|,|ΔB|)` difference over a k·σ threshold from an O(n) histogram median, painted orange over dimmed grey | mode + Threshold σ, Background, Learn | [`algo/motionViz.ts`](webapp/src/lib/algo/motionViz.ts) `BackgroundModel` `robustSigma` |
-| Motion trails | Motion-history image (Bobick & Davis): moving pixels light up and decay; source is the frame difference or the background difference | mode + Decay, Threshold σ, Source | [`algo/motionViz.ts`](webapp/src/lib/algo/motionViz.ts) `MotionHistory` |
-| Temporal colour code | ImageJ's Temporal-Color Code, live: motion accumulates in the hue of its time in a cycling window; fade defaults to keeping one cycle visible | mode + Hue cycle, Fade, Map | [`algo/motionViz.ts`](webapp/src/lib/algo/motionViz.ts) `TemporalColorCode` |
-| Projection over time | Fiji Z-Project on the time axis: running max / min / range, optional fade | mode + Kind, Fade | [`algo/motionViz.ts`](webapp/src/lib/algo/motionViz.ts) `TimeProjection` |
-| Motion magnification | Linear Eulerian video magnification (Wu et al. 2012): two first-order IIR low-passes per cell of a box-reduced, 3×3-smoothed luma form a band-pass, amplified ×α, clamped, bilinearly added back; band clamped below 0.45 × the measured frame rate; gain ramped in after a reset | mode + Band, Gain, Scale, Colour | [`algo/eulerian.ts`](webapp/src/lib/algo/eulerian.ts) `EulerianMagnifier` |
-| Optical flow | Grid Lucas–Kanade on a 205 px luma, two coarse-to-fine levels, eigenvalue (aperture) gate, EMA of the vectors, commanded stage pan subtracted; rendered as an HSV wheel (hue = direction, brightness = speed) | mode + Cell, Smoothing, Full speed | [`algo/opticalFlow.ts`](webapp/src/lib/algo/opticalFlow.ts) `GridFlow` `renderFlowHsv` |
-
-### 2.5 Analysis and time
-
-| mode | technique | UX | code |
-|---|---|---|---|
-| Kymograph | One row per frame sampled bilinearly along the Distance measurement's line (or the centre line) with a perpendicular averaging band, scrolling; the line follows small stage pans; optional side-by-side with the live view | mode + Band, Rows, Side by side | [`algo/kymograph.ts`](webapp/src/lib/algo/kymograph.ts) `sampleLine` `Kymograph`, [`video/analysisModes.ts`](webapp/src/lib/services/video/analysisModes.ts) `kymographMode` |
-| Motion-triggered | Motion energy (fraction of pixels over k·σ from a running-median background) arms the encoder; a pre-roll ring of raw JPEG parts is written when an event starts; post-roll; idle stretches compressed out of the timeline; inhibited around stage and light changes; the stabiliser is off for this mode because replayed pre-roll frames cannot be tracked | mode + Trigger %, Pre-roll, Post-roll, Compress gaps | [`video/analysisModes.ts`](webapp/src/lib/services/video/analysisModes.ts) `triggerMode`, [`recorder.svelte.ts`](webapp/src/lib/services/recorder.svelte.ts) `injectRing`, [`api/mjpegStream.ts`](webapp/src/lib/api/mjpegStream.ts) `MjpegFrame.bytes` |
-| Time compression | One frame per interval, re-timed to the chosen fps; optional averaging of the whole interval into the kept frame | mode + Every, Playback fps, Average interval | [`video/timeModes.ts`](webapp/src/lib/services/video/timeModes.ts) `timelapseMode` |
-
-### 2.6 Options that apply to every video mode
 
 | option | technique | UX | code |
 |---|---|---|---|
-| Stabilise | Translation stabilisation: phase correlation + NCC refinement against a periodically re-anchored reference on a 480 px copy, one-euro filtered trajectory, the jitter (raw − smoothed) removed with a crop margin; shift scaled back to full-frame px, quantised to ⅛ px, timed by the device clock; re-anchored (filter kept) at both ends of a stage move. **Strength** presets set the filter cut-off (3 / 1 / 0.3 Hz). **Rotation** registers the left and right thirds separately, `θ = atan2(Δdy, baseline)` with its own filter and gates, applied about the frame centre with an exact rectangle margin. **Edges**: crop, or *hold* (full frame size, the uncovered border keeps the previous frames' pixels) | option (default on) + Strength, Rotation, Edges | [`algo/stabilize.ts`](webapp/src/lib/algo/stabilize.ts) `Stabilizer` `stabilizeOptionsFor` `rotationMargin`, [`recorder.svelte.ts`](webapp/src/lib/services/recorder.svelte.ts) `drawStreamFrame` |
-| Timing | Variable frame rate keeps every frame at its true device time (default, scientifically honest). Constant rate re-times to a fixed fps: the current frame is repeated into skipped slots and early frames dropped, counts recorded on the item; a speed-ramp mode exists in the algorithm for export tooling | option (Timing, fps) | [`algo/retime.ts`](webapp/src/lib/algo/retime.ts) `Retimer`, [`recorder.svelte.ts`](webapp/src/lib/services/recorder.svelte.ts) `encodeOutput` |
+| Stabilise | Translation stabilisation: phase correlation + NCC refinement against a periodically re-anchored reference on a 480 px copy, one-euro filtered trajectory, the jitter (raw − smoothed) removed with a crop margin; shift scaled back to full-frame px, quantised to ⅛ px, timed by the device clock; re-anchored (filter kept) at both ends of a stage move | option (default on) | [`algo/stabilize.ts`](webapp/src/lib/algo/stabilize.ts) `Stabilizer`, [`recorder.svelte.ts`](webapp/src/lib/services/recorder.svelte.ts) `drawStreamFrame` |
 | Deflicker | Per-frame gain toward a slow EMA of the *background* luma (brightest 30 % of unclipped pixels), applied in linear light through a table with a soft knee; re-anchored on stage moves and LED changes | option (default off) + Settings *deflicker live view* | [`algo/deflicker.ts`](webapp/src/lib/algo/deflicker.ts) `Deflicker` `backgroundLuma` `gainLut`, [`deflickerProcessor.ts`](webapp/src/lib/services/deflickerProcessor.ts) |
-| Bake look | The Look panel's LUT, curves, levels and mixer applied to the recorded frames after the mode | option | [`lookProcessor.ts`](webapp/src/lib/services/lookProcessor.ts) |
-| Live denoise into recording | The live-view temporal denoiser (below) also applied to recorded frames | setting | [`denoiseProcessor.ts`](webapp/src/lib/services/denoiseProcessor.ts) |
-| Burn-in | Elapsed time, stage position, scale bar, sample name, mode status drawn on the output frames | option (checkboxes) | [`video/burnIn.ts`](webapp/src/lib/services/video/burnIn.ts) `drawBurnIn` |
-| Container / codec / quality / keyframe | WebCodecs `VideoEncoder` through mediabunny into fast-start MP4/WebM with the device frame time as sample timestamp; bounded in-flight queue that drops instead of blocking; MediaRecorder fallback | option | [`videoEncoder.ts`](webapp/src/lib/services/videoEncoder.ts) `createVideoSink` `WebCodecsSink` |
+| Bake look | The Look panel's LUT, curves, levels and mixer applied to the recorded frames | option | [`lookProcessor.ts`](webapp/src/lib/services/lookProcessor.ts) |
+| Live denoise into recording | The live-view temporal denoiser (below) also applied to recorded frames | setting (Camera panel) | [`denoiseProcessor.ts`](webapp/src/lib/services/denoiseProcessor.ts) |
+| Timing | Variable frame rate keeps every frame at its true device time (default, scientifically honest). Constant rate re-times to a fixed fps: the current frame is repeated into skipped slots and early frames dropped, counts recorded on the item | option (Encoding: Timing, fps) | [`algo/retime.ts`](webapp/src/lib/algo/retime.ts) `Retimer`, [`recorder.svelte.ts`](webapp/src/lib/services/recorder.svelte.ts) `pushFrame` |
+| Burn-in | Elapsed time, stage position, scale bar, sample name drawn on the encoded frames | option (Encoding: checkboxes) | [`burnIn.ts`](webapp/src/lib/services/burnIn.ts) `drawBurnIn` |
+| Container / codec / quality | WebCodecs `VideoEncoder` through mediabunny into fast-start MP4/WebM with the device frame time as sample timestamp; bounded in-flight queue that drops instead of blocking; MediaRecorder fallback | option (Encoding) | [`videoEncoder.ts`](webapp/src/lib/services/videoEncoder.ts) `createVideoSink` `WebCodecsSink` |
 
 ---
 

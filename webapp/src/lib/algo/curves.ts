@@ -229,7 +229,7 @@ export function bakeAdjustments(adj: Adjustments, size = 33): Lut3D {
 function clamp01(x: number): number { return x < 0 ? 0 : x > 1 ? 1 : x }
 
 // ---------------------------------------------------------------------------------------------
-// Filmic presets (docs/video-research/colour.md proposal 3 + addendum)
+// Filmic presets
 // ---------------------------------------------------------------------------------------------
 
 export type FilmicPreset = 'neutral' | 'soft' | 'flat'

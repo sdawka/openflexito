@@ -2,15 +2,14 @@
  *  all pixel processing, so they end up in the encoded frames (unlike the live view's DOM overlays).
  *  Layout maths only; the recorder owns the canvas and calls `drawBurnIn` once per encoded frame. */
 
-import { niceScaleBarLength, formatUm } from '../../algo/measure'
+import { niceScaleBarLength, formatUm } from '../algo/measure'
 
-export type BurnInKind = 'time' | 'position' | 'scalebar' | 'sample' | 'mode'
+export type BurnInKind = 'time' | 'position' | 'scalebar' | 'sample'
 export const BURN_IN_KINDS: { id: BurnInKind; label: string; title: string }[] = [
   { id: 'time', label: 'Elapsed time', title: 'mm:ss.t since the recording started (recording time, after any time compression)' },
   { id: 'position', label: 'Stage position', title: 'x y z in steps, bottom-left' },
   { id: 'scalebar', label: 'Scale bar', title: 'needs a µm/px scale (stage calibration or a manual scale in Settings)' },
   { id: 'sample', label: 'Sample name', title: 'the current sample record\'s name, top-left' },
-  { id: 'mode', label: 'Mode status', title: 'the video mode\'s own status line (frames fused, kept, ...)' },
 ]
 
 export interface BurnInState {
@@ -21,7 +20,6 @@ export interface BurnInState {
   /** µm per output pixel, or null when unknown (scale bar is then omitted) */
   umPerPx: number | null
   sampleName?: string
-  modeStatus?: string
 }
 
 export function formatElapsed(s: number): string {
@@ -54,7 +52,6 @@ export function drawBurnIn(ctx: Ctx, w: number, h: number, s: BurnInState): void
   ctx.save()
   let topLeft = m + font
   if (s.kinds.includes('sample') && s.sampleName) { label(ctx, s.sampleName, m, topLeft, 'left', font); topLeft += lineH }
-  if (s.kinds.includes('mode') && s.modeStatus) { label(ctx, s.modeStatus, m, topLeft, 'left', font); topLeft += lineH }
   if (s.kinds.includes('time')) label(ctx, formatElapsed(s.elapsedS), w - m, m + font, 'right', font)
   let bottomLeft = h - m
   if (s.kinds.includes('position')) { label(ctx, `x ${s.position.x}  y ${s.position.y}  z ${s.position.z}`, m, bottomLeft, 'left', font); bottomLeft -= lineH }

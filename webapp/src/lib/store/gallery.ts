@@ -72,10 +72,10 @@ export interface GalleryItem {
     deflickered?: boolean
     framesDropped?: number
     framesDuplicated?: number
-    /** additive: the video mode (`services/video/videoModes.ts`) this was recorded with, its
-     *  parameters, and what the mode reports about the run (frames fused, frames rejected, ...) */
+    /** legacy: the video mode older recordings were made with (the modes were removed; kept so the
+     *  Viewer can still describe those items) */
     mode?: { id: string; label: string; params?: Record<string, unknown>; stats?: Record<string, unknown> }
-    /** additive: which burn-in overlays (`services/video/burnIn.ts`) were drawn into the frames */
+    /** additive: which burn-in overlays (`services/burnIn.ts`) were drawn into the frames */
     burnIn?: string[]
     /** additive: stabiliser options in force and the re-timer's mode/stats (`algo/retime.ts`) */
     stabiliser?: { strength: string; rotation: boolean; edges: string }

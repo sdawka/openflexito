@@ -1,6 +1,6 @@
 /** ASC CDL (American Society of Cinematographers Color Decision List) grade node: per channel
- *  `out = clamp01(in * slope + offset) ^ power`, then a luma-preserving saturation
- *  (`docs/video-research/colour.md` proposal 3 / addendum). This is the standard four-control
+ *  `out = clamp01(in * slope + offset) ^ power`, then a luma-preserving saturation.
+ *  This is the standard four-control
  *  colourist parametrisation (Slope/Offset/Power/Saturation) and is exchanged as a small XML
  *  document (`ColorCorrection` with `SOPNode` + `SatNode`), which `toCdlXml`/`parseCdlXml` write and
  *  read so a grade dialled in here can be handed to Resolve/Nuke and back.

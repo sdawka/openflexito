@@ -76,7 +76,7 @@ describe('Stabilizer', () => {
   })
 })
 
-// ---- rotation (docs/video-research/motion.md proposal 2(d)) ----
+// ---- rotation ----
 
 import { rotationMargin, stabilizeOptionsFor, STABILIZE_STRENGTH_HZ } from '../stabilize'
 import type { Scene } from './helpers/scene'
