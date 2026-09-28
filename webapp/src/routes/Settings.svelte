@@ -129,7 +129,7 @@
     <h3>Input</h3>
     <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" bind:checked={settings.gamepad} onchange={saveSettings} /> enable gamepad</label>
     <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" bind:checked={settings.invertYKeys} onchange={saveSettings} /> invert Y for keyboard</label>
-    <label style="display:flex;gap:8px;align-items:center" title="A z jog that reverses direction first crosses the backlash dead band, so focus responds at once"><input type="checkbox" bind:checked={settings.zJogTakeUp} onchange={saveSettings} /> take up z backlash when a focus jog reverses</label>
+    <label style="display:flex;gap:8px;align-items:center" title="A z jog that reverses direction first crosses the backlash dead band, so focus responds at once"><input type="checkbox" bind:checked={settings.zJogTakeUp} onchange={saveSettings} /> take up z backlash when a focus jog reverses (after Calibrate → Focus has been applied)</label>
     <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" bind:checked={settings.showLores} onchange={saveSettings} /> show low-resolution stream (saves bandwidth)</label>
   </div>
 

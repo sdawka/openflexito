@@ -103,7 +103,8 @@
 
   onMount(() => {
     const j = new JogController(
-      (d) => device.jog(d, settings.zJogTakeUp),
+      // take-up needs a measured z backlash: with the configured default it can jump focus on reversal
+      (d) => device.jog(d, settings.zJogTakeUp && !!calibration.z),
       () => device.stop(),
       () => ({ xy: settings.stepXY, z: settings.stepZ }),
     )

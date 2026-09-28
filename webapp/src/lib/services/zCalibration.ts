@@ -9,6 +9,7 @@ import { samplesFromSweep } from '../algo/autofocus'
 import { sweepStepTimeUs } from '../algo/sweepStack'
 import { solveZCalibration, sweepPeak, type SweepPeak, type ZCalibrationSolution } from '../algo/zCalibration'
 import type { FrameMeta, MoveResult } from '../algo/types'
+import { withCameraLock } from './cameraLock'
 import { device } from '../store/device.svelte'
 
 export interface ZCalOptions {
@@ -81,8 +82,9 @@ export async function runZCalibration(o: ZCalOptions, say: (m: string) => void):
     say(`focus calibration: ${span}-step sweeps at ${slowUs} and ${fastUs} µs/step (${fps.toFixed(1)} fps), starting from z=${startZ}`)
     await raw(-half - ENGAGE)
     await raw(ENGAGE)
-    let up1: ZCalPeak, down: ZCalPeak, up2: ZCalPeak, fast: ZCalPeak
-    try {
+    let up1!: ZCalPeak, down!: ZCalPeak, up2!: ZCalPeak, fast!: ZCalPeak
+    // AE/AWB frozen for all four sweeps: an exposure change mid-sweep moves the JPEG-size curve
+    await withCameraLock(async () => { try {
       await device.client.call('stage.set_step_time', { us: slowUs })
       up1 = await sweep(span, 'slow up 1')
       down = await sweep(-span, 'slow down')
@@ -94,7 +96,7 @@ export async function runZCalibration(o: ZCalOptions, say: (m: string) => void):
       fast = await sweep(span, 'fast up')
     } finally {
       await device.client.call('stage.set_step_time', { us: minUs }).catch((e) => say(`focus calibration: could not restore the stage speed: ${(e as Error).message}`))
-    }
+    } }, { onError: (m) => say(`focus calibration: ${m}`) })
     const sw = (p: ZCalPeak) => ({ peak: p.z, speed: p.speed })
     const sol = solveZCalibration(sw(up1), sw(down), sw(up2), sw(fast))
     if (![sol.backlash, sol.lagNs, sol.repeatability].every(Number.isFinite)) throw new Error('focus calibration: the sweeps gave no finite solution')

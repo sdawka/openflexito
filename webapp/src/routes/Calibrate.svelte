@@ -160,10 +160,13 @@
     zCancel = false; zRun = null
     zRun = await runZCalibration({ cancelled: () => zCancel }, say)
   })
+  /** A run is only applied when both slow up sweeps agree and the backlash is physical: setting a wrong
+   *  (or zero) z backlash would break every compensated move, and the jog take-up relies on it. */
+  const zValid = (r: NonNullable<typeof zRun>) => r.backlash >= 0 && r.repeatability <= Math.max(10, Math.abs(r.backlash) * 0.2)
   const applyZ = () => run('apply focus calibration', async () => {
     const r = zRun
-    if (!r) return
-    const b = Math.max(0, Math.round(r.backlash))
+    if (!r || !zValid(r)) return
+    const b = Math.round(r.backlash)
     await device.client.call('stage.set_backlash', { z: b })
     saveZCal({ backlash: b, lagNs: Math.round(r.lagNs), repeatability: r.repeatability, slowUs: r.slowUs, fastUs: r.fastUs, when: new Date().toISOString() })
     await device.refreshStatus()
@@ -288,7 +291,7 @@
     <div class="row">
       <button class="primary" onclick={calibrateZ} disabled={!!busy || !device.connected}>Calibrate Z</button>
       {#if busy === 'focus calibration'}<button onclick={() => (zCancel = true)}>Cancel</button>{/if}
-      {#if zRun}<button onclick={applyZ} disabled={!!busy || !device.connected} title="Set the stage's z backlash and store the frame lag for this device">Apply</button>{/if}
+      {#if zRun}<button onclick={applyZ} disabled={!!busy || !device.connected || !zValid(zRun)} title={zValid(zRun) ? "Set the stage's z backlash and store the frame lag for this device" : 'The sweeps disagree or gave a non-physical backlash: nothing to apply'}>Apply</button>{/if}
       {#if zcal}<button onclick={() => saveZCal(null)} disabled={!!busy} title="Forget the stored frame lag (the stage's backlash is left as it is)">Clear lag</button>{/if}
     </div>
     {#if zRun}
@@ -303,8 +306,8 @@
           </tr></tbody>
         </table>
       </div>
-      {#if zRun.repeatability > Math.max(10, Math.abs(zRun.backlash) * 0.2)}<p class="small" style="color:var(--warn)">The two slow up sweeps disagree by {zRun.repeatability.toFixed(0)} steps: the sample or focus drifted. Consider re-running.</p>{/if}
-      {#if zRun.backlash < 0}<p class="small" style="color:var(--warn)">A negative backlash is not physical; Apply sets 0.</p>{/if}
+      {#if zRun.repeatability > Math.max(10, Math.abs(zRun.backlash) * 0.2)}<p class="small" style="color:var(--warn)">The two slow up sweeps disagree by {zRun.repeatability.toFixed(0)} steps: the sample or focus moved during the run, so the result is not applied. Use a thin, still, high-contrast sample (a stained section or a printed target) and re-run.</p>{/if}
+      {#if zRun.backlash < 0}<p class="small" style="color:var(--warn)">A negative backlash is not physical (the down sweep found focus above the up sweeps), so the result is not applied.</p>{/if}
     {/if}
     <p class="muted small">{zcal ? `Stored for ${settings.deviceUrl || 'this device'}: frame lag ${(zcal.lagNs / 1e6).toFixed(2)} ms, z backlash ${zcal.backlash} steps (${new Date(zcal.when).toLocaleString()}).` : 'No frame lag stored: sweeps assume frames are exposed at their timestamp.'}
       Stage z backlash in use: {device.status?.stage?.backlash ? `${device.status.stage.backlash.z} steps` : '…'}.</p>
