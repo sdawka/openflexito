@@ -52,11 +52,18 @@ describe('estimateSigmaMad', () => {
     const w = 1640, h = 1232
     const rnd = mulberry32(9)
     const data = Float32Array.from({ length: w * h }, () => rnd())
-    const t0 = performance.now()
+    // one warm-up call (JIT), then the median of several: a single cold call measured the compiler and
+    // whatever parallel vitest file had the CPU (20.5 ms once on the 2-core CI runner)
     estimateSigmaMad(data, w, h)
-    const elapsed = performance.now() - t0
+    const times: number[] = []
+    for (let i = 0; i < 7; i++) {
+      const t0 = performance.now()
+      estimateSigmaMad(data, w, h)
+      times.push(performance.now() - t0)
+    }
+    const elapsed = [...times].sort((a, b) => a - b)[times.length >> 1]
     // eslint-disable-next-line no-console
-    console.log(`estimateSigmaMad @ 1640x1232: ${elapsed.toFixed(2)} ms`)
+    console.log(`estimateSigmaMad @ 1640x1232: ${elapsed.toFixed(2)} ms median of ${times.length}`)
     expect(elapsed).toBeLessThan(20)
   })
 })
