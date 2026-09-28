@@ -1,5 +1,6 @@
 <script lang="ts">
   import { device } from '../lib/store/device.svelte'
+  import { liveEdof } from '../lib/services/liveEdof.svelte'
   import { settings, saveSettings } from '../lib/store/settings.svelte'
 
   const stepsXY = [50, 200, 500, 2000, 5000]
@@ -12,15 +13,15 @@
   <h3>Stage</h3>
   <div class="grid">
     <div class="pad">
-      <span></span><button onclick={() => move({ y: settings.stepXY })} title="W / ↑">▲</button><span></span>
-      <button onclick={() => move({ x: -settings.stepXY })} title="A / ←">◀</button>
+      <span></span><button disabled={liveEdof.holdsStage} onclick={() => move({ y: settings.stepXY })} title="W / ↑">▲</button><span></span>
+      <button disabled={liveEdof.holdsStage} onclick={() => move({ x: -settings.stepXY })} title="A / ←">◀</button>
       <button class="danger" onclick={() => device.stop()} title="stop">■</button>
-      <button onclick={() => move({ x: settings.stepXY })} title="D / →">▶</button>
-      <span></span><button onclick={() => move({ y: -settings.stepXY })} title="S / ↓">▼</button><span></span>
+      <button disabled={liveEdof.holdsStage} onclick={() => move({ x: settings.stepXY })} title="D / →">▶</button>
+      <span></span><button disabled={liveEdof.holdsStage} onclick={() => move({ y: -settings.stepXY })} title="S / ↓">▼</button><span></span>
     </div>
     <div class="zcol">
-      <button onclick={() => move({ z: settings.stepZ })} title="PgUp / Q">Z+</button>
-      <button onclick={() => move({ z: -settings.stepZ })} title="PgDn / E">Z−</button>
+      <button disabled={liveEdof.holdsStage} onclick={() => move({ z: settings.stepZ })} title="PgUp / Q">Z+</button>
+      <button disabled={liveEdof.holdsStage} onclick={() => move({ z: -settings.stepZ })} title="PgDn / E">Z−</button>
     </div>
   </div>
   <div class="row" style="margin-top:10px">

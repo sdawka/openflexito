@@ -116,6 +116,35 @@ async def test_image_endpoints_503_while_off(client, device):
     assert (await _first_snapshot(client)).status == 200
 
 
+async def test_standby_ends_a_live_edof_stream_and_its_sweeps(device):
+    """Standby while `/edof.bin` streams: the response ends, the sweeps stop (z back where they
+    started) and the transition completes rather than queueing `stage.release` behind the sweeps
+    on the single stage thread until the client goes away."""
+    from openflexito.web import EDOF_HEADER, EDOF_LEG_END
+    stage = device.stage
+    start_z = stage.position["z"]
+    app = build_app(device.rpc, device.events, device.camera, None, device.status, power=device.power, stage=stage)
+    async with TestClient(TestServer(app)) as c:
+        async with c.get("/edof.bin?steps=40&fps=30") as r:
+            assert r.status == 200
+            ends = 0
+            while ends < 2:
+                _, kind, n, _, _ = EDOF_HEADER.unpack(await r.content.readexactly(EDOF_HEADER.size))
+                await r.content.readexactly(n)
+                ends += kind == EDOF_LEG_END
+            assert stage.oscillating
+            await asyncio.wait_for(device.rpc.call("power.set", {"on": False}), 5)
+            await asyncio.wait_for(r.content.read(), 5)  # the rest of the body, then EOF
+            assert r.content.at_eof()
+        for _ in range(100):
+            if not stage.oscillating and device.camera.fast is None:
+                break
+            await asyncio.sleep(0.02)
+        assert not stage.oscillating and device.camera.fast is None and not stage.moving
+        assert stage.position["z"] == start_z and stage._energised is False
+        assert (await c.get("/edof.bin")).status == 503
+
+
 async def test_rpc_schema_keeps_real_param_types(device):
     schema = {m["name"]: m for m in device.rpc.schema()["methods"]}
     assert schema["stage.move_rel"]["params"][0]["name"] == "x"

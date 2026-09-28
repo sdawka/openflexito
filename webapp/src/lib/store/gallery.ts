@@ -87,6 +87,9 @@ export interface GalleryItem {
     /** additive: stabiliser options in force and the re-timer's mode/stats (`algo/retime.ts`) */
     stabiliser?: { strength: string; rotation: boolean; edges: string }
     retime?: { mode: string; fps: number; pushed: number; emitted: number; duplicates: number; dropped: number }
+    /** additive: recorded from the live extended-focus composites (`services/liveEdof.svelte.ts`):
+     *  sensor mode, capture rate, z range/leg length in steps, and the run's sweep statistics */
+    edof?: { mode: string; fps: number; steps: number; range: number; backlash: number; sweeps: number; framesPerSweep: number; usefulFraction: number; windowMs: number; width: number; height: number }
   }
   /** time-lapse: blobs 'f0000', 'f0001', ... one JPEG per frame, plus 'thumb' from the first frame.
    *  `frames[i].shift` is that frame's measured drift (px) from the first frame (see `algo/drift.ts`);
@@ -247,7 +250,8 @@ export async function saveVideo(blob: Blob, thumb: Blob | null, meta: { duration
   sensor?: NonNullable<GalleryItem['video']>['sensor']
   stabilised?: boolean; deflickered?: boolean; framesDropped?: number; framesDuplicated?: number
   mode?: NonNullable<GalleryItem['video']>['mode']; burnIn?: string[]
-  stabiliser?: NonNullable<GalleryItem['video']>['stabiliser']; retime?: NonNullable<GalleryItem['video']>['retime'] }): Promise<GalleryItem> {
+  stabiliser?: NonNullable<GalleryItem['video']>['stabiliser']; retime?: NonNullable<GalleryItem['video']>['retime']
+  edof?: NonNullable<GalleryItem['video']>['edof'] }): Promise<GalleryItem> {
   const id = newId()
   const frames = meta.frames?.length ? meta.frames : undefined
   const item: GalleryItem = {
@@ -256,7 +260,7 @@ export async function saveVideo(blob: Blob, thumb: Blob | null, meta: { duration
     video: {
       durationS: meta.durationS, fps: meta.fps, source: meta.source, mime: blob.type, codec: meta.codec, bitrateBps: meta.bitrateBps, frameCount: frames?.length, frameLog: frames ? 'frames' : undefined,
       stabilised: meta.stabilised, encoder: meta.encoder, container: meta.container, quality: meta.quality, keyframeS: meta.keyframeS, deflickered: meta.deflickered, framesDropped: meta.framesDropped, framesDuplicated: meta.framesDuplicated,
-      mode: meta.mode, burnIn: meta.burnIn?.length ? meta.burnIn : undefined, stabiliser: meta.stabiliser, retime: meta.retime, sensor: meta.sensor,
+      mode: meta.mode, burnIn: meta.burnIn?.length ? meta.burnIn : undefined, stabiliser: meta.stabiliser, retime: meta.retime, sensor: meta.sensor, edof: meta.edof,
     },
     sample: currentSample(),
   }

@@ -9,6 +9,7 @@
   import { PanController } from '../lib/input/pan'
   import { wb, pickNeutral } from '../lib/services/whiteBalance.svelte'
   import { liveStack } from '../lib/services/liveStack.svelte'
+  import { liveEdof } from '../lib/services/liveEdof.svelte'
   import StagePad from '../components/StagePad.svelte'
   import FocusPanel from '../components/FocusPanel.svelte'
   import CameraControls from '../components/CameraControls.svelte'
@@ -107,8 +108,8 @@
       () => ({ xy: settings.stepXY, z: settings.stepZ }),
     )
     jog = j
-    const offKeys = attachKeyboard(j, { invertY: () => settings.invertYKeys, enabled: () => device.connected })
-    const offPad = attachGamepad(j, { stop: () => device.stop(), autofocus: () => focusCtl.run() }, () => settings.gamepad && device.connected)
+    const offKeys = attachKeyboard(j, { invertY: () => settings.invertYKeys, enabled: () => device.connected && !liveEdof.holdsStage })
+    const offPad = attachGamepad(j, { stop: () => device.stop(), autofocus: () => focusCtl.run() }, () => settings.gamepad && device.connected && !liveEdof.holdsStage)
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || viewerOpen) return   // Viewer.svelte owns M/Escape while open
@@ -116,7 +117,7 @@
       else if (e.key === 'Escape' && measure.active) measure.cancel()
     }
     window.addEventListener('keydown', onKey)
-    return () => { offKeys(); offPad(); window.removeEventListener('keydown', onKey); j.dispose(); follow.stop(); liveStack.stop(); tracking.stop() }
+    return () => { offKeys(); offPad(); window.removeEventListener('keydown', onKey); j.dispose(); follow.stop(); liveStack.stop(); void liveEdof.stop(); tracking.stop() }
   })
 
   function onClickImage(p: { x: number; y: number; w: number; h: number }) {

@@ -18,6 +18,7 @@ import io
 import json
 import logging
 import threading
+import time
 from collections import deque
 from importlib import resources
 from pathlib import Path
@@ -122,6 +123,67 @@ class VideoTap:
         self.queue.put_nowait(item)
 
 
+class FastTap:
+    """Frames of one fast stream (`/edof.bin`) plus the stage's sweep records, handed from the
+    encoder and stage threads to the handler in arrival order. A frame is `(jpeg, ts_ns)`; any
+    other item is `(kind: str, record: dict)`. Unlike `VideoTap`, a lagging reader loses the
+    *oldest frames* instead of ending the stream (every JPEG decodes on its own and a live focus
+    stack wants the newest sweep, not a backlog); records are never dropped, the browser needs
+    every sweep's timing. `get()` returns None once the camera has ended the stream."""
+
+    MAX_FRAMES = 120
+
+    def __init__(self, loop: asyncio.AbstractEventLoop):
+        self.loop = loop
+        self.items: deque = deque()
+        self._ready = asyncio.Event()
+        self.closed = False
+        self.dropped = 0
+        self._frames = 0
+
+    @staticmethod
+    def is_frame(item) -> bool:
+        return not isinstance(item[0], str)
+
+    def put_threadsafe(self, item) -> None:
+        try:
+            self.loop.call_soon_threadsafe(self._put, item)
+        except RuntimeError:  # loop closed during shutdown
+            pass
+
+    def close_threadsafe(self) -> None:
+        self.put_threadsafe(None)
+
+    def _put(self, item) -> None:
+        if self.closed:
+            return
+        if item is None:
+            self.closed = True
+        else:
+            if self.is_frame(item):
+                if self._frames >= self.MAX_FRAMES:
+                    for i, old in enumerate(self.items):
+                        if self.is_frame(old):
+                            del self.items[i]
+                            self._frames -= 1
+                            self.dropped += 1
+                            break
+                self._frames += 1
+            self.items.append(item)
+        self._ready.set()
+
+    async def get(self):
+        while not self.items:
+            if self.closed:
+                return None
+            self._ready.clear()
+            await self._ready.wait()
+        item = self.items.popleft()
+        if self.is_frame(item):
+            self._frames -= 1
+        return item
+
+
 class CameraBase:
     is_fake = False
     def __init__(self, cfg: CameraConfig, state_dir: Path, events: EventBus):
@@ -138,6 +200,8 @@ class CameraBase:
         self.sensor: dict = {}
         self.recording: dict | None = None
         self._tap: VideoTap | None = None
+        self.fast: dict | None = None
+        self._fast_tap: FastTap | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._load_controls()
         self.tuning = self._load_tuning()
@@ -203,6 +267,8 @@ class CameraBase:
             "record": {"available": self.record_available(), "size": list(self.cfg.record_size),
                        "max_fps": self.cfg.record_max_fps, "max_bitrate": self.cfg.record_max_bitrate,
                        "active": self.recording},
+            "fast": {"modes": {k: {"size": list(v["size"]), "max_fps": v["max_fps"]} for k, v in self.cfg.fast_modes.items()},
+                     "max_bitrate": self.cfg.fast_bitrate, "active": self.fast},
         }
 
     async def get_controls(self) -> dict:
@@ -264,6 +330,8 @@ class CameraBase:
         the recording configuration they are refused rather than cutting the video."""
         if self.recording is not None:
             raise RuntimeError("a video recording is running")
+        if self.fast is not None:
+            raise RuntimeError("a fast stream (live extended focus) is running")
 
     async def start_recording(self, fps: int, bitrate: int, keyframe_s: float = 1.0) -> tuple[VideoTap, dict]:
         """Switch to the recording configuration and start the H.264 encoder on the full-size
@@ -272,6 +340,8 @@ class CameraBase:
             raise RuntimeError("video recording is not available on this camera")
         if self.recording is not None:
             raise RuntimeError("a video recording is already running")
+        if self.fast is not None:
+            raise RuntimeError("a fast stream (live extended focus) is running")
         if self._loop is None:
             raise RuntimeError("camera not bound to an event loop")
         fps = max(1, min(int(fps), int(self.cfg.record_max_fps)))
@@ -306,6 +376,64 @@ class CameraBase:
 
     async def _start_recording(self, tap: VideoTap, fps: int, bitrate: int, iperiod: int) -> None: ...
     async def _stop_recording(self) -> None: ...
+
+    # ---- fast stream (live extended depth of field) ----------------------------------------
+
+    async def start_fast(self, mode: str = "crop", fps: int | None = None, bitrate: int | None = None) -> tuple[FastTap, dict]:
+        """Switch to a high-frame-rate configuration (config.py `fast_modes`) whose every MJPEG
+        frame goes to the returned tap as `(jpeg, ts_ns)`; the live view hub gets a throttled copy
+        so `/stream.mjpg` viewers keep a picture. Stills, RAW and recordings are refused meanwhile."""
+        spec = self.cfg.fast_modes.get(mode)
+        if spec is None:
+            raise ValueError(f"unknown fast mode {mode!r} (have {', '.join(self.cfg.fast_modes)})")
+        if self.recording is not None:
+            raise RuntimeError("a video recording is running")
+        if self.fast is not None:
+            raise RuntimeError("a fast stream is already running")
+        if self._loop is None:
+            raise RuntimeError("camera not bound to an event loop")
+        fps = max(1, min(int(fps or spec["max_fps"]), int(spec["max_fps"])))
+        bitrate = max(1_000_000, min(int(bitrate or self.cfg.fast_bitrate), int(self.cfg.fast_bitrate)))
+        tap = FastTap(self._loop)
+        w, h = spec["size"]
+        info = {"codec": "jpeg", "mode": mode, "width": int(w), "height": int(h), "fps": fps, "bitrate": bitrate,
+                "sensor_size": list(spec["sensor"]), "started": now_ns()}
+        self.fast = info
+        self._fast_tap = tap
+        try:
+            await self._start_fast(tap, spec, fps, bitrate)
+        except Exception:
+            self.fast = None
+            self._fast_tap = None
+            raise
+        log.info("fast stream %s: %sx%s at %s fps", mode, w, h, fps)
+        return tap, info
+
+    async def stop_fast(self) -> None:
+        if self.fast is None:
+            return
+        tap, self._fast_tap = self._fast_tap, None
+        try:
+            await self._stop_fast()
+        finally:
+            self.fast = None
+            if tap is not None:
+                tap.close_threadsafe()
+            log.info("fast stream stopped")
+
+    def _end_taps(self) -> None:
+        """Standby / reinit: end a running recording or fast stream (their handlers see `None`)."""
+        if self._tap is not None:
+            self._tap.close_threadsafe()
+            self._tap = None
+            self.recording = None
+        if self._fast_tap is not None:
+            self._fast_tap.close_threadsafe()
+            self._fast_tap = None
+            self.fast = None
+
+    async def _start_fast(self, tap: FastTap, spec: dict, fps: int, bitrate: int) -> None: ...
+    async def _stop_fast(self) -> None: ...
 
     # ---- helpers shared by real and fake ---------------------------------------------------
 
@@ -379,7 +507,7 @@ class PiCamera(CameraBase):
         self._video_config: dict | None = None
         self._encoders: dict = {}
         self._rec_encoders: list = []
-        self._meta_ring: deque = deque(maxlen=8)
+        self._meta_ring: deque = deque(maxlen=64)  # the fast stream runs ~200 fps; the encoder lags a few frames
         self._meta_lock = threading.Lock()
         self._lock = asyncio.Lock()
         self._warned_unmatched = False
@@ -553,16 +681,16 @@ class PiCamera(CameraBase):
         log.info("camera streaming %sx%s (sensor %s)", *self.stream_size, self.cfg.sensor_size)
 
     async def stop(self) -> None:
-        await asyncio.to_thread(self._stop_sync)
+        # under the lock: standby can land while a recording or fast stream handler is switching
+        # the camera back to the stream configuration on another thread
+        async with self._lock:
+            await asyncio.to_thread(self._stop_sync)
 
     def _stop_sync(self) -> None:
         if self._picam is None:
             return
         self._stop_rec_encoders()
-        if self._tap is not None:  # standby or reinit ends a running recording
-            self._tap.close_threadsafe()
-            self._tap = None
-            self.recording = None
+        self._end_taps()  # standby or reinit ends a running recording or fast stream
         self._stop_encoders()
         try:
             self._picam.stop()
@@ -689,6 +817,64 @@ class PiCamera(CameraBase):
         except Exception:  # noqa: BLE001
             log.exception("could not return to the stream configuration after recording")
         self._start_encoders()
+
+    # ---- fast stream -----------------------------------------------------------------------
+
+    def _make_fast_output(self, tap: FastTap, encoder):
+        from picamera2.outputs import Output
+        cam = self
+        preview_gap = 1 / 30
+        last = [0.0]
+
+        class FastOutput(Output):
+            def outputframe(self, frame, keyframe=True, timestamp=None, packet=None, audio=False):  # noqa: D401
+                try:
+                    abs_us = None if timestamp is None else int(timestamp) + int(encoder.firsttimestamp or 0)
+                    data = bytes(frame)
+                    tap.put_threadsafe((data, None if abs_us is None else abs_us * 1000))
+                    now = time.monotonic()
+                    if now - last[0] >= preview_gap:  # the live view keeps ~30 fps of the same frames
+                        last[0] = now
+                        cam.main.publish_threadsafe(data, cam._meta_for(abs_us))
+                except Exception:  # noqa: BLE001  an exception here would end the encoder thread for good
+                    log.exception("fast stream output failed")
+        return FastOutput()
+
+    async def _start_fast(self, tap: FastTap, spec: dict, fps: int, bitrate: int) -> None:
+        async with self._lock:
+            await asyncio.to_thread(self._start_fast_sync, tap, spec, fps, bitrate)
+
+    def _start_fast_sync(self, tap: FastTap, spec: dict, fps: int, bitrate: int) -> None:
+        """High-frame-rate sensor mode, `main` at the fast size into the MJPEG encoder. The frame
+        duration is pinned to exactly 1/fps: frames must come at the rate the stage sweep was
+        planned for (a long exposure would also smear the moving focus)."""
+        from picamera2.encoders import MJPEGEncoder
+        picam = self._require_camera()
+        self._stop_encoders()
+        frame_us = int(1_000_000 / fps)
+        controls = self._stream_controls()
+        controls["FrameDurationLimits"] = (frame_us, frame_us)
+        try:
+            picam.stop()
+            conf = picam.create_video_configuration(
+                main={"size": tuple(spec["size"]), "format": "YUV420"}, raw=None,
+                sensor={"output_size": tuple(spec["sensor"]), "bit_depth": 10},
+                controls=controls, buffer_count=6,
+            )
+            picam.configure(conf)
+            picam.start()
+            picam.set_controls(self._libcamera_controls(self.controls))
+            enc = MJPEGEncoder(bitrate=bitrate)
+            picam.start_encoder(enc, self._make_fast_output(tap, enc), name="main")
+            self._rec_encoders.append(enc)
+        except Exception:
+            log.exception("could not start the fast stream configuration")
+            self._back_to_stream_sync()
+            raise
+
+    async def _stop_fast(self) -> None:
+        async with self._lock:
+            await asyncio.to_thread(self._back_to_stream_sync)
 
     # ---- still mode ------------------------------------------------------------------------
 

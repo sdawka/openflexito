@@ -261,7 +261,8 @@ class Device:
         if self.stage and self.stage.lost_position():
             log.warning("board position reset detected; call stage.restore_position to re-apply %s", self.stage._saved_hw)
 
-        app = build_app(self.rpc, self.events, self.camera, self.cfg.webapp_dir, self.status, power=self.power)
+        app = build_app(self.rpc, self.events, self.camera, self.cfg.webapp_dir, self.status, power=self.power,
+                        stage=self.stage)
         runner = web.AppRunner(app, access_log=None)
         await runner.setup()
         site = web.TCPSite(runner, self.cfg.host, self.cfg.port)

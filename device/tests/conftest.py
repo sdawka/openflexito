@@ -23,5 +23,7 @@ def events():
 
 @pytest.fixture
 def stage(board, events, tmp_path):
-    return Stage(board, tmp_path, events, backlash={"x": 100, "y": 100, "z": 100},
-                 inverted={"x": True, "y": False, "z": True}, poll_interval=0.005)
+    st = Stage(board, tmp_path, events, backlash={"x": 100, "y": 100, "z": 100},
+               inverted={"x": True, "y": False, "z": True}, poll_interval=0.005)
+    yield st
+    st.close()  # cancels a sweep a failed test left running: its non-daemon thread would hang pytest's exit

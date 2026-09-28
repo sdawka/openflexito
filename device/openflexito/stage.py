@@ -96,6 +96,7 @@ class Stage:
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stage")
         self._jog_pending: dict | None = None
         self._jog_lock = threading.Lock()
+        self._oscillating = False
         self._load_state()
         self._refresh_hw()
 
@@ -126,11 +127,16 @@ class Stage:
     def moving(self) -> bool:
         return self._moving
 
+    @property
+    def oscillating(self) -> bool:
+        return self._oscillating
+
     def status(self) -> dict:
         return {
             "position": self.position,
             "hw_position": dict(self._hw),
             "moving": self._moving,
+            "oscillating": self._oscillating,
             "backlash": dict(self.backlash),
             "inverted": dict(self.inverted),
             "engaged": dict(self._engaged),
@@ -278,26 +284,30 @@ class Stage:
         if not self._busy.acquire(blocking=False):
             raise StageBusy("stage is already moving")
         try:
-            self._cancel.clear()
-            if not axes:
-                return self._hw_move(move)
-            # v3 _move_with_backlash_correction: predict the (unclamped) state after the move on
-            # the checked axes; any axis ending below 1 gets a +backlash correction move.
-            correction = {a: 0 for a in AXES}
-            for a in axes:
-                bl = self.backlash.get(a, 0)
-                final = 1.0 if bl == 0 else self._engaged[a] + move[a] / bl
-                if final < 1.0:
-                    correction[a] = bl
-            if any(correction.values()):
-                first = self._hw_move({a: move[a] - correction[a] for a in AXES})
-                if first.cancelled:
-                    return first
-                second = self._hw_move(correction)
-                return MoveResult(first.start, second.end, first.t0_ns, second.t1_ns, second.cancelled)
-            return self._hw_move(move)
+            return self._move_rel_locked(move, axes)
         finally:
             self._busy.release()
+
+    def _move_rel_locked(self, move: dict[str, int], axes: tuple[str, ...]) -> MoveResult:
+        """The move itself, with `_busy` already held by the caller."""
+        self._cancel.clear()
+        if not axes:
+            return self._hw_move(move)
+        # v3 _move_with_backlash_correction: predict the (unclamped) state after the move on
+        # the checked axes; any axis ending below 1 gets a +backlash correction move.
+        correction = {a: 0 for a in AXES}
+        for a in axes:
+            bl = self.backlash.get(a, 0)
+            final = 1.0 if bl == 0 else self._engaged[a] + move[a] / bl
+            if final < 1.0:
+                correction[a] = bl
+        if any(correction.values()):
+            first = self._hw_move({a: move[a] - correction[a] for a in AXES})
+            if first.cancelled:
+                return first
+            second = self._hw_move(correction)
+            return MoveResult(first.start, second.end, first.t0_ns, second.t1_ns, second.cancelled)
+        return self._hw_move(move)
 
     def _program_to_hw_delta(self, dx: int, dy: int, dz: int) -> dict[str, int]:
         prog = {"x": int(dx), "y": int(dy), "z": int(dz)}
@@ -313,6 +323,8 @@ class Stage:
         """Relative move in program-frame steps. compensate: true = backlash-correct the axes that
         move (v3 MOVEMENT_AXES), "all" | "xy" | "z" = correct those axes even if they do not move
         (v3 ALL_AXES / XY_ONLY / Z_ONLY), false = raw move."""
+        if self._oscillating:
+            raise StageBusy("z is sweeping for live extended focus; stop that first")
         res = await self._run(self._move_rel_sync, self._program_to_hw_delta(x, y, z), compensate)
         return self._result_dict(res)
 
@@ -327,9 +339,102 @@ class Stage:
 
     async def jog(self, x: int = 0, y: int = 0, z: int = 0) -> dict:
         """Newest-wins jog: if a move is in progress, cancel it and run the latest request."""
+        if self._oscillating:  # refuse before cancelling: a jog must not end the sweeps and then fail
+            raise StageBusy("z is sweeping for live extended focus; stop that first")
         if self._busy.locked():
             self._cancel.set()
         return await self.move_rel(x, y, z, compensate=False)
+
+    # ---- continuous z sweeps (live extended depth of field) ---------------------------------
+
+    LEG_POLL_S = 0.001  # between `moving?` polls at a leg's end: on the Pi the serial round trip
+                        # (a few ms) dominates; this only stops a fake board hogging the GIL
+
+    async def oscillate(self, steps: int, on_leg, stop: threading.Event) -> dict:
+        """Sweep z back and forth by `steps` (program frame, first leg +steps from here) until `stop`
+        is set or `stage.stop` / `stage.release` cancels it, then return to the starting z with z
+        backlash compensation. The legs run back to back on the stage thread with no round trip to
+        the caller: one `mr` per leg, its end detected by polling `moving?` as fast as the serial
+        link answers, the next leg sent at once. `on_leg(record)` is called on the stage thread at
+        the start of every leg with {type: "leg", leg, t_cmd, t_ack, steps, step_us, z0} and at its
+        end with {type: "leg_end", leg, t_end, z1, cancelled} (ns on CLOCK_BOOTTIME, program-frame z
+        as the board counts it); the browser models backlash and timing from these. `stop` lets the
+        current leg finish, a cancel aborts it. Other moves are refused (StageBusy) while it runs.
+        Not in OpenFlexure v3, which has no continuous motion."""
+        if self._oscillating or self._busy.locked():
+            raise StageBusy("stage is already moving")
+        if int(steps) == 0:
+            raise ValueError("steps must be non-zero")
+        self._oscillating = True
+        try:
+            return await self._run(self._oscillate_sync, int(steps), on_leg, stop)
+        finally:
+            self._oscillating = False
+
+    def _oscillate_sync(self, steps: int, on_leg, stop: threading.Event) -> dict:
+        def report(rec: dict) -> None:
+            try:
+                on_leg(rec)
+            except Exception:  # noqa: BLE001  a consumer bug must not leave the motors running
+                log.exception("oscillation leg callback failed")
+
+        if not self._busy.acquire(blocking=False):
+            raise StageBusy("stage is already moving")
+        start_z = self.position["z"]
+        legs, sign = 0, 1
+        try:
+            self._cancel.clear()
+            self._cancel_release()
+            self._energised = True
+            self._moving = True
+            self._emit_position(True, oscillating=True)
+            while not stop.is_set() and not self._cancel.is_set():
+                d = self._program_to_hw_delta(0, 0, sign * steps)
+                start_hw = dict(self._hw)
+                step_us = self.board.info.step_time_us
+                duration = abs(steps) * step_us / 1e6
+                z0 = self.position["z"]
+                t_cmd = now_ns()
+                self._live = (start_hw, {a: start_hw[a] + d[a] for a in AXES}, t_cmd, duration)
+                self.board.move_rel(d["x"], d["y"], d["z"])
+                t_ack = now_ns()
+                report({"type": "leg", "leg": legs, "t_cmd": t_cmd, "t_ack": t_ack, "steps": sign * steps,
+                        "step_us": step_us, "z0": z0})
+                # sleep through most of the leg, then poll the board until it has stopped
+                cancelled = self._cancel.wait(max(0.0, duration - 0.015))
+                while not cancelled and self.board.moving():
+                    cancelled = self._cancel.wait(self.LEG_POLL_S)
+                if cancelled:
+                    self.board.stop()
+                    time.sleep(0.05)  # as in _hw_move: let the board settle before reading p?
+                t_end = now_ns()
+                self._refresh_hw()
+                self._live = None  # after the readback, or live_position() would show the leg's start
+                for a in AXES:
+                    bl = self.backlash.get(a, 0)
+                    if bl:
+                        self._engaged[a] = min(1.0, max(0.0, self._engaged[a] + (self._hw[a] - start_hw[a]) / bl))
+                report({"type": "leg_end", "leg": legs, "t_end": t_end, "z1": self.position["z"], "cancelled": cancelled})
+                legs += 1
+                sign = -sign
+            # Back where the sweeps started, from the same side as any compensated z move. Still
+            # under `_busy` (a gap would let a queued move in); it clears `_cancel`, so a stage.stop
+            # ends the sweeps but still returns z, and a second one aborts the return.
+            self._live = None
+            self._move_rel_locked(self._program_to_hw_delta(0, 0, start_z - self.position["z"]), ("z",))
+        finally:
+            # also after a serial error mid-leg: the device must not report "moving" for ever
+            self._moving = False
+            self._live = None
+            try:
+                self._refresh_hw()
+            except SangaboardError as e:
+                log.error("position readback failed after the z sweeps: %s", e)
+            self._save_state()
+            self._emit_position(False, oscillating=False)
+            self._schedule_release()
+            self._busy.release()
+        return {"legs": legs, "position": self.position}
 
     async def stop(self) -> dict:
         self._cancel.set()
@@ -340,6 +445,8 @@ class Stage:
 
     async def release(self) -> dict:
         self._cancel_release()
+        if self._oscillating:  # standby releases the stage: end the z sweeps (they return z) rather
+            self._cancel.set()  # than queue behind them on the stage thread until the client leaves
         def _rel():
             self.board.release()
             self._energised = False
@@ -357,6 +464,8 @@ class Stage:
         return {"release_after": self.release_after}
 
     async def zero(self) -> dict:
+        if self._oscillating:  # it would queue behind the sweeps and then zero a stale position
+            raise StageBusy("z is sweeping for live extended focus; stop that first")
         def _zero():
             self.board.zero()
             self._offset = {a: 0 for a in AXES}

@@ -2,12 +2,14 @@
   import { device } from '../lib/store/device.svelte'
   import { liveStack } from '../lib/services/liveStack.svelte'
   import { focusCtl } from '../lib/store/focusCtl.svelte'
+  import { liveEdof } from '../lib/services/liveEdof.svelte'
+  import LiveEdof from './LiveEdof.svelte'
 </script>
 
 <div class="panel">
   <h3>Focus</h3>
   <div class="row">
-    <button class="primary" onclick={() => focusCtl.run()} disabled={!device.connected}>{focusCtl.focusing ? 'Cancel' : 'Autofocus'}</button>
+    <button class="primary" onclick={() => focusCtl.run()} disabled={!device.connected || liveEdof.holdsStage}>{focusCtl.focusing ? 'Cancel' : 'Autofocus'}</button>
     <select bind:value={focusCtl.mode} disabled={focusCtl.focusing}>
       <option value="fast">fast (JPEG size)</option>
       <option value="looping">looping</option>
@@ -34,11 +36,16 @@
   {#if liveStack.active && liveStack.stats}
     <div class="status-line busy">{liveStack.stats.frames} frames{liveStack.mode === 'stack' ? ` · ${Math.round(liveStack.stats.replaced * 100)} % of blocks sharpened by the last frame` : ' averaged'}{liveStack.stats.shift.dx || liveStack.stats.shift.dy ? ` · aligned ${liveStack.stats.shift.dx}, ${liveStack.stats.shift.dy} px` : ''}</div>
   {/if}
+  <LiveEdof />
   <details class="help">
     <summary>What these do</summary>
     <p><b>Smooth</b> averages recent frames (the sensor's noise is already reduced by the Pi's ISP as far as it goes; averaging
     4 frames halves what is left). <b>Stack</b> uses small z vibrations: it keeps, block by block, the sharpest content seen so
     far (aligned for xy jitter, feathered, slowly forgetting), which builds an extended-depth-of-field view without moving the
     stage. Both reset whenever the stage moves. Save stores the processed frame; Record in the Photo panel records whatever is shown.</p>
+    <p><b>Live extended focus</b> sweeps z up and down continuously over <i>range</i> steps (plus the backlash dead band at
+    each reversal) in a fast sensor mode and fuses each sweep into one sharp frame, block by block from the sharpest slice,
+    so moving organisms stay crisp instead of ghosting: about 3 fused frames a second. Crop mode reads out the central ~39 % of
+    the field at up to 200 fps; full field covers everything at up to 40 fps. Record saves the fused frames as a video.</p>
   </details>
 </div>

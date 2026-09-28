@@ -116,7 +116,9 @@ export async function takeSweepStack(o: SweepStackOptions, say: Say, meta: Photo
       await moveZVerified(-Math.round(range / 2), 'z', say, 'sweep stack')
       z0 = device.position.z
       say('sweep stack: starting the sensor recording')
-      const started = await stream.start(device.url('/record.h264?keyframe=1'), (p) => packets.push(p), (e) => { streamError = e })
+      // every frame a keyframe: a <video> seek decodes from the previous keyframe, so with the
+      // default one-second GOP each of the ~120 seeks decoded ~15 frames (≈3 s of the run on the Pi)
+      const started = await stream.start(device.url('/record.h264?keyframe=0'), (p) => packets.push(p), (e) => { streamError = e })
       info = started.info; done = started.done
       // the camera has switched modes once frames flow; a few more let exposure settle on the new mode
       await waitFor(() => packets.some((p) => p.key) && packets.length >= 8, 8000, 'no frames from the sensor recording')

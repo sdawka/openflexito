@@ -16,6 +16,7 @@
   import { device } from '../lib/store/device.svelte'
   import { settings } from '../lib/store/settings.svelte'
   import { liveStack } from '../lib/services/liveStack.svelte'
+  import { liveEdof } from '../lib/services/liveEdof.svelte'
   import { scaleForWidth, niceScaleBarLength, type Pt } from '../lib/algo/measure'
   import '../lib/services/lookProcessor'
   import { frameChain, isRgbaFrame, type FrameInput } from '../lib/services/frameChain'
@@ -80,6 +81,18 @@
     c.getContext('2d')!.drawImage(bmp, 0, 0)
   })
 
+  // live extended focus (services/liveEdof.svelte.ts): the fused composite is the fast sensor mode's
+  // size and field, not the stream's, so it is drawn contained over the ghosted <img>, never aligned to it
+  let edofCanvas: HTMLCanvasElement | undefined = $state()
+  let edofLeg = $state(-1)
+  $effect(() => {
+    const bmp = liveEdof.composite, c = edofCanvas
+    if (!c || !bmp) return
+    if (c.width !== bmp.width || c.height !== bmp.height) { c.width = bmp.width; c.height = bmp.height }
+    c.getContext('2d')!.drawImage(bmp, 0, 0)
+    edofLeg = (liveEdof.stats?.sweeps ?? 0)
+  })
+
   // --- look / frame-chain processing overlay (services/lookProcessor.ts registers the LUT stage) ---
   // A second /stream.mjpg client fetched directly (not through the <img>'s own multipart decoding) so
   // every frame is delivered exactly once, fully decoded (see api/mjpegStream.ts's doc comment on why
@@ -139,8 +152,13 @@
   const umPerPxHere = $derived(scaleInfo && img?.naturalWidth ? scaleForWidth(scaleInfo.umPerPx, scaleInfo.referenceWidth, img.naturalWidth) : null)
   const scaleBar = $derived(umPerPxHere && img?.naturalWidth ? niceScaleBarLength(umPerPxHere, img.naturalWidth * 0.3) : null)
 
+  // While live extended focus runs, the stream carries the fast mode's frames (another size and, in
+  // crop mode, another field), so the CSM px→steps mapping and the µm/px scale do not apply, and the
+  // device refuses moves anyway: no pan, click-to-centre, selection or measurement then.
+  const edofLocked = $derived(liveEdof.holdsStage)
+
   function down(e: PointerEvent) {
-    if (e.button !== 0) return
+    if (e.button !== 0 || edofLocked) return
     if (e.pointerType === 'touch') {
       touches.add(e.pointerId)
       if (touches.size > 1) { abortGesture(); return }   // second finger: no gesture starts
@@ -166,6 +184,7 @@
   }
   function move(e: PointerEvent) {
     if (e.pointerType === 'touch' && touches.size > 1) return   // multi-touch: never drives the stage
+    if (edofLocked) return
     if (measuring) { measureHover = toFrac(e); return }
     if (drag) { const p = toFrac(e); if (p) drag = { ...drag, x1: p.x, y1: p.y }; return }
     if (pan) {
@@ -177,6 +196,7 @@
   }
   function up(e: PointerEvent) {
     if (e.pointerType === 'touch') touches.delete(e.pointerId)
+    if (edofLocked) { clearLongPress(); pan = null; drag = null; return }
     if (e.pointerType === 'touch' && touches.size >= 1) return   // a finger of a multi-touch gesture lifted, others still down
     clearLongPress()
     if (measuring) {
@@ -208,13 +228,17 @@
   const px = (v: number, size: number, off: number) => off + v * size
 </script>
 
-<div class="view" class:panning={pan?.moved} class:picking class:measuring onpointerdown={down} onpointermove={move} onpointerup={up} onpointercancel={cancel} ondblclick={() => measuring && onmeasuredblclick?.()} role="presentation">
+<div class="view" class:panning={pan?.moved} class:picking class:measuring class:locked={edofLocked} onpointerdown={down} onpointermove={move} onpointerup={up} onpointercancel={cancel} ondblclick={() => measuring && !edofLocked && onmeasuredblclick?.()} role="presentation">
   {#if error}
     <div class="err">stream unavailable <button onclick={() => { error = false; nonce++ }}>retry</button></div>
   {/if}
-  <img bind:this={img} {src} alt="microscope live view" draggable="false" crossorigin="anonymous" style:transform={shift} class:ghost={(liveStack.active && !!liveStack.composite) || procActive} onerror={() => (error = true)} />
+  <img bind:this={img} {src} alt="microscope live view" draggable="false" crossorigin="anonymous" style:transform={shift} class:ghost={(liveStack.active && !!liveStack.composite) || procActive || liveEdof.active} onerror={() => (error = true)} />
   {#if liveStack.active}<canvas bind:this={compCanvas} class="composite" style:transform={shift}></canvas>{/if}
   {#if procActive}<canvas bind:this={procCanvas} class="processed" style:transform={shift}></canvas>{/if}
+  {#if liveEdof.active}
+    <canvas bind:this={edofCanvas} class="edof" data-sweeps={edofLeg}></canvas>
+    <div class="edof-note">extended focus{liveEdof.fieldShare != null ? ` · crop: central ${Math.round(liveEdof.fieldShare * 100)} % of the field` : ' · full field'}{liveEdof.composite ? '' : ' · waiting for the first sweep…'}</div>
+  {/if}
   {#if geo}
     <svg class="overlay" style="left:{geo.ox}px;top:{geo.oy}px;width:{geo.w}px;height:{geo.h}px" viewBox="0 0 1 1" preserveAspectRatio="none">
       {#each boxes as b}
@@ -251,7 +275,7 @@
     {/each}
   {/if}
   <div class="crosshair"></div>
-  {#if scaleBar && geo}
+  {#if scaleBar && geo && !edofLocked}
     <div class="scalebar" style="width:{scaleBar.px * scale}px"><span>{scaleBar.label}</span></div>
   {/if}
 </div>
@@ -261,6 +285,7 @@
   .view.panning { cursor: grabbing; }
   .view.picking { cursor: crosshair; }
   .view.measuring { cursor: crosshair; }
+  .view.locked { cursor: default; }
   .measure-line { stroke: var(--accent); stroke-width: 2px; }
   .measure-line.ghost { stroke-dasharray: 5 4; opacity: .7; }
   .measure-fill { fill: rgba(79,140,255,.15); stroke: none; }
@@ -271,6 +296,8 @@
   img { max-width: 100%; max-height: 100%; object-fit: contain; user-select: none; pointer-events: none; will-change: transform; grid-area: 1 / 1; }
   img.ghost { opacity: 0; }
   .composite { max-width: 100%; max-height: 100%; object-fit: contain; pointer-events: none; grid-area: 1 / 1; }
+  .edof { width: 100%; height: 100%; object-fit: contain; pointer-events: none; grid-area: 1 / 1; }
+  .edof-note { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); font-size: 11px; padding: 2px 8px; border-radius: 3px; background: rgba(0,0,0,.6); color: #fff; pointer-events: none; white-space: nowrap; }
   .processed { max-width: 100%; max-height: 100%; object-fit: contain; pointer-events: none; grid-area: 1 / 1; }
   .overlay { position: absolute; pointer-events: none; }
   .overlay rect { fill: none; stroke-width: 2px; }

@@ -349,6 +349,55 @@ await step('live focus stack builds a composite and saves it', async () => {
   await page.click('.panel:has(h3:has-text("Focus")) .seg button:has-text("Off")')
 })
 
+if (moves) await step('live extended focus sweeps z, fuses composites, records them and returns z', async () => {
+  await nav('live')
+  const panel = await tool('Focus')
+  const setNum = async (label, v) => {
+    const el = panel.locator(`input[aria-label="${label}"]`)
+    await el.fill(String(v)); await el.press('Tab')
+  }
+  await panel.locator('select[aria-label="edof mode"]').selectOption('crop')
+  await setNum('edof fps', 30)
+  await setNum('edof range', 60)
+  await setNum('edof backlash', 20)   // the fake board has no backlash of its own
+  const z0 = (await rpc('stage.status')).position.z
+  await panel.locator('button:has-text("Start extended focus")').click()
+  const sweeps = () => panel.locator('[data-sweeps]').getAttribute('data-sweeps', { timeout: 1000 }).then((v) => +v).catch(() => 0)
+  await page.waitForFunction(() => +(document.querySelector('.panel [data-sweeps]')?.getAttribute('data-sweeps') ?? 0) >= 2, null, { timeout: 30000 })
+    .catch(async () => { throw new Error(`fewer than 2 sweeps fused (${await sweeps()}): ` + (await panel.innerText()).replace(/\s+/g, ' ').slice(-240)) })
+  const drawn = await page.locator('.view canvas.edof').evaluate((c) => {
+    if (!c.width || !c.height) return false
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data
+    let lit = 0
+    for (let i = 0; i < d.length; i += 4 * 97) if (d[i] + d[i + 1] + d[i + 2] > 30) lit++
+    return lit > 50
+  })
+  expect(drawn, 'extended-focus composite canvas is empty')
+  // the stream now carries fast-mode frames: pan/click-to-centre/measure are off on the live view
+  expect(await page.locator('.view.locked').count() === 1, 'live view not locked against pan/centre while sweeping')
+  expect(/crop: central \d+ % of the field/.test(await page.locator('.view .edof-note').innerText()), 'crop-field note missing')
+  const line = await panel.locator('[data-sweeps]').innerText()
+  expect(/[\d.]+ sweeps\/s · \d+ frames\/sweep \(\d+% useful\) · \d+ ms window · dropped \d+/.test(line), `stats line: ${line}`)
+  // record ~3 s of composites
+  await panel.locator('button:has-text("Record extended focus")').click()
+  await page.waitForFunction(() => /Stop recording · \d+ s/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 10000 })
+  await page.waitForTimeout(3000)
+  await panel.locator('button:has-text("Stop recording")').click()
+  await page.waitForFunction(() => /saved "Video extended focus/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 15000 })
+    .catch(async () => { throw new Error('EDOF recording not saved: ' + (await panel.innerText()).replace(/\s+/g, ' ').slice(-240)) })
+  await panel.locator('button:has-text("Stop extended focus")').click()
+  await panel.locator('button:has-text("Start extended focus")').waitFor({ timeout: 20000 })
+  let st = await rpc('stage.status')
+  for (let i = 0; i < 40 && st.moving; i++) { await page.waitForTimeout(250); st = await rpc('stage.status') }
+  expect(st.oscillating === false, `stage still oscillating: ${JSON.stringify(st.oscillating)}`)
+  expect(Math.abs(st.position.z - z0) <= 5, `z ended at ${st.position.z}, started at ${z0}: ` + (await panel.innerText()).replace(/\s+/g, ' ').slice(-200))
+  const snap = await page.request.get(base + '/snapshot.jpg?full=1')
+  expect(snap.status() === 200, `full snapshot after extended focus: ${snap.status()}`)
+  await setNum('edof backlash', '')
+  await nav('gallery'); await page.waitForTimeout(600)
+  expect(/video · \d+ s · extended focus/.test(await page.locator('main').innerText()), 'gallery lacks the extended-focus video')
+})
+
 await step('video recording (stabilise on) lands in the gallery and opens in the viewer', async () => {
   await nav('live')
   await tool('Photo')

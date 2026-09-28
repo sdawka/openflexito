@@ -52,6 +52,16 @@ class CameraConfig:
     record_size: tuple[int, int] = (1640, 1232)
     record_max_fps: int = 30
     record_max_bitrate: int = 25_000_000
+    # Fast stream for live extended depth of field (`/edof.bin`, camera.py `start_fast`): while the
+    # connection is open the camera runs a high-frame-rate sensor mode into the MJPEG encoder and
+    # every frame goes to that client (the live view gets a throttled copy). "crop" is the IMX219's
+    # 640x480 mode (2x2 binned from the central 1280x960, ~200 fps: short sweeps, cropped field);
+    # "full" is the binned 1640x1232 mode scaled to 820x616 (~40 fps, whole field).
+    fast_modes: dict = field(default_factory=lambda: {
+        "crop": {"sensor": [640, 480], "size": [640, 480], "max_fps": 200},
+        "full": {"sensor": [1640, 1232], "size": [820, 616], "max_fps": 40},
+    })
+    fast_bitrate: int = 50_000_000
 
 
 @dataclass

@@ -1,4 +1,5 @@
-"""HTTP/WebSocket surface: static webapp, MJPEG streams, snapshot, raw capture, H.264 recording, JSON-RPC."""
+"""HTTP/WebSocket surface: static webapp, MJPEG streams, snapshot, raw capture, H.264 recording, the
+fast JPEG + z-sweep stream for live extended depth of field (`/edof.bin`), JSON-RPC."""
 
 from __future__ import annotations
 
@@ -6,6 +7,7 @@ import asyncio
 import json
 import logging
 import struct
+import threading
 from importlib import resources
 from pathlib import Path
 
@@ -29,14 +31,15 @@ async def cors_middleware(request: web.Request, handler):
     resp.headers["Access-Control-Allow-Origin"] = "*"
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
     resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    resp.headers["Access-Control-Expose-Headers"] = "X-Timestamp, X-Seq, X-Frame, X-Record"
+    resp.headers["Access-Control-Expose-Headers"] = "X-Timestamp, X-Seq, X-Frame, X-Record, X-Edof"
     return resp
 
 
 def build_app(rpc: RpcRegistry, events: EventBus, camera: CameraBase | None, webapp_dir: Path | None,
-              status_provider, power=None) -> web.Application:
+              status_provider, power=None, stage=None) -> web.Application:
     app = web.Application(middlewares=[cors_middleware])
     app["rpc"], app["events"], app["camera"], app["status"], app["power"] = rpc, events, camera, status_provider, power
+    app["stage"] = stage
 
     app.router.add_get("/health", health)
     app.router.add_get("/rpc/schema", rpc_schema)
@@ -52,6 +55,7 @@ def build_app(rpc: RpcRegistry, events: EventBus, camera: CameraBase | None, web
         app.router.add_get("/flat.bin", flat)
         app.router.add_get("/bracket.bin", bracket)
         app.router.add_get("/record.h264", record)
+        app.router.add_get("/edof.bin", edof)
 
     if webapp_dir and (webapp_dir / "index.html").is_file():
         async def index(r): return web.FileResponse(webapp_dir / "index.html")
@@ -155,6 +159,8 @@ def _require_not_recording(request: web.Request) -> None:
     camera: CameraBase = request.app["camera"]
     if camera.recording is not None:
         raise web.HTTPConflict(text="a video recording is running; stop it first")
+    if camera.fast is not None:
+        raise web.HTTPConflict(text="live extended focus is running; stop it first")
 
 
 def _bump_activity(request: web.Request) -> None:
@@ -327,6 +333,116 @@ async def record(request: web.Request) -> web.StreamResponse:
         pass
     finally:
         await camera.stop_recording()
+        request.app["status"](changed=True)
+    return resp
+
+
+EDOF_MAGIC = b"OFES"
+# magic | u8 type | 3 pad | u32 payload length | i64 time ns (-1 unknown) | u32 frame seq
+EDOF_HEADER = struct.Struct("<4sBxxxIqI")
+EDOF_FRAME, EDOF_LEG, EDOF_LEG_END, EDOF_STATUS = 1, 2, 3, 4
+EDOF_MAX_STEPS = 10_000  # per leg; a typo'd sweep must not drive the objective into the slide
+EDOF_STALL_S = 2.0  # no frame for this long = the camera stalled: end the response (and the sweeps)
+
+
+async def edof(request: web.Request) -> web.StreamResponse:
+    """Live extended depth of field. While this response is being read the camera runs a fast
+    sensor mode (config.py `fast_modes`) and, with `steps`, the stage sweeps z back and forth by
+    that many motor steps per leg (stage.py `oscillate`, the first leg +steps from the current z).
+    `X-Edof` describes the stream ({codec, mode, width, height, fps, bitrate, sensor_size, started,
+    steps, step_us, backlash_z}). The body is a sequence of `EDOF_HEADER` records whose seq is the
+    running frame counter: type 1 = one JPEG frame (time = SensorTimestamp), 2 = a sweep leg
+    started, 3 = it ended (JSON from `oscillate`, plus the frames `dropped` so far because the
+    reader fell behind), 4 = status (JSON: {error} if the sweeps failed, {sweeps_stopped, legs} if
+    stage.stop or standby ended them while the camera carries on; {error: "no frames from the
+    camera"} just before the response ends, when no frame came for `EDOF_STALL_S`). All image maths
+    happens in the browser; closing the connection stops the sweeps, returns z to where they started
+    and restores the stream mode; standby or a stalled camera ends the response. Query: `mode`
+    (crop|full), `fps`, `bitrate`, `steps` (0 = camera only)."""
+    _require_power(request)
+    _bump_activity(request)
+    camera: CameraBase = request.app["camera"]
+    stage = request.app["stage"]
+    try:
+        mode = request.query.get("mode", "crop")
+        fps = int(request.query["fps"]) if "fps" in request.query else None
+        bitrate = int(request.query["bitrate"]) if "bitrate" in request.query else None
+        steps = int(request.query.get("steps", 0))
+    except ValueError:
+        raise web.HTTPBadRequest(text="fps, bitrate and steps must be integers")
+    if abs(steps) > EDOF_MAX_STEPS:
+        raise web.HTTPBadRequest(text=f"steps must be within ±{EDOF_MAX_STEPS}")
+    if steps:
+        if stage is None:
+            raise web.HTTPConflict(text="no stage to sweep")
+        if stage.moving or stage.oscillating:
+            raise web.HTTPConflict(text="the stage is moving")
+    try:
+        tap, info = await camera.start_fast(mode, fps, bitrate)
+    except ValueError as e:
+        raise web.HTTPBadRequest(text=str(e))
+    except RuntimeError as e:
+        raise web.HTTPConflict(text=str(e))
+    stop = threading.Event()
+    sweeps = None
+    seq = 0
+    # from here on everything is inside try/finally: whatever fails, the camera must leave the
+    # fast mode and the stage must stop sweeping
+    try:
+        info = {**info, "steps": steps, "step_us": stage.board.info.step_time_us if stage else None,
+                "backlash_z": stage.backlash.get("z") if stage else None}
+        if steps:
+            sweeps = asyncio.ensure_future(stage.oscillate(steps, lambda rec: tap.put_threadsafe((rec["type"], rec)), stop))
+
+            def ended(f: asyncio.Future) -> None:
+                if f.cancelled():
+                    return
+                if f.exception() is not None:
+                    tap.put_threadsafe(("status", {"error": f"z sweep stopped: {f.exception()}"}))
+                elif not stop.is_set():  # stage.stop / standby, not this client closing
+                    tap.put_threadsafe(("status", {"sweeps_stopped": True, "legs": f.result()["legs"]}))
+            sweeps.add_done_callback(ended)
+        request.app["status"](changed=True)
+        resp = web.StreamResponse(status=200, headers={
+            "Content-Type": "application/octet-stream", "Cache-Control": "no-cache, no-store", "Connection": "close",
+            "X-Edof": json.dumps(info, separators=(",", ":")),
+        })
+        kinds = {"leg": EDOF_LEG, "leg_end": EDOF_LEG_END, "status": EDOF_STATUS}
+        await resp.prepare(request)
+        loop = asyncio.get_running_loop()
+        last_frame = loop.time()
+        while True:
+            try:
+                item = await asyncio.wait_for(tap.get(), max(0.0, last_frame + EDOF_STALL_S - loop.time()))
+            except asyncio.TimeoutError:
+                # a stalled camera would otherwise keep the stage sweeping until the client left
+                log.warning("live extended focus: no frame for %.1f s, ending the stream", EDOF_STALL_S)
+                payload = json.dumps({"error": "no frames from the camera", "dropped": tap.dropped},
+                                     separators=(",", ":")).encode()
+                await resp.write(EDOF_HEADER.pack(EDOF_MAGIC, EDOF_STATUS, len(payload), -1, seq) + payload)
+                break
+            if item is None:  # stop_fast, or the camera stopped (standby)
+                break
+            if tap.is_frame(item):
+                data, ts = item
+                last_frame = loop.time()
+                seq += 1
+                await resp.write(EDOF_HEADER.pack(EDOF_MAGIC, EDOF_FRAME, len(data), -1 if ts is None else int(ts), seq) + data)
+            else:
+                kind, rec = item
+                payload = json.dumps({**rec, "dropped": tap.dropped}, separators=(",", ":")).encode()
+                t = rec.get("t_cmd") or rec.get("t_end") or -1
+                await resp.write(EDOF_HEADER.pack(EDOF_MAGIC, kinds[kind], len(payload), int(t), seq) + payload)
+    except (ConnectionResetError, asyncio.CancelledError, ConnectionError):
+        pass
+    finally:
+        stop.set()
+        if sweeps is not None:
+            try:
+                await sweeps  # finishes the current leg and returns z
+            except Exception as e:  # noqa: BLE001  already reported in the stream
+                log.warning("z sweep ended with an error: %s", e)
+        await camera.stop_fast()
         request.app["status"](changed=True)
     return resp
 
