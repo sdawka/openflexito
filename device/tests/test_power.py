@@ -139,6 +139,34 @@ async def test_reason_persists_in_status_and_across_restart(device, tmp_path):
     assert fresh.on is False and fresh.reason == "idle"
 
 
+def _cc(board) -> float:
+    return float(board.query("led_cc?").rsplit(":", 1)[-1])  # "CC LED:0.6"
+
+
+async def test_light_restored_after_a_restart_in_standby(device, tmp_path):
+    """Standby survives a service restart (power.json) but the in-memory remembered light did not:
+    waking then left the LED dark while light.get still reported the old level."""
+    board = device.stage.board
+    await device.rpc.call("light.set", {"cc": 0.6})
+    await device.rpc.call("power.set", {"on": False})
+    assert _cc(board) == 0
+    device.power._saved_light = None          # what a restart loses
+    device._light = device._load_light()      # what a restart reloads
+    await device.power.apply_lights_at_start()
+    assert _cc(board) == 0      # still dark while in standby
+    await device.rpc.call("power.set", {"on": True})
+    assert abs(_cc(board) - 0.6) < 1e-3
+    assert (await device.rpc.call("light.get", None))["cc"] == 0.6
+
+
+async def test_light_applied_at_start_when_on(device):
+    board = device.stage.board
+    await device.rpc.call("light.set", {"cc": 0.4})
+    board.led_cc(0.0)                          # the board as a previous standby left it
+    await device.power.apply_lights_at_start()
+    assert abs(_cc(board) - 0.4) < 1e-3
+
+
 async def test_idle_in_is_sane_immediately_after_wake(device):
     await device.rpc.call("power.set", {"on": False})
     r = await device.rpc.call("power.set", {"on": True})

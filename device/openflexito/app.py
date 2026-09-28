@@ -251,6 +251,11 @@ class Device:
                 except Exception as e:  # noqa: BLE001
                     self.errors["camera"] = str(e)
                     log.exception("camera start failed")
+        if self.stage:
+            try:
+                await self.power.apply_lights_at_start()
+            except Exception as e:  # noqa: BLE001
+                log.warning("could not apply the illumination at start: %s", e)
         if self.stage and not self.power.on:
             await self.stage.release()
         if self.stage and self.stage.lost_position():
