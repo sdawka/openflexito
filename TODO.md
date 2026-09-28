@@ -169,3 +169,12 @@ on hardware.
   (`gamepad.py` slot in the plan), fan on GPIO18 with `gpio-fan` if the Pi runs hot at 1640×1232.
 - Colour-checker CCM calibration and CA/distortion correction from a grid target (CAPTURE_AUDIT.md
   Tier C).
+
+- **Sensor video recording on the Pi** (`/record.h264`): verified 2026-09-28 on the Pi 3B+ (1640×1232
+  at 28–29 fps, timestamps = SensorTimestamp, live view keeps streaming, config restored, plays in
+  Chrome). Still open: Safari playback, a closed tab / standby mid-recording on hardware, WiFi
+  throughput under a long recording. Over plain http there is no WebCodecs, so processed sensor
+  recordings fall back to the live view — serving the app over https (or localhost) would enable them.
+- **Sweep focus stack on a real specimen**: runs end to end on the Pi (119 frames / 1000 steps,
+  7 fused, 10.7 s) but only on an empty field; check fusion quality and the chosen band on a thick
+  sample, and whether 8 steps/frame is fine enough at 40×.

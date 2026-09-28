@@ -1,4 +1,4 @@
-/** Focus peaking and zebra overlays (`docs/video-research/colour.md` proposal 7): viewfinder aids
+/** Focus peaking and zebra overlays: viewfinder aids
  *  painted onto an RGBA frame in place. Pure maths, no DOM; `services/peakingProcessor.ts` wires it
  *  into the frame chain for the `view` target only.
  *

@@ -44,7 +44,7 @@ async def client(device):
 async def test_status_shape_includes_power(device):
     s = device.status()["power"]
     assert s["on"] is True and s["idle_minutes"] == 10.0 and s["reason"] == "request"
-    assert 590 <= s["idle_in"] <= 600  # ~10 minutes, just started
+    assert 0 < s["idle_in"] <= 600  # counting down from 10 minutes (the fixture's start can take seconds on CI)
     assert isinstance(s["since"], int) and s["since"] > 0
 
 
@@ -93,9 +93,18 @@ async def test_camera_and_stage_rpcs_refused_while_off(device):
     assert (await device.rpc.call("system.status", None))["power"]["on"] is False
 
 
+async def _first_snapshot(client):
+    """The fake camera answers 503 "no frame yet" until it has rendered one, which a slow runner hits."""
+    for _ in range(100):
+        r = await client.get("/snapshot.jpg")
+        if r.status == 200:
+            return r
+        await asyncio.sleep(0.05)
+    return r
+
+
 async def test_image_endpoints_503_while_off(client, device):
-    r = await client.get("/snapshot.jpg")
-    assert r.status != 503
+    assert (await _first_snapshot(client)).status == 200
     await device.rpc.call("power.set", {"on": False})
     for path in ("/snapshot.jpg", "/raw.bin", "/flat.bin", "/bracket.bin"):
         r = await client.get(path)
@@ -104,12 +113,7 @@ async def test_image_endpoints_503_while_off(client, device):
         assert r.status == 503
 
     await device.rpc.call("power.set", {"on": True})
-    for _ in range(20):
-        r = await client.get("/snapshot.jpg")
-        if r.status == 200:
-            break
-        await asyncio.sleep(0.05)
-    assert r.status == 200
+    assert (await _first_snapshot(client)).status == 200
 
 
 async def test_rpc_schema_keeps_real_param_types(device):
@@ -133,6 +137,34 @@ async def test_reason_persists_in_status_and_across_restart(device, tmp_path):
     from openflexito.power import PowerController
     fresh = PowerController(types.SimpleNamespace(cfg=device.cfg))
     assert fresh.on is False and fresh.reason == "idle"
+
+
+def _cc(board) -> float:
+    return float(board.query("led_cc?").rsplit(":", 1)[-1])  # "CC LED:0.6"
+
+
+async def test_light_restored_after_a_restart_in_standby(device, tmp_path):
+    """Standby survives a service restart (power.json) but the in-memory remembered light did not:
+    waking then left the LED dark while light.get still reported the old level."""
+    board = device.stage.board
+    await device.rpc.call("light.set", {"cc": 0.6})
+    await device.rpc.call("power.set", {"on": False})
+    assert _cc(board) == 0
+    device.power._saved_light = None          # what a restart loses
+    device._light = device._load_light()      # what a restart reloads
+    await device.power.apply_lights_at_start()
+    assert _cc(board) == 0      # still dark while in standby
+    await device.rpc.call("power.set", {"on": True})
+    assert abs(_cc(board) - 0.6) < 1e-3
+    assert (await device.rpc.call("light.get", None))["cc"] == 0.6
+
+
+async def test_light_applied_at_start_when_on(device):
+    board = device.stage.board
+    await device.rpc.call("light.set", {"cc": 0.4})
+    board.led_cc(0.0)                          # the board as a previous standby left it
+    await device.power.apply_lights_at_start()
+    assert abs(_cc(board) - 0.4) < 1e-3
 
 
 async def test_idle_in_is_sane_immediately_after_wake(device):

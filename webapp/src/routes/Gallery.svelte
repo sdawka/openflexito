@@ -129,7 +129,7 @@
           {#if it.scan?.region?.order === 'spiral'}<span class="chip">spiral order</span>{/if}
           {#if it.timelapse}<span class="chip accent">time-lapse · {it.timelapse.frames.length} frames · {(it.timelapse.intervalMs / 1000).toFixed(0)} s{it.timelapse.driftCorrected ? ' · drift-corrected' : ''}</span>{/if}
           {#if it.raw}<span class="chip accent">RAW {it.raw.bitDepth}-bit {it.raw.bayer} → 16-bit PNG</span><span class="chip ok">DNG kept</span>{/if}
-          {#if it.stack}<span class="chip accent">{it.stack.method === 'pyramid' ? `fine focus stack (pyramid${it.stack.source === 'raw' ? ', 16-bit from RAW' : ''})` : 'quick focus stack'}</span>{/if}
+          {#if it.stack}<span class="chip accent">{it.stack.source === 'sweep' ? 'sweep focus stack (pyramid)' : it.stack.method === 'pyramid' ? `fine focus stack (pyramid${it.stack.source === 'raw' ? ', 16-bit from RAW' : ''})` : 'quick focus stack'}</span>{/if}
           {#if it.stack?.depth}<span class="chip ok" title="z {it.stack.depth.minZ}..{it.stack.depth.maxZ} steps">depth map</span>{/if}
           {#if it.superres}<span class="chip accent">super-resolution {it.superres.frames} frames ×{it.superres.scale}{it.superres.crop ? ' (cropped)' : ''}</span>{/if}
         </div>

@@ -26,7 +26,7 @@ describe('Stabilizer', () => {
     const { pos, raw } = run(20, 40, 0.4, 3, 1.3)
     // skip the first couple of frames (no reference yet / filter warm-up)
     for (let i = 5; i < pos.length; i++) expect(Math.abs(raw[i] - pos[i])).toBeLessThan(0.5)
-  })
+  }, 30_000)   // FFT registration over dozens of frames: ~2 s locally, >5 s on a 2-core CI runner under a parallel run
 
   it('the smoothed trajectory follows the slow trend and removes most of the fast jitter', () => {
     const { trend, smoothed } = run(20, 60, 0.4, 4, 1.3)
@@ -39,7 +39,7 @@ describe('Stabilizer', () => {
     let maxStep = 0
     for (let i = 16; i < trend.length; i++) maxStep = Math.max(maxStep, Math.abs((smoothed[i] - trend[i]) - (smoothed[i - 1] - trend[i - 1])))
     expect(maxStep).toBeLessThan(2)
-  })
+  }, 30_000)   // FFT registration over dozens of frames: ~2 s locally, >5 s on a 2-core CI runner under a parallel run
 
   it('reset() drops the reference so the next frame becomes a fresh anchor', () => {
     const w = 128, h = 96
@@ -76,7 +76,7 @@ describe('Stabilizer', () => {
   })
 })
 
-// ---- rotation (docs/video-research/motion.md proposal 2(d)) ----
+// ---- rotation ----
 
 import { rotationMargin, stabilizeOptionsFor, STABILIZE_STRENGTH_HZ } from '../stabilize'
 import type { Scene } from './helpers/scene'
@@ -214,5 +214,5 @@ describe('stabilizeOptionsFor', () => {
     }
     // the correction removes more of the jitter with the lower cutoff
     expect(out('strong')).toBeGreaterThan(out('light'))
-  })
+  }, 30_000)   // FFT registration over dozens of frames: ~2 s locally, >5 s on a 2-core CI runner under a parallel run
 })

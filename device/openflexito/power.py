@@ -226,18 +226,31 @@ class PowerController:
 
     async def _lights_off(self) -> None:
         dev = self.device
-        self._saved_light = {"cc": dev._light["cc"], "pwm": dict(dev._light["pwm"])}
+        self._saved_light = self._persisted_light()
         loop = asyncio.get_running_loop()
         board = dev.stage.board
         await loop.run_in_executor(None, board.led_cc, 0.0)
         for i in range(dev._light_channels.get("pwm", 0)):
             await loop.run_in_executor(None, board.led_pwm, i, 0.0)
 
-    async def _lights_restore(self) -> None:
+    async def apply_lights_at_start(self) -> None:
+        """At service start the board still holds whatever the last run left on it (standby zeroes
+        it), while `light.get` reports the persisted last-set values: put the board in line with the
+        power state, and when starting in standby remember those values for the wake."""
+        if self.on:
+            await self._lights_restore(self._persisted_light())
+        else:
+            await self._lights_off()
+
+    def _persisted_light(self) -> dict:
         dev = self.device
-        saved, self._saved_light = self._saved_light, None
-        if not saved:
-            return
+        return {"cc": dev._light["cc"], "pwm": dict(dev._light["pwm"])}
+
+    async def _lights_restore(self, saved: dict | None = None) -> None:
+        dev = self.device
+        # nothing saved in memory (standby survived a restart): fall back to the persisted values,
+        # which standby leaves untouched
+        saved, self._saved_light = saved or self._saved_light or self._persisted_light(), None
         loop = asyncio.get_running_loop()
         board = dev.stage.board
         await loop.run_in_executor(None, board.led_cc, saved["cc"])

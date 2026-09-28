@@ -34,7 +34,7 @@ export interface GalleryItem {
   blobs: string[]
   /** focus stack: how it was taken and how much of the result each slice supplied */
   stack?: {
-    slices: number; stepZ: number; zs: number[]; contributions: number[]; method?: 'blocks' | 'pyramid'; centreZ?: number; span?: number; shifts?: { dx: number; dy: number }[]; source?: 'jpeg' | 'raw'
+    slices: number; stepZ: number; zs: number[]; contributions: number[]; method?: 'blocks' | 'pyramid'; centreZ?: number; span?: number; shifts?: { dx: number; dy: number }[]; source?: 'jpeg' | 'raw' | 'sweep'
     /** depth-from-focus map derived alongside a pyramid fusion: blobs 'depth' (colour-mapped PNG),
      *  'relief' (pseudo-3D shaded preview) and 'depth.bin' (raw per-pixel winning-slice index, 8-bit).
      *  `minZ`/`maxZ` are always in z steps; `umPerStep` (additive) is the stage's z µm/step *at capture
@@ -45,6 +45,9 @@ export interface GalleryItem {
      *  `HeightMapOverlay.svelte` fall back to Settings' *current* `stageStepUm.z` for those, which can
      *  mislabel them if the calibration has since changed — the honest cost of not having recorded it. */
     depth?: { minZ: number; maxZ: number; colorMap: 'ramp'; unit?: 'steps' | 'µm'; umPerStep?: number }
+    /** source 'sweep' (services/photo/sweepStack.ts): frames recorded during the sweep, camera fps,
+     *  stage step delay and the recording size the slices were decoded at */
+    sweep?: { frames: number; fps: number; stepTimeUs: number; stepsPerFrame: number; range: number; width: number; height: number; sensorSize: [number, number] }
   }
   /** pixel-shift super-resolution: N sub-pixel-shifted stills fused by drizzle onto a finer grid;
    *  `used` is how many of `frames` passed registration confidence + phase-validity checks and
@@ -65,17 +68,21 @@ export interface GalleryItem {
      *  blob's `mime` actually is, the quality preset/keyframe interval requested, whether the
      *  deflicker processor was baked in, and how many frames the encoder backlog dropped or (WebM
      *  fallback only) the browser's own captureStream(fps) timer duplicated. */
-    encoder?: 'webcodecs' | 'mediarecorder'
+    encoder?: 'webcodecs' | 'mediarecorder' | 'device-h264'
+    /** additive: recorded from the camera's hardware H.264 (`/record.h264`): the recorded size, the
+     *  sensor mode it was read out in, the rate/bitrate asked of the camera, and whether the browser
+     *  decoded and re-encoded it (processing on) or wrote the camera's packets as they came */
+    sensor?: { width: number; height: number; sensorSize: [number, number]; fps: number; bitrate: number; reencoded: boolean }
     container?: 'mp4' | 'webm'
     quality?: string
     keyframeS?: number
     deflickered?: boolean
     framesDropped?: number
     framesDuplicated?: number
-    /** additive: the video mode (`services/video/videoModes.ts`) this was recorded with, its
-     *  parameters, and what the mode reports about the run (frames fused, frames rejected, ...) */
+    /** legacy: the video mode older recordings were made with (the modes were removed; kept so the
+     *  Viewer can still describe those items) */
     mode?: { id: string; label: string; params?: Record<string, unknown>; stats?: Record<string, unknown> }
-    /** additive: which burn-in overlays (`services/video/burnIn.ts`) were drawn into the frames */
+    /** additive: which burn-in overlays (`services/burnIn.ts`) were drawn into the frames */
     burnIn?: string[]
     /** additive: stabiliser options in force and the re-timer's mode/stats (`algo/retime.ts`) */
     stabiliser?: { strength: string; rotation: boolean; edges: string }
@@ -236,7 +243,8 @@ export async function saveSnapshot(blob: Blob, meta: { position?: GalleryItem['p
 
 export async function saveVideo(blob: Blob, thumb: Blob | null, meta: { durationS: number; fps: number; source: string; width: number; height: number; position?: GalleryItem['position']
   codec?: string; bitrateBps?: number; frames?: VideoFrameLog[]
-  encoder?: 'webcodecs' | 'mediarecorder'; container?: 'mp4' | 'webm'; quality?: string; keyframeS?: number
+  encoder?: 'webcodecs' | 'mediarecorder' | 'device-h264'; container?: 'mp4' | 'webm'; quality?: string; keyframeS?: number
+  sensor?: NonNullable<GalleryItem['video']>['sensor']
   stabilised?: boolean; deflickered?: boolean; framesDropped?: number; framesDuplicated?: number
   mode?: NonNullable<GalleryItem['video']>['mode']; burnIn?: string[]
   stabiliser?: NonNullable<GalleryItem['video']>['stabiliser']; retime?: NonNullable<GalleryItem['video']>['retime'] }): Promise<GalleryItem> {
@@ -248,7 +256,7 @@ export async function saveVideo(blob: Blob, thumb: Blob | null, meta: { duration
     video: {
       durationS: meta.durationS, fps: meta.fps, source: meta.source, mime: blob.type, codec: meta.codec, bitrateBps: meta.bitrateBps, frameCount: frames?.length, frameLog: frames ? 'frames' : undefined,
       stabilised: meta.stabilised, encoder: meta.encoder, container: meta.container, quality: meta.quality, keyframeS: meta.keyframeS, deflickered: meta.deflickered, framesDropped: meta.framesDropped, framesDuplicated: meta.framesDuplicated,
-      mode: meta.mode, burnIn: meta.burnIn?.length ? meta.burnIn : undefined, stabiliser: meta.stabiliser, retime: meta.retime,
+      mode: meta.mode, burnIn: meta.burnIn?.length ? meta.burnIn : undefined, stabiliser: meta.stabiliser, retime: meta.retime, sensor: meta.sensor,
     },
     sample: currentSample(),
   }

@@ -9,8 +9,7 @@
  *  amplitude); the difference between the raw and the filtered trajectory is the jitter to remove,
  *  clamped to a small margin so a mistrack can never push the frame far off-canvas.
  *
- *  Rotation (`docs/video-research/motion.md`, proposal 2(d) and the "similarity stabilisation"
- *  addendum): with `rotation: true` the left and right thirds of the tracking frame are registered
+ *  Rotation ("similarity stabilisation"): with `rotation: true` the left and right thirds of the tracking frame are registered
  *  separately (two `displacement()` calls on patches offset by the whole-frame integer shift, so both
  *  see the same content) and the in-plane rotation is `θ = atan2(dy_R − dy_L, baseline)`, where
  *  `baseline` is the distance between the two patch centres. θ has its own one-euro filter

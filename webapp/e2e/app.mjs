@@ -28,6 +28,12 @@ async function position() {
 }
 const logHas = (re, timeout) => page.waitForFunction((src) => new RegExp(src).test(document.querySelector('pre.log')?.textContent || ''), re.source, { timeout })
 const expect = (cond, msg) => { if (!cond) throw new Error(msg) }
+/** JSON-RPC over the device's `POST /rpc`, from Node (not the page, so nothing reaches its console). */
+async function rpc(method, params) {
+  const r = await (await page.request.post(base + '/rpc', { data: { jsonrpc: '2.0', method, params } })).json()
+  if (r.error) throw new Error(`${method}: ${r.error.message}`)
+  return r.result
+}
 
 // Live's right-hand panels live behind a one-panel drawer opened from the tool rail
 // (components/ToolRail.svelte); inactive panels are `display: none`, so open the right tool before
@@ -109,10 +115,13 @@ await step('RAW photo develops to a 16-bit PNG in the gallery', async () => {
 await step('RAW average photo (device-side frame averaging)', async () => {
   await nav('live')
   await tool('Photo')
-  await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'rawavg')
+  await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'raw')
+  const frames = page.locator('.panel:has(h3:has-text("Photo")) input[aria-label="raw frames"]')
+  await frames.click({ clickCount: 3 }); await frames.pressSequentially('4')
   await page.click('button:has-text("Take photo")')
   await page.waitForFunction(() => /saved "RAW average/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 120000 })
     .catch(async () => { throw new Error('rawavg photo did not finish: ' + (await page.locator('.panel:has(h3:has-text("Photo"))').innerText()).replace(/\s+/g, ' ').slice(-160)) })
+  await frames.click({ clickCount: 3 }); await frames.pressSequentially('1')
   await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'single')
   await nav('gallery'); await page.waitForTimeout(600)
   expect(/RAW average/.test(await page.locator('main').innerText()), 'gallery does not list the RAW average item')
@@ -121,35 +130,15 @@ await step('RAW average photo (device-side frame averaging)', async () => {
 await step('HDR (RAW) photo merges a linear exposure bracket', async () => {
   await nav('live')
   await tool('Photo')
-  await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'hdrraw')
+  await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'hdr')
+  await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="hdr source"]', 'raw')
   await page.click('button:has-text("Take photo")')
   await page.waitForFunction(() => /saved "HDR RAW/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 120000 })
     .catch(async () => { throw new Error('hdrraw photo did not finish: ' + (await page.locator('.panel:has(h3:has-text("Photo"))').innerText()).replace(/\s+/g, ' ').slice(-160)) })
+  await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="hdr source"]', 'jpeg')
   await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'single')
   await nav('gallery'); await page.waitForTimeout(600)
   expect(/HDR RAW/.test(await page.locator('main').innerText()), 'gallery does not list the HDR RAW item')
-})
-
-if (moves) await step('focus stack photo returns to the starting z', async () => {
-  await nav('live')
-  await tool('Photo')
-  const z0 = (await position()).z
-  await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'focus')
-  const n = page.locator('.panel:has(h3:has-text("Photo")) input[aria-label="focus stack slices"]')
-  await n.click({ clickCount: 3 }); await n.pressSequentially('3')
-  await page.click('button:has-text("Take photo")')
-  await page.waitForFunction(() => /saved "Focus stack/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 90000 })
-    .catch(async () => { throw new Error('focus stack did not finish: ' + (await page.locator('.panel:has(h3:has-text("Photo"))').innerText()).replace(/\s+/g, ' ').slice(-160)) })
-  await page.waitForTimeout(500)
-  expect(Math.abs((await position()).z - z0) <= 1, `z ended at ${(await position()).z}, started at ${z0}`)
-  const info = await page.locator('.panel:has(h3:has-text("Photo"))').innerText()
-  await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'single')
-  await nav('gallery'); await page.waitForTimeout(600)
-  const g = await page.locator('main').innerText()
-  const m = g.match(/from each: ([\d% ]+)/)
-  expect(!!m, 'gallery does not list per-slice contributions: ' + g.replace(/\s+/g, ' ').slice(0, 160))
-  const shares = m[1].trim().split(/\s+/).map((s) => parseInt(s))
-  expect(shares.length === 3 && shares.filter((s) => s > 5).length >= 2, `stack did not draw on several slices: ${m[1]} (${info.replace(/\s+/g, ' ').slice(-80)})`)
 })
 
 await step('camera controls: manual exposure slider and auto toggles', async () => {
@@ -258,7 +247,7 @@ if (moves) await step('scan 2×2 stitches into the gallery', async () => {
 if (moves) await step('fine focus stack centres on the focus plane and fuses several slices', async () => {
   await nav('live')
   await tool('Photo')
-  await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'focusfine')
+  await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'stack')
   const n = page.locator('.panel:has(h3:has-text("Photo")) input[aria-label="focus stack slices"]')
   await n.click({ clickCount: 3 }); await n.pressSequentially('5')
   await page.click('button:has-text("Take photo")')
@@ -276,6 +265,40 @@ if (moves) await step('fine focus stack centres on the focus plane and fuses sev
   expect(shares.filter((s) => s > 5).length >= 2, `fine stack did not draw on several slices: ${m[1]}`)
 })
 
+if (moves) await step('sweep focus stack records one z sweep from the sensor, fuses the sharp frames and ends in focus', async () => {
+  await nav('live')
+  const panel = await tool('Photo')
+  await panel.locator('select[aria-label="capture mode"]').selectOption('stack')
+  const cap = panel.locator('select[aria-label="focus stack capture"]')
+  const sweepOk = await cap.locator('option[value="sweep"]').evaluate((o) => !o.disabled)
+  expect(sweepOk, 'the fake offers no sensor recording (PyAV missing from the device venv?)')
+  await cap.selectOption('sweep')
+  const n = panel.locator('input[aria-label="focus stack slices"]')
+  await n.click({ clickCount: 3 }); await n.pressSequentially('7')
+  const before = await position()
+  await rpc('stage.move_rel', { z: 120, compensate: false })
+  await page.click('button:has-text("Take photo")')
+  await page.waitForFunction(() => /saved "Sweep focus stack/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 120000 })
+    .catch(async () => { throw new Error('sweep stack did not finish: ' + (await panel.innerText()).replace(/\s+/g, ' ').slice(-240)) })
+  await page.waitForTimeout(500)
+  const z = (await position()).z
+  expect(Math.abs(z) < 60, `sweep stack ended at z=${z} (started ${before.z}+120); the fake specimen is in focus at z=0`)
+  // the stage speed is restored
+  const st = await rpc('stage.status')
+  expect(st.step_time_us === 1000, `stage step time left at ${st.step_time_us} µs`)
+  // stills work again once the recording has closed
+  const snap = await page.request.get(base + '/snapshot.jpg')
+  expect(snap.status() === 200, `snapshot after the sweep: ${snap.status()}`)
+  await cap.selectOption('stills')
+  await panel.locator('select[aria-label="capture mode"]').selectOption('single')
+  await nav('gallery'); await page.waitForTimeout(600)
+  const g = await page.locator('main').innerText()
+  const m = g.match(/sweep focus stack \(pyramid\)[\s\S]{0,160}?from each: ([\d% ]+)/)
+  expect(!!m, 'gallery does not describe the sweep stack: ' + g.replace(/\s+/g, ' ').slice(0, 200))
+  const shares = m[1].trim().split(/\s+/).map((s) => parseInt(s))
+  expect(shares.filter((s) => s > 5).length >= 2, `sweep stack did not draw on several slices: ${m[1]}`)
+})
+
 if (moves) await step('fine focus stack from RAW fuses 16-bit slices and renders a relief', async () => {
   // Regression: the RAW path fuses to a Uint16Array, and the relief base was downscaled 4x while the
   // encode still used full width/height -> "Failed to construct 'ImageData'". `focusfine` (8-bit)
@@ -283,12 +306,14 @@ if (moves) await step('fine focus stack from RAW fuses 16-bit slices and renders
   await nav('live')
   await tool('Photo')
   const panel = '.panel:has(h3:has-text("Photo"))'
-  await page.selectOption(`${panel} select[aria-label="capture mode"]`, 'focusfineraw')
+  await page.selectOption(`${panel} select[aria-label="capture mode"]`, 'stack')
+  await page.check(`${panel} input[aria-label="stack from raw"]`)
   const n = page.locator(`${panel} input[aria-label="focus stack slices"]`)
   await n.click({ clickCount: 3 }); await n.pressSequentially('3')
   await page.click('button:has-text("Take photo")')
   await page.waitForFunction(() => /saved "Fine focus stack RAW/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 300000 })
     .catch(async () => { throw new Error('RAW fine stack did not finish: ' + (await page.locator(panel).innerText()).replace(/\s+/g, ' ').slice(-240)) })
+  await page.uncheck(`${panel} input[aria-label="stack from raw"]`)
   await page.selectOption(`${panel} select[aria-label="capture mode"]`, 'single')
   await nav('gallery'); await page.waitForTimeout(600)
   const g = await page.locator('main').innerText()
@@ -327,6 +352,7 @@ await step('live focus stack builds a composite and saves it', async () => {
 await step('video recording (stabilise on) lands in the gallery and opens in the viewer', async () => {
   await nav('live')
   await tool('Photo')
+  await videoSource(page.locator('.panel:has(h3:has-text("Photo"))'), 'view')
   const stabilise = page.locator('.panel:has(h3:has-text("Photo")) label:has-text("Stabilise") input[type=checkbox]')
   if (!(await stabilise.isChecked())) await stabilise.check()
   await page.click('button:has-text("Record video")')
@@ -528,7 +554,7 @@ if (moves) await step('super-resolution RAW planes (no demosaic) drizzles a 2x2 
 if (moves) await step('fine focus stack produces a depth map with an image/depth/relief toggle', async () => {
   await nav('live')
   await tool('Photo')
-  await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'focusfine')
+  await page.selectOption('.panel:has(h3:has-text("Photo")) select[aria-label="capture mode"]', 'stack')
   const n = page.locator('.panel:has(h3:has-text("Photo")) input[aria-label="focus stack slices"]')
   await n.click({ clickCount: 3 }); await n.pressSequentially('5')
   await page.click('button:has-text("Take photo")')
@@ -621,12 +647,24 @@ if (moves) await step('a recorded macro of two jogs replays and returns the stag
 // time-lapse MP4 export (services/timelapseExport.ts, workers/encodeWorker.ts). The default-settings
 // recording is already covered by 'video recording (stabilise on) lands in the gallery ...' above
 // (same UI, unchanged text: "Record video" / "Stop · N s" / "saved \"Video live view ...\"" / the
-// gallery's "video · N s · live view" chip); these two add container/codec choice and the new export.
+// gallery's "video · N s · live view" chip); these add container/codec choice, constant-rate timing
+// with a burn-in, and the new export.
+/** Pick the recording source when the device offers the sensor path (fake with PyAV, or the Pi). */
+async function videoSource(panel, value) {
+  const sel = panel.locator('select[aria-label="video source"]')
+  if (await sel.count()) await sel.selectOption(value)
+}
+async function openEncoding(panel) {
+  const d = panel.locator('details:has(summary:has-text("Encoding and overlays"))')
+  if (!(await d.evaluate((el) => el.open))) await d.locator('summary').click()
+}
 
 await step('recording with a non-default container/codec still lands in the gallery as a playable video', async () => {
   await nav('live')
   await tool('Photo')
   const panel = page.locator('.panel:has(h3:has-text("Photo"))')
+  await videoSource(panel, 'view')
+  await openEncoding(panel)
   await panel.locator('label:has-text("Container") select').selectOption('webm')
   await panel.locator('label:has-text("Codec") select').selectOption('vp9')
   await page.click('button:has-text("Record video")')
@@ -643,24 +681,11 @@ await step('recording with a non-default container/codec still lands in the gall
   // restore the defaults the other steps (and PhotoPanel's own persisted settings) expect
   await nav('live')
   await tool('Photo')
+  await openEncoding(panel)
   await panel.locator('label:has-text("Container") select').selectOption('mp4')
   await panel.locator('label:has-text("Codec") select').selectOption('auto')
 })
 
-// ---- video modes (services/video/videoModes.ts): same Record button, a mode picker like the photo modes ----
-async function recordMode(modeId, seconds, savedRe) {
-  await nav('live')
-  const panel = await tool('Photo')
-  // the mode steps compare output sizes with the stream size, so record without the stabiliser's crop margin
-  const stabilise = panel.locator('label:has-text("Stabilise") input[type=checkbox]')
-  if (await stabilise.isChecked()) await stabilise.uncheck()
-  await panel.locator('select[aria-label="video mode"]').selectOption(modeId)
-  await page.click('button:has-text("Record video")')
-  await page.waitForFunction(() => /Stop · \d+ s/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 8000 })
-  await page.waitForTimeout(seconds * 1000)
-  await page.click('button:has-text("Stop ·")')
-  await page.waitForFunction((src) => new RegExp(src).test(document.querySelector('main')?.textContent || ''), savedRe.source, { timeout: 20000 })
-}
 async function openLatestVideo(cardText) {
   await nav('gallery'); await page.waitForTimeout(600)
   await page.locator(`.card:has-text("${cardText}") button:has-text("Open")`).first().click()
@@ -673,83 +698,16 @@ async function openLatestVideo(cardText) {
   await page.click('button:has-text("close")')
   return { size, details }
 }
-/** Stream frame width as the Photo panel reports it ("stream N kB/frame · W×H"). */
-async function streamWidth() {
-  await nav('live'); await tool('Photo')
-  const m = (await page.locator('.panel:has(h3:has-text("Photo"))').innerText()).match(/· (\d+)×(\d+)/)
-  expect(m, 'Photo panel does not show the stream size')
-  return +m[1]
-}
 
-await step('binned video mode records at half size and the viewer shows the mode', async () => {
-  const sw = await streamWidth()
-  await recordMode('bin', 2, /saved "Video binned/)
-  const { size, details } = await openLatestVideo('Video binned')
-  expect(size.w === Math.floor(sw / 2), `binned video width ${size.w}, expected ${Math.floor(sw / 2)}`)
-  expect(/mode Binned/.test(details), 'viewer lacks the video mode line')
-})
-
-await step('motion highlight mode with the elapsed-time burn-in records and saves its stats', async () => {
+await step('constant-rate timing with the elapsed-time burn-in records a playable video with its meta', async () => {
   await nav('live')
   const panel = await tool('Photo')
-  await panel.locator('.burnin label:has-text("Elapsed time") input').check()
-  const sw = await streamWidth()
-  await recordMode('motion', 2, /saved "Video motion highlight/)
-  const { size, details } = await openLatestVideo('Video motion highlight')
-  expect(size.w === sw, `motion video width ${size.w}, expected the stream's ${sw}`)
-  expect(/mode Motion highlight/.test(details) && /burn-in: time/.test(details), 'viewer lacks mode/burn-in details')
-  await nav('live'); await tool('Photo')
-  await panel.locator('.burnin label:has-text("Elapsed time") input').uncheck()
-})
-
-await step('time compression mode keeps one frame per interval and re-times them', async () => {
-  await nav('live')
-  const panel = await tool('Photo')
-  await panel.locator('select[aria-label="video mode"]').selectOption('timelapse')
-  const every = panel.locator('label:has-text("Every (s)") input')
-  await every.click({ clickCount: 3 }); await every.pressSequentially('0.5'); await every.dispatchEvent('change')
-  await recordMode('timelapse', 3, /saved "Video time compression/)
-  const { details } = await openLatestVideo('Video time compression')
-  const m = details.match(/kept (\d+)/)
-  expect(m && +m[1] >= 3 && +m[1] <= 9, `expected 3–9 kept frames over 3 s at 0.5 s, got ${m?.[1]}`)
-})
-
-if (moves) await step('extended-depth-of-field video dithers z and returns to the starting z', async () => {
-  await nav('live')
-  const z0 = (await position()).z
-  await recordMode('edof', 4, /saved "Video extended depth of field/)
-  await page.waitForFunction((z) => { const m = document.querySelector('nav')?.textContent?.match(/z\s+(-?\d+)/); return m && +m[1] === z }, z0, { timeout: 8000 })
-    .catch(async () => { throw new Error(`EDOF video left z at ${(await position()).z}, started at ${z0}`) })
-  const { details } = await openLatestVideo('Video extended depth of field')
-  expect(/mode Extended depth of field/.test(details) && /framesStacked [1-9]/.test(details), `EDOF stats missing: ${details.slice(0, 200)}`)
-})
-
-if (moves) await step('super-resolution video dithers xy, drizzles and returns to the start', async () => {
-  await nav('live')
-  const p0 = await position()
-  const sw = await streamWidth()
-  await recordMode('superres', 5, /saved "Video super-resolution/)
-  await page.waitForFunction((x) => { const m = document.querySelector('nav')?.textContent?.match(/x\s+(-?\d+)/); return m && +m[1] === x }, p0.x, { timeout: 8000 })
-    .catch(async () => { throw new Error(`SR video left x at ${(await position()).x}, started at ${p0.x}`) })
-  const { size, details } = await openLatestVideo('Video super-resolution')
-  expect(size.w === 2 * (Math.floor(sw / 2) & ~1), `SR video width ${size.w}: expected ${2 * (Math.floor(sw / 2) & ~1)}`)
-  expect(/fused [1-9]/.test(details), `SR stats missing: ${details.slice(0, 200)}`)
-  await nav('live')
-  const panel = await tool('Photo')
-  await panel.locator('select[aria-label="video mode"]').selectOption('plain')
-  await panel.locator('label:has-text("Stabilise") input[type=checkbox]').check()
-})
-
-await step('constant-rate timing and rotation stabilisation record a playable video with their meta', async () => {
-  await nav('live')
-  const panel = await tool('Photo')
+  await videoSource(panel, 'view')
+  await openEncoding(panel)
   await panel.locator('label:has-text("Timing") select').selectOption('cfr')
   const fps = panel.locator('label:has-text("fps") input[type=number]')
   await fps.click({ clickCount: 3 }); await fps.pressSequentially('30'); await fps.dispatchEvent('change')
-  const stab = panel.locator('label:has-text("Stabilise") input[type=checkbox]')
-  if (!(await stab.isChecked())) await stab.check()
-  await panel.locator('label:has-text("Rotation") input[type=checkbox]').check()
-  await panel.locator('select[aria-label="video mode"]').selectOption('plain')
+  await panel.locator('.burnin label:has-text("Elapsed time") input').check()
   await page.click('button:has-text("Record video")')
   await page.waitForFunction(() => /Stop · \d+ s/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 8000 })
   await page.waitForTimeout(2500)
@@ -757,10 +715,11 @@ await step('constant-rate timing and rotation stabilisation record a playable vi
   await page.waitForFunction(() => /saved "Video live view/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 20000 })
   const { size, details } = await openLatestVideo('Video live view')
   expect(size.d > 1.5, `cfr video duration ${size.d}`)
-  expect(/timing cfr 30 fps · \d+ duplicated/.test(details) && /stabiliser normal \+ rotation/.test(details), `meta missing: ${details.slice(0, 200)}`)
+  expect(/timing cfr 30 fps · \d+ duplicated/.test(details) && /burn-in: time/.test(details), `meta missing: ${details.slice(0, 200)}`)
   await nav('live'); await tool('Photo')
+  await openEncoding(panel)
   await panel.locator('label:has-text("Timing") select').selectOption('vfr')
-  await panel.locator('label:has-text("Rotation") input[type=checkbox]').uncheck()
+  await panel.locator('.burnin label:has-text("Elapsed time") input').uncheck()
 })
 
 await step('Look panel CDL grade changes the live canvas and a .cdl round-trips through save-as-LUT', async () => {
@@ -792,59 +751,50 @@ await step('focus peaking paints the live canvas only while enabled', async () =
   await page.waitForTimeout(600)
 })
 
-await step('projection and optical-flow modes record at the stream size with their stats', async () => {
-  const sw = await streamWidth()
-  await recordMode('project', 2, /saved "Video projection over time/)
-  let r = await openLatestVideo('Video projection over time')
-  expect(r.size.w === sw && /kind max/.test(r.details), `projection: width ${r.size.w}, details ${r.details.slice(0, 120)}`)
-  await recordMode('flow', 2, /saved "Video optical flow/)
-  r = await openLatestVideo('Video optical flow')
-  expect(r.size.w === sw && /mode Optical flow/.test(r.details), `flow: width ${r.size.w}`)
-})
-
-await step('kymograph mode outputs a side-by-side space–time image', async () => {
-  const sw = await streamWidth()
-  await recordMode('kymograph', 2, /saved "Video kymograph/)
-  const { size, details } = await openLatestVideo('Video kymograph')
-  expect(size.w > sw, `kymograph side-by-side width ${size.w} should exceed the stream's ${sw}`)
-  expect(/rows 600/.test(details) && /length \d+/.test(details), `kymograph stats missing: ${details.slice(0, 160)}`)
-})
-
-await step('motion-triggered mode arms and records when the fake\'s clock text changes', async () => {
-  // the fake scene is static except for its on-frame clock, which redraws once a second: a real,
-  // small motion event. Stage moves and light changes are inhibited by design, so they are not used.
+await step('sensor recording writes the camera\'s own H.264 into an MP4 without re-encoding', async () => {
   await nav('live')
   const panel = await tool('Photo')
-  await panel.locator('select[aria-label="video mode"]').selectOption('trigger')
-  const sens = panel.locator('label:has-text("Trigger (%)") input')
-  await sens.click({ clickCount: 3 }); await sens.pressSequentially('0.01'); await sens.dispatchEvent('change')
-  const stabilise = panel.locator('label:has-text("Stabilise") input[type=checkbox]')
-  if (await stabilise.isChecked()) await stabilise.uncheck()
+  const src = panel.locator('select[aria-label="video source"]')
+  if (!(await src.count())) { console.log('     (device offers no sensor recording: skipped)'); return }
+  await src.selectOption('sensor')
+  for (const label of ['Stabilise', 'Deflicker', 'Bake look']) {
+    const box = panel.locator(`label:has-text("${label}") input[type=checkbox]`)
+    if (await box.isChecked()) await box.uncheck()
+  }
+  // anything that changes pixels or timing makes the browser re-encode; an earlier step may have left some on
+  await openEncoding(panel)
+  await panel.locator('label:has-text("Timing") select').selectOption('vfr')
+  for (const box of await panel.locator('.burnin input[type=checkbox]').all()) if (await box.isChecked()) await box.uncheck()
+  expect(/nothing re-encoded/.test(await panel.innerText()), 'panel does not say the recording is written as encoded')
   await page.click('button:has-text("Record video")')
-  await page.waitForFunction(() => /Stop · \d+ s/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 8000 })
-  await page.waitForTimeout(6500)   // 2 s arming + a few clock ticks
+  await page.waitForFunction(() => /Stop · \d+ s/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 10000 })
+  // stills are refused while the camera holds the recording mode (asked from Node, not the page, so the
+  // expected 409 does not land in the page console the final step checks)
+  const still = (await page.request.get(`${base}/snapshot.jpg?full=1`)).status()
+  expect(still === 409, `full-res still during a recording answered ${still}, expected 409`)
+  await page.waitForTimeout(3000)
   await page.click('button:has-text("Stop ·")')
-  await page.waitForFunction(() => /saved "Video motion-triggered|nothing recorded/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 20000 })
-  const txt = await panel.innerText()
-  expect(/saved "Video motion-triggered/.test(txt), `trigger did not fire on the clock: ${txt.match(/(saved|nothing)[^\n]*/)?.[0]}`)
-  const { details } = await openLatestVideo('Video motion-triggered')
-  expect(/events [1-9]/.test(details) && /preRollS 2/.test(details), `trigger stats: ${details.slice(0, 200)}`)
-})
-
-if (moves) await step('focus servo mode probes z and returns to the starting z', async () => {
-  await nav('live')
-  const panel = await tool('Photo')
-  await panel.locator('select[aria-label="video mode"]').selectOption('servo')
-  const every = panel.locator('label:has-text("Every (s)") input')
-  await every.click({ clickCount: 3 }); await every.pressSequentially('5'); await every.dispatchEvent('change')
-  const z0 = (await position()).z
-  await recordMode('servo', 7, /saved "Video focus servo/)
-  await page.waitForFunction((z) => { const m = document.querySelector('nav')?.textContent?.match(/z\s+(-?\d+)/); return m && +m[1] === z }, z0, { timeout: 8000 })
-    .catch(async () => { throw new Error(`servo left z at ${(await position()).z}, started at ${z0}`) })
-  const { details } = await openLatestVideo('Video focus servo')
-  expect(/nudges [1-9]/.test(details), `servo did not nudge: ${details.slice(0, 160)}`)
-  await nav('live'); await (await tool('Photo')).locator('select[aria-label="video mode"]').selectOption('plain')
-  await panel.locator('label:has-text("Stabilise") input[type=checkbox]').check()
+  await page.waitForFunction(() => /saved "Video \d+×\d+/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 20000 })
+    .catch(async () => { throw new Error('sensor recording did not save: ' + (await panel.innerText()).replace(/\s+/g, ' ').slice(-200)) })
+  const m = (await panel.innerText()).match(/saved "Video (\d+)×(\d+)/)
+  expect(m && +m[1] > 820, `sensor recording is ${m?.[1]} px wide, expected more than the 820-px live view`)
+  // the device is back in its stream configuration
+  let back = 0
+  for (let i = 0; i < 20 && back !== 200; i++) { back = (await page.request.get(`${base}/snapshot.jpg?full=1`)).status(); if (back !== 200) await page.waitForTimeout(500) }
+  expect(back === 200, `full-res still after the recording answered ${back}`)
+  await nav('gallery'); await page.waitForTimeout(600)
+  await page.locator(`.card:has-text("Video ${m[1]}×${m[2]}") button:has-text("Open")`).first().click()
+  await page.waitForSelector('.overlay button.details-toggle', { timeout: 5000 })
+  await page.click('.overlay button.details-toggle')
+  const details = await page.locator('.overlay .details').innerText()
+  expect(/written as recorded, not re-encoded/.test(details) && /avc1\./.test(details), `details: ${details.replace(/\s+/g, ' ').slice(0, 240)}`)
+  const playable = await page.evaluate(() => document.createElement('video').canPlayType('video/mp4; codecs="avc1.640029"'))
+  if (playable) {
+    const dur = await page.locator('video.video').evaluate((v) => new Promise((r) => { if (v.readyState >= 1) r(v.duration); else v.onloadedmetadata = () => r(v.duration) }))
+    expect(dur > 2, `sensor video duration ${dur}`)
+  }
+  await page.click('.overlay button.details-toggle')
+  await page.click('button:has-text("close")')
 })
 
 await step('time-lapse exports to MP4 via WebCodecs', async () => {

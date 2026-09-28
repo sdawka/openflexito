@@ -1,5 +1,4 @@
-/** Output-timestamp re-timing for the recorder (`docs/video-research/motion.md`, proposal 8 and the
- *  "constant frame rate output" addendum). The recorder hands every frame it is about to encode to
+/** Output-timestamp re-timing for the recorder (constant frame rate output). The recorder hands every frame it is about to encode to
  *  `Retimer.push(tSec)` with the frame's device time and gets back whether to encode it, at what
  *  output time, and how many extra copies to add first:
  *

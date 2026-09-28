@@ -14,7 +14,7 @@ export interface DeflickerOptions {
   usePercentile: boolean
   /** measure the *background* — the mean luma of the brightest 30 % of unclipped pixels — instead
    *  of the whole frame. In LED brightfield that is the illuminant itself, so an organism drifting
-   *  through no longer "breathes" the gain (research note `docs/video-research/colour.md`). Takes
+   *  through no longer "breathes" the gain. Takes
    *  precedence over `usePercentile`. */
   background?: boolean
 }

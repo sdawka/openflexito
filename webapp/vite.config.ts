@@ -21,6 +21,7 @@ export default defineConfig({
       // routes in device/openflexito/web.py.
       '/flat.bin': { target: device, changeOrigin: true },
       '/bracket.bin': { target: device, changeOrigin: true },
+      '/record.h264': { target: device, changeOrigin: true },
     },
   },
   build: { target: 'es2022', sourcemap: false },

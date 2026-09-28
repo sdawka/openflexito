@@ -305,7 +305,20 @@ so the view follows real changes, and any stage motion resets it). Every 200 fra
 reference re-anchors to the composite itself instead of staying pinned to the stale first frame, so slow
 continuous drift no longer accumulates ever-larger bilinear softening. Save stores the composite.
 
-**Record video** (Photo panel) records what is shown, stream or live stack, into a WebM in the gallery
+**Record video** (Photo panel) has two sources. **Sensor** (the default) asks the device for
+`/record.h264`: for as long as that connection is open the camera runs the IMX219's 2×2-binned
+1640×1232 mode (every photosite contributes, full field, up to 30 fps) with `main` at 1640×1232 into
+the Pi's hardware H.264 encoder (up to 25 Mbit/s, keyframe every second) and `lores` at the stream size
+into the MJPEG encoder, so the live view carries on while the 410×308 lores stream pauses. Each access
+unit is framed with its SensorTimestamp and written by the browser straight into a fast-start MP4
+(mediabunny, `H264PassthroughMux`): 4× the pixels of the live view, inter-frame compression instead of
+~100 kB JPEGs, and no decode or re-encode. Stills, RAW and brackets answer 409 while it runs; closing the
+tab ends it. When stabilise, deflicker, burn-in, constant-rate timing, live denoise or the baked look is
+on, the browser decodes the H.264 (WebCodecs), processes it at full size and re-encodes at 1.5× the
+camera's bitrate; a browser without an H.264 decoder falls back to the live view. Unverified on the Pi
+3B+ so far: sustained 1640×1232 × 30 fps H.264 alongside the MJPEG preview (encoder throughput and the
+~40 Mbit/s the two streams need together), see TODO.md. The fake camera stands in with PyAV's libx264.
+**Live view** records what is shown, stream or live stack, as before
 (`services/recorder.svelte.ts`), played back in the viewer. The plain live-view path now reads the stream
 through `api/mjpegStream.ts` (`fetch` + `ReadableStream`, decoding each multipart JPEG part with
 `createImageBitmap`) instead of sampling the DOM `<img src=stream.mjpg>`, so every recorded frame is a

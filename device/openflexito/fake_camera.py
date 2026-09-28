@@ -9,6 +9,7 @@ import logging
 import math
 import threading
 import time
+from fractions import Fraction
 from pathlib import Path
 
 from .clock import now_ns
@@ -37,6 +38,9 @@ class FakeCamera(CameraBase):
         self.position_provider = None
         self._specimen = None
         self._rng = None  # numpy Generator for raw shot noise (lazy: numpy is a dev/pi extra)
+        # recording: PyAV's libx264 stands in for the Pi's hardware H.264 encoder (optional dev extra)
+        self._rec_lock = threading.Lock()
+        self._rec: dict | None = None
 
     PX_PER_STEP = 1.0          # image pixels per motor step at stream resolution (a 1640 px field is ~1640 steps)
     AXIS_ROTATION_DEG = 4.0    # the camera is never perfectly aligned with the stage
@@ -61,13 +65,15 @@ class FakeCamera(CameraBase):
 
     RENDER_SCALE = 0.5  # render (and blur) at half stream resolution, then resize: keeps ~15 fps on a laptop
 
-    def _render(self, pos: dict):
-        """Specimen view for the current stage position at RENDER_SCALE of the stream size."""
+    def _render(self, pos: dict, scale: float | None = None):
+        """Specimen view for the current stage position at `scale` (default RENDER_SCALE) of the
+        stream size."""
         from PIL import Image, ImageChops, ImageDraw, ImageFilter
         if self._specimen is None:
             self._specimen = self._make_specimen()
         sw, sh = self.stream_size
-        rw, rh = int(sw * self.RENDER_SCALE), int(sh * self.RENDER_SCALE)
+        scale = self.RENDER_SCALE if scale is None else scale
+        rw, rh = int(sw * scale), int(sh * scale)
         a = math.radians(self.AXIS_ROTATION_DEG)
         # stage x/y -> image shift in stream pixels
         dx = (pos["x"] * math.cos(a) - pos["y"] * math.sin(a)) * self.PX_PER_STEP
@@ -78,7 +84,7 @@ class FakeCamera(CameraBase):
         img = crop.resize((rw, rh), Image.BILINEAR)
         defocus = abs(pos.get("z", 0) + self.focus_offset)
         if defocus:
-            img = img.filter(ImageFilter.GaussianBlur(min(20, defocus / 100) * self.RENDER_SCALE))
+            img = img.filter(ImageFilter.GaussianBlur(min(20, defocus / 100) * scale))
         d = ImageDraw.Draw(img)
         d.text((10, 10), f"openflexito fake camera {time.strftime('%H:%M:%S')}  x{pos['x']} y{pos['y']} z{pos['z']}", fill=(40, 40, 40))
         return img
@@ -106,9 +112,17 @@ class FakeCamera(CameraBase):
         while not self._stop.is_set():
             ts = now_ns()
             meta = {**self._metadata(ts), "matched": True}
-            img = self._render(self._position())  # one render feeds both streams
+            with self._rec_lock:
+                rec = self._rec
+            if rec is not None:
+                # render at the full stream size so the recording is not an upscaled thumbnail
+                img = self._render(self._position(), scale=1.0)
+                self._record_frame(rec, img, ts)
+            else:
+                img = self._render(self._position())  # one render feeds both streams
             self.main.publish_threadsafe(self._jpeg(img, self.stream_size), meta)
-            self.lores.publish_threadsafe(self._jpeg(img, tuple(self.cfg.lores_size)), meta)
+            if rec is None:  # like the Pi, the lores stream pauses while recording
+                self.lores.publish_threadsafe(self._jpeg(img, tuple(self.cfg.lores_size)), meta)
             t += 1 / self.fps
             self._stop.wait(1 / self.fps)
 
@@ -121,6 +135,61 @@ class FakeCamera(CameraBase):
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=2)
+        if self._tap is not None:  # standby ends a running recording, as on the Pi
+            self._tap.close_threadsafe()
+            self._tap = None
+            self.recording = None
+        with self._rec_lock:
+            self._rec = None
+
+    # ---- recording ------------------------------------------------------------------------
+
+    def record_available(self) -> bool:
+        try:
+            import av
+        except ImportError:
+            return False
+        return "libx264" in av.codecs_available
+
+    async def _start_recording(self, tap, fps: int, bitrate: int, iperiod: int) -> None:
+        import av
+        w, h = self.cfg.record_size
+        codec = av.CodecContext.create("libx264", "w")
+        codec.width, codec.height, codec.pix_fmt = int(w), int(h), "yuv420p"
+        codec.time_base = Fraction(1, 1_000_000)
+        codec.framerate = Fraction(min(fps, int(self.fps)), 1)
+        codec.bit_rate = int(bitrate)
+        # like the Pi's encoder: no B-frames (decode order = presentation order), SPS/PPS in-band
+        codec.options = {"preset": "ultrafast", "tune": "zerolatency", "g": str(iperiod), "bf": "0",
+                         "x264-params": "repeat-headers=1"}
+        codec.open()
+        with self._rec_lock:
+            self._rec = {"tap": tap, "codec": codec, "size": (int(w), int(h)), "gap_ns": int(1e9 / fps), "last": None}
+
+    def _record_frame(self, rec: dict, img, ts: int) -> None:
+        import av
+        from PIL import Image
+        if rec["last"] is not None and ts - rec["last"] < rec["gap_ns"] * 0.9:
+            return
+        rec["last"] = ts
+        try:
+            frame = av.VideoFrame.from_image(img.resize(rec["size"], Image.BILINEAR)).reformat(format="yuv420p")
+            frame.pts = ts // 1000
+            for pkt in rec["codec"].encode(frame):
+                rec["tap"].put_threadsafe(bytes(pkt), int(pkt.pts) * 1000 if pkt.pts is not None else None, bool(pkt.is_keyframe))
+        except Exception:  # noqa: BLE001  keep the fake camera thread alive
+            log.exception("fake recording frame failed")
+
+    async def _stop_recording(self) -> None:
+        with self._rec_lock:
+            rec, self._rec = self._rec, None
+        if rec is None:
+            return
+        try:
+            for pkt in rec["codec"].encode(None):  # flush
+                rec["tap"].put_threadsafe(bytes(pkt), int(pkt.pts) * 1000 if pkt.pts is not None else None, bool(pkt.is_keyframe))
+        except Exception:  # noqa: BLE001
+            log.exception("fake recording flush failed")
 
     async def _apply_controls(self, controls: dict) -> None:
         return None

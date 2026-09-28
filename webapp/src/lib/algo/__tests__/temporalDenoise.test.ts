@@ -118,12 +118,20 @@ describe('TemporalDenoiser: performance at 1640x1232', () => {
     dn.push(frame(2), w, h, { dx: 0, dy: 0 })
 
     const frames = 20
-    const t0 = performance.now()
-    for (let f = 0; f < frames; f++) dn.push(frame(f + 10), w, h, { dx: 1, dy: 0 })
-    const elapsed = performance.now() - t0
-    const perFrame = elapsed / frames
+    // built before the clock starts: generating 2 MP of noise per frame is test setup, not the denoiser
+    const inputs = Array.from({ length: frames }, (_, f) => frame(f + 10))
+    const times: number[] = []
+    for (let f = 0; f < frames; f++) {
+      const t0 = performance.now()
+      dn.push(inputs[f], w, h, { dx: 1, dy: 0 })
+      times.push(performance.now() - t0)
+    }
+    // median, not mean: vitest runs other test files in parallel, and a frame that loses the CPU to
+    // one of them says nothing about the denoiser
+    const perFrame = [...times].sort((a, b) => a - b)[frames >> 1]
+    const elapsed = times.reduce((a, b) => a + b, 0)
     // eslint-disable-next-line no-console
-    console.log(`TemporalDenoiser.push @ 1640x1232: ${perFrame.toFixed(1)} ms/frame (${frames} frames, ${elapsed.toFixed(1)} ms total)`)
+    console.log(`TemporalDenoiser.push @ 1640x1232: ${perFrame.toFixed(1)} ms/frame median (${frames} frames, ${elapsed.toFixed(1)} ms total)`)
     expect(perFrame).toBeLessThan(150)
   })
 })
