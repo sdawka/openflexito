@@ -182,6 +182,7 @@ export class Recorder {
   start(source: FrameSource, label: string, opts: Partial<RecorderOptions> = {}): void {
     if (this.recording) return
     const o = { ...this.options, ...opts }
+    this.status = ''  // the previous recording's "saved …" is not news about this one
     const first = source()
     if (!first) { this.status = 'no frame to record yet'; return }
     this.beginCanvas(first.width, first.height, o)
@@ -214,6 +215,7 @@ export class Recorder {
   startStream(label = 'live view', opts: Partial<RecorderOptions> = {}): void {
     if (this.recording) return
     const o = { ...this.options, ...opts }
+    this.status = ''  // the previous recording's "saved …" is not news about this one
     this.label = label
     // the Stabilizer itself is created on the first frame (its shift clamp is in tracking-frame px,
     // which depend on the stream size); `stabilizeWanted` remembers the choice
@@ -255,6 +257,7 @@ export class Recorder {
   async startSensor(label: string, opts: Partial<RecorderOptions> = {}): Promise<void> {
     if (this.recording || this.recStream) return
     const o = { ...this.options, ...opts }
+    this.status = ''  // the previous recording's "saved …" is not news about this one
     const processed = needsProcessing(o)
     this.label = label
     this.recSeq = 0; this.recError = null; this.skipUntilKey = false
@@ -469,6 +472,12 @@ export class Recorder {
     this.canvas?.toBlob((b) => (this.thumb = b), 'image/jpeg', 0.8)
   }
 
+  /** Clear a "saved …" message after a while, unless something newer has replaced it. */
+  private clearStatusLater(): void {
+    const shown = this.status
+    setTimeout(() => { if (this.status === shown) this.status = '' }, 5000)
+  }
+
   private finishStart(): void {
     this.stabiliseUsed = this.stabilizeWanted
     this.deflickerUsed = this.optsUsed.deflicker
@@ -530,7 +539,7 @@ export class Recorder {
           stabilised: false, deflickered: false, sensor: sensorMeta(false),
         })
         this.status = `saved "${item.name}" (${r.durationS.toFixed(0)} s, ${r.frames} frames, ${(r.blob.size / 1048576).toFixed(1)} MB, the camera's own H.264)`
-        setTimeout(() => (this.status = ''), 5000)
+        this.clearStatusLater()
         return item
       }
       const sink = this.sink!; this.sink = null
@@ -553,7 +562,7 @@ export class Recorder {
         retime: retimeMeta, sensor: sensorMeta(true),
       })
       this.status = `saved "${item.name}" (${result.durationS.toFixed(0)} s, ${log.length} frames${result.dropped ? `, ${result.dropped} dropped` : ''}, ${(result.blob.size / 1048576).toFixed(1)} MB)`
-      setTimeout(() => (this.status = ''), 5000)
+      this.clearStatusLater()
       return item
     } finally {
       this.releaseActivity?.(); this.releaseActivity = null

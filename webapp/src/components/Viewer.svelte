@@ -274,6 +274,7 @@
       {#if item.stack}
         <div class="d-title">Focus stack</div>
         <div>method {item.stack.method ?? 'blocks'}{item.stack.source ? `, ${item.stack.source}` : ''}</div>
+        {#if item.stack.sweep}<div class="muted">sweep of {item.stack.sweep.range} steps, {item.stack.sweep.frames} frames at {item.stack.sweep.width}×{item.stack.sweep.height} · {item.stack.sweep.fps} fps · {item.stack.sweep.stepTimeUs} µs/step</div>{/if}
         {#if depthLegendInfo}<div>depth {depthLegendInfo.min.toFixed(depthLegendInfo.unit === 'µm' ? 2 : 0)}–{depthLegendInfo.max.toFixed(depthLegendInfo.unit === 'µm' ? 2 : 0)} {depthLegendInfo.unit}</div>{/if}
       {/if}
       {#if item.superres}

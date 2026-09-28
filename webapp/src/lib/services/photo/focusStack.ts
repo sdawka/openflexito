@@ -160,17 +160,8 @@ export async function takeFineFocusStack(o: FocusStackOptions, say: Say, meta: P
   const metas: (StillFrameMeta | null)[] = []
   let width = 0, height = 0
   const gains = liveGains(), params = source === 'raw' ? await tuningParams() : {}
-  const worker = new Worker(new URL('../../workers/stackWorker.ts', import.meta.url), { type: 'module' })
-  const post = (m: StackMessage, transfer?: Transferable[]) => worker.postMessage(m, transfer ?? [])
-  let progressHook: ((m: string) => void) | null = null
-  const finished = new Promise<{ data: Uint8ClampedArray | Uint16Array; width: number; height: number; contributions: number[]; shifts: { dx: number; dy: number }[]; depthIndex: Uint8Array }>((resolve, reject) => {
-    worker.onmessage = (ev) => {
-      if (ev.data.progress) progressHook?.(ev.data.progress)
-      else if (ev.data.error) reject(new Error(ev.data.error))
-      else if (ev.data.result) resolve(ev.data.result)
-    }
-    worker.onerror = (e) => reject(new Error(e.message))
-  })
+  const fuse = pyramidWorker()
+  const post = fuse.post
   await withCameraLock(async () => {
     try {
       // to the bottom of the stack with z backlash compensation, then up in verified raw steps
@@ -186,14 +177,14 @@ export async function takeFineFocusStack(o: FocusStackOptions, say: Say, meta: P
           const dev = await runRawWorker<RawRgb16Result>({ buffer: buf.buffer as ArrayBuffer, gains, params, want: 'rgb16' }, (m) => say(`${label}: ${m}`), 'develop')
           frames.push({ blob: await encodeRgba8(toRgba8({ data: dev.rgb16, width: dev.width, height: dev.height }, 2), 0.85), z })
           if (!i) { width = dev.width; height = dev.height; post({ type: 'init', width, height, depth: 16, count: slices, reference: 'middle', method: o.method }) }
-          progressHook = (m) => say(`fine stack: ${m}`)
+          fuse.onProgress = (m) => say(`fine stack: ${m}`)
           post({ type: 'add', index: i, data: dev.rgb16 }, [dev.rgb16.buffer])
         } else {
           const { blob, meta: frameMeta } = await captureFullWithMeta()
           frames.push({ blob, z }); metas.push(frameMeta)
           const img = await decode(blob)
           if (!i) { width = img.width; height = img.height; post({ type: 'init', width, height, depth: 8, count: slices, reference: 'middle', method: o.method }) }
-          progressHook = (m) => say(`fine stack: ${m}`)
+          fuse.onProgress = (m) => say(`fine stack: ${m}`)
           post({ type: 'add', index: i, data: img.data }, [img.data.buffer])
         }
       }
@@ -204,10 +195,66 @@ export async function takeFineFocusStack(o: FocusStackOptions, say: Say, meta: P
   }, { onError: (m) => say(`fine stack: ${m}`) })
   say('fine stack: fusing…')
   post({ type: 'finish' })
-  const r = await finished
-  worker.terminate()
+  const r = await fuse.finished
+  fuse.worker.terminate()
+  const reference = chooseReference(metas.length)
+  return saveFusedStack(r, {
+    label: 'fine stack', say, meta, frames, centreZ, step, span, source,
+    name: source === 'raw' ? `Fine focus stack RAW ${slices}×${step}` : `Fine focus stack ${slices}×${step}`,
+    capture: source === 'raw' ? undefined : metas[reference],
+    raw: source === 'raw' ? { gains, params } : undefined,
+  })
+}
+
+export type FusedStack = { data: Uint8ClampedArray | Uint16Array; width: number; height: number; contributions: number[]; shifts: { dx: number; dy: number }[]; depthIndex: Uint8Array }
+
+/** The pyramid fusion worker (`workers/stackWorker.ts`): `post` slices in capture order, then
+ *  `finish`; `finished` resolves with the fused image, per-slice contributions/shifts and the
+ *  winning-slice index per pixel. */
+export function pyramidWorker(): { worker: Worker; post: (m: StackMessage, transfer?: Transferable[]) => void; finished: Promise<FusedStack>; onProgress: ((m: string) => void) | null } {
+  const worker = new Worker(new URL('../../workers/stackWorker.ts', import.meta.url), { type: 'module' })
+  const h = {
+    worker,
+    post: (m: StackMessage, transfer?: Transferable[]) => worker.postMessage(m, transfer ?? []),
+    onProgress: null as ((m: string) => void) | null,
+    finished: null as unknown as Promise<FusedStack>,
+  }
+  h.finished = new Promise<FusedStack>((resolve, reject) => {
+    worker.onmessage = (ev) => {
+      if (ev.data.progress) h.onProgress?.(ev.data.progress)
+      else if (ev.data.error) reject(new Error(ev.data.error))
+      else if (ev.data.result) resolve(ev.data.result)
+    }
+    worker.onerror = (e) => reject(new Error(e.message))
+  })
+  return h
+}
+
+export interface SaveFusedOptions {
+  label: string
+  say: Say
+  meta: PhotoMeta
+  name: string
+  /** one per fused slice, in fusion order */
+  frames: { blob: Blob; z: number }[]
+  centreZ: number
+  step: number
+  span: number
+  source: 'jpeg' | 'raw' | 'sweep'
+  /** still metadata of the reference slice (JPEG paths) */
+  capture?: StillFrameMeta | Record<string, unknown> | null
+  /** set for a 16-bit RAW fusion */
+  raw?: { gains: [number, number]; params: RawDevelopRequest['params'] }
+  extraStack?: Record<string, unknown>
+}
+
+/** Depth map, relief and the gallery item for a pyramid-fused stack (fine stacks and the sweep
+ *  stack). Ends nothing on the stage: callers have already returned it. */
+export async function saveFusedStack(r: FusedStack, o: SaveFusedOptions): Promise<GalleryItem> {
+  const { label, say, meta, frames, centreZ, step, span, source } = o
+  const slices = frames.length
   const shares = r.contributions.map((c) => Math.round(c * 100))
-  say(`fine stack: done, taken from each slice: ${shares.map((s) => s + '%').join(' ')}`)
+  say(`${label}: done, taken from each slice: ${shares.map((s) => s + '%').join(' ')}`)
   const extraBlobs: Record<string, Blob> = {}
   frames.forEach((f, i) => { extraBlobs[`slice/${i}`] = f.blob })
   const zs = frames.map((f) => f.z)
@@ -216,7 +263,7 @@ export async function takeFineFocusStack(o: FocusStackOptions, say: Say, meta: P
   // distance-per-step is calibrated (Settings' `stageStepUm.z`) we also log a µm reading for the
   // operator (`stepsToUm`/`depthLegend`) and persist it into `stack.depth.umPerStep` so the item keeps
   // its capture-time µm scale even if the stage is recalibrated later (gallery.ts, Viewer.svelte).
-  say('fine stack: extracting depth map…')
+  say(`${label}: extracting depth map…`)
   const depthIndex = smoothDepthIndex(r.depthIndex, r.width, r.height)
   const zMap = depthZMap(depthIndex, zs)
   const depthColor = colorizeDepth(zMap, r.width, r.height)
@@ -231,30 +278,30 @@ export async function takeFineFocusStack(o: FocusStackOptions, say: Say, meta: P
   extraBlobs['depth.bin'] = new Blob([new Uint8Array(depthIndex)], { type: 'application/octet-stream' })
   const umPerStep = zUmPerStep()
   const legend = depthLegend(depthColor.stats, umPerStep)
-  say(`fine stack: depth range ${depthColor.stats.min}–${depthColor.stats.max} steps` + (umPerStep ? ` (${stepsToUm([legend.min, legend.max], umPerStep).map((v) => v.toFixed(2)).join('–')} µm)` : ''))
+  say(`${label}: depth range ${depthColor.stats.min}–${depthColor.stats.max} steps` + (umPerStep ? ` (${stepsToUm([legend.min, legend.max], umPerStep).map((v) => v.toFixed(2)).join('–')} µm)` : ''))
   // the gallery schema's `method` is 'blocks' | 'pyramid': hybrid fusion is a refinement of the
   // pyramid result, not a separate capture method, so it's recorded as 'pyramid' there and only in the
   // progress log (o.method) that hybrid blending actually ran
   const stack = {
-    slices, stepZ: step, zs, contributions: r.contributions, method: 'pyramid' as const, centreZ, span, shifts: r.shifts, source,
+    slices, stepZ: step, zs, contributions: r.contributions, method: 'pyramid' as const, centreZ, span, shifts: r.shifts, source, ...o.extraStack,
     depth: { minZ: depthColor.stats.min, maxZ: depthColor.stats.max, colorMap: 'ramp' as const, ...(umPerStep ? { umPerStep } : {}) },
   }
   if (r.data instanceof Uint16Array) {
-    say('fine stack: encoding 16-bit PNG…')
+    const { gains, params } = o.raw ?? { gains: [1, 1] as [number, number], params: {} }
+    say(`${label}: encoding 16-bit PNG…`)
     const png = await encodePng16(r.data, r.width, r.height)
     const preview = await encodeRgba8(toRgba8({ data: r.data, width: r.width, height: r.height }, 4))
     return saveSnapshot(png, {
-      ...meta, position: { ...meta.position, z: centreZ }, name: `Fine focus stack RAW ${slices}×${step}`, thumbFrom: preview, size: { width: r.width, height: r.height },
+      ...meta, position: { ...meta.position, z: centreZ }, name: o.name, thumbFrom: preview, size: { width: r.width, height: r.height },
       extra: { stack, raw: { bitDepth: 10, bayer: 'BGGR', blackLevel: 64, gains, applied: { lsc: !!params?.lsc, ccm: !!params?.ccm, gammaCurve: !!params?.gammaCurve, demosaic: 'malvar' } } }, extraBlobs: { ...extraBlobs, preview },
     })
   }
   const image = await encodeRgba8({ data: r.data, width: r.width, height: r.height }, 0.95)
   // metadata of the reference slice ('middle', same as the worker's alignment/fusion reference) — a
   // stack has no single "the" still, this is the closest fit
-  const reference = chooseReference(metas.length)
   return saveSnapshot(image, {
-    ...meta, position: { ...meta.position, z: centreZ }, name: `Fine focus stack ${slices}×${step}`,
-    extra: { stack, capture: captureField(metas[reference]) }, extraBlobs,
+    ...meta, position: { ...meta.position, z: centreZ }, name: o.name,
+    extra: { stack, capture: captureField(o.capture) }, extraBlobs,
   })
 }
 

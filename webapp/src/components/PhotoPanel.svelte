@@ -28,6 +28,10 @@
   let stackSlices = $state(9)
   let stackRange = $state(1000)
   let stackRaw = $state(false)
+  /** stills: stop at each slice for a full-resolution still (fine stack); sweep: one continuous z sweep recorded from the sensor */
+  let stackCapture = $state<'stills' | 'sweep'>('stills')
+  let sweepStepsPerFrame = $state(8)
+  const sweepAvailable = $derived(!!device.status?.camera?.record?.available)
   let stackMethod = $state<'pyramid' | 'hybrid'>('pyramid')
   let hdrSource = $state<'jpeg' | 'raw'>('jpeg')
   let ledLevelsText = $state('0.4,0.7,1,1.5')
@@ -40,11 +44,16 @@
   let busy = $state(false)
   let status = $state<{ kind: 'busy' | 'ok' | 'err'; text: string } | null>(null)
 
-  const current = $derived(choices.find((c) => c.id === choice)!)
+  const current = $derived.by(() => {
+    const c = choices.find((c) => c.id === choice)!
+    return choice === 'stack' && stackCapture === 'sweep' && sweepAvailable
+      ? { ...c, blurb: 'One continuous z sweep recorded from the sensor (1640×1232, 30 fps, the stage slowed so frames land a few steps apart). The sharp frames are picked from the sweep, aligned and fused in a Laplacian pyramid, with a depth map. Ends on the sharpest plane.', time: '~5–10 s' }
+      : c
+  })
   const photoMode = $derived.by((): PhotoMode => {
     switch (choice) {
       case 'raw': return rawFrames > 1 ? 'rawavg' : 'raw'
-      case 'stack': return stackRaw ? 'focusfineraw' : 'focusfine'
+      case 'stack': return stackCapture === 'sweep' && sweepAvailable ? 'focussweep' : stackRaw ? 'focusfineraw' : 'focusfine'
       case 'hdr': return hdrSource === 'raw' ? 'hdrraw' : 'exposure'
       default: return choice
     }
@@ -79,6 +88,7 @@
       const item = await takePhoto({
         mode, slices: isStack ? stackSlices : undefined, range: isStack ? stackRange : undefined,
         method: isStack ? stackMethod : undefined,
+        stepsPerFrame: mode === 'focussweep' ? sweepStepsPerFrame : undefined,
         frames: mode === 'rawavg' ? rawFrames : undefined,
         bracket: mode === 'exposure' ? 'led' : undefined,
         levels: mode === 'exposure' ? parseNums(ledLevelsText, [0.4, 0.7, 1, 1.5]) : mode === 'hdrraw' ? parseNums(hdrFactorsText, [0.25, 1, 4]) : undefined,
@@ -197,13 +207,19 @@
     </div>
   {:else if choice === 'stack'}
     <div class="params">
+      <label title="Stills: autofocus, then stop at each slice for a full-resolution still. Sweep: one continuous z sweep recorded from the sensor at 1640×1232; the sharp frames are picked and fused (seconds instead of minutes).">Capture
+        <select aria-label="focus stack capture" bind:value={stackCapture} disabled={busy}>
+          <option value="stills">Stills</option>
+          <option value="sweep" disabled={!sweepAvailable}>Sweep{sweepAvailable ? '' : ' (needs sensor recording)'}</option>
+        </select>
+      </label>
       <label>Slices <input type="number" min="3" max="31" aria-label="focus stack slices" bind:value={stackSlices} disabled={busy} /></label>
-      <label>Search range
+      <label>{photoMode === 'focussweep' ? 'Sweep range' : 'Search range'}
         <select bind:value={stackRange} disabled={busy}>
           <option value={500}>±250</option><option value={1000}>±500</option><option value={2000}>±1000</option>
         </select>
       </label>
-      <label class="chk" title="every slice developed from RAW and fused at 16 bits into a lossless PNG (much slower)"><input type="checkbox" aria-label="stack from raw" bind:checked={stackRaw} disabled={busy} /> From RAW</label>
+      {#if photoMode !== 'focussweep'}<label class="chk" title="every slice developed from RAW and fused at 16 bits into a lossless PNG (much slower)"><input type="checkbox" aria-label="stack from raw" bind:checked={stackRaw} disabled={busy} /> From RAW</label>{/if}
     </div>
     <details class="adv">
       <summary>Advanced</summary>
@@ -214,6 +230,7 @@
             <option value="hybrid">Hybrid (DMap-style)</option>
           </select>
         </label>
+        {#if photoMode === 'focussweep'}<label title="z steps the stage moves between two recorded frames: smaller is a slower, denser sweep">Steps per frame <input type="number" min="1" max="40" aria-label="sweep steps per frame" bind:value={sweepStepsPerFrame} disabled={busy} /></label>{/if}
       </div>
     </details>
   {:else if choice === 'hdr'}

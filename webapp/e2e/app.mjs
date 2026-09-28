@@ -28,6 +28,12 @@ async function position() {
 }
 const logHas = (re, timeout) => page.waitForFunction((src) => new RegExp(src).test(document.querySelector('pre.log')?.textContent || ''), re.source, { timeout })
 const expect = (cond, msg) => { if (!cond) throw new Error(msg) }
+/** JSON-RPC over the device's `POST /rpc`, from Node (not the page, so nothing reaches its console). */
+async function rpc(method, params) {
+  const r = await (await page.request.post(base + '/rpc', { data: { jsonrpc: '2.0', method, params } })).json()
+  if (r.error) throw new Error(`${method}: ${r.error.message}`)
+  return r.result
+}
 
 // Live's right-hand panels live behind a one-panel drawer opened from the tool rail
 // (components/ToolRail.svelte); inactive panels are `display: none`, so open the right tool before
@@ -257,6 +263,40 @@ if (moves) await step('fine focus stack centres on the focus plane and fuses sev
   expect(!!m, 'gallery does not describe the fine stack: ' + g.replace(/\s+/g, ' ').slice(0, 200))
   const shares = m[1].trim().split(/\s+/).map((s) => parseInt(s))
   expect(shares.filter((s) => s > 5).length >= 2, `fine stack did not draw on several slices: ${m[1]}`)
+})
+
+if (moves) await step('sweep focus stack records one z sweep from the sensor, fuses the sharp frames and ends in focus', async () => {
+  await nav('live')
+  const panel = await tool('Photo')
+  await panel.locator('select[aria-label="capture mode"]').selectOption('stack')
+  const cap = panel.locator('select[aria-label="focus stack capture"]')
+  const sweepOk = await cap.locator('option[value="sweep"]').evaluate((o) => !o.disabled)
+  expect(sweepOk, 'the fake offers no sensor recording (PyAV missing from the device venv?)')
+  await cap.selectOption('sweep')
+  const n = panel.locator('input[aria-label="focus stack slices"]')
+  await n.click({ clickCount: 3 }); await n.pressSequentially('7')
+  const before = await position()
+  await rpc('stage.move_rel', { z: 120, compensate: false })
+  await page.click('button:has-text("Take photo")')
+  await page.waitForFunction(() => /saved "Sweep focus stack/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 120000 })
+    .catch(async () => { throw new Error('sweep stack did not finish: ' + (await panel.innerText()).replace(/\s+/g, ' ').slice(-240)) })
+  await page.waitForTimeout(500)
+  const z = (await position()).z
+  expect(Math.abs(z) < 60, `sweep stack ended at z=${z} (started ${before.z}+120); the fake specimen is in focus at z=0`)
+  // the stage speed is restored
+  const st = await rpc('stage.status')
+  expect(st.step_time_us === 1000, `stage step time left at ${st.step_time_us} µs`)
+  // stills work again once the recording has closed
+  const snap = await page.request.get(base + '/snapshot.jpg')
+  expect(snap.status() === 200, `snapshot after the sweep: ${snap.status()}`)
+  await cap.selectOption('stills')
+  await panel.locator('select[aria-label="capture mode"]').selectOption('single')
+  await nav('gallery'); await page.waitForTimeout(600)
+  const g = await page.locator('main').innerText()
+  const m = g.match(/sweep focus stack \(pyramid\)[\s\S]{0,160}?from each: ([\d% ]+)/)
+  expect(!!m, 'gallery does not describe the sweep stack: ' + g.replace(/\s+/g, ' ').slice(0, 200))
+  const shares = m[1].trim().split(/\s+/).map((s) => parseInt(s))
+  expect(shares.filter((s) => s > 5).length >= 2, `sweep stack did not draw on several slices: ${m[1]}`)
 })
 
 if (moves) await step('fine focus stack from RAW fuses 16-bit slices and renders a relief', async () => {

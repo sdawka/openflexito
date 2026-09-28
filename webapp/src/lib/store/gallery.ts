@@ -34,7 +34,7 @@ export interface GalleryItem {
   blobs: string[]
   /** focus stack: how it was taken and how much of the result each slice supplied */
   stack?: {
-    slices: number; stepZ: number; zs: number[]; contributions: number[]; method?: 'blocks' | 'pyramid'; centreZ?: number; span?: number; shifts?: { dx: number; dy: number }[]; source?: 'jpeg' | 'raw'
+    slices: number; stepZ: number; zs: number[]; contributions: number[]; method?: 'blocks' | 'pyramid'; centreZ?: number; span?: number; shifts?: { dx: number; dy: number }[]; source?: 'jpeg' | 'raw' | 'sweep'
     /** depth-from-focus map derived alongside a pyramid fusion: blobs 'depth' (colour-mapped PNG),
      *  'relief' (pseudo-3D shaded preview) and 'depth.bin' (raw per-pixel winning-slice index, 8-bit).
      *  `minZ`/`maxZ` are always in z steps; `umPerStep` (additive) is the stage's z µm/step *at capture
@@ -45,6 +45,9 @@ export interface GalleryItem {
      *  `HeightMapOverlay.svelte` fall back to Settings' *current* `stageStepUm.z` for those, which can
      *  mislabel them if the calibration has since changed — the honest cost of not having recorded it. */
     depth?: { minZ: number; maxZ: number; colorMap: 'ramp'; unit?: 'steps' | 'µm'; umPerStep?: number }
+    /** source 'sweep' (services/photo/sweepStack.ts): frames recorded during the sweep, camera fps,
+     *  stage step delay and the recording size the slices were decoded at */
+    sweep?: { frames: number; fps: number; stepTimeUs: number; stepsPerFrame: number; range: number; width: number; height: number; sensorSize: [number, number] }
   }
   /** pixel-shift super-resolution: N sub-pixel-shifted stills fused by drizzle onto a finer grid;
    *  `used` is how many of `frames` passed registration confidence + phase-validity checks and
