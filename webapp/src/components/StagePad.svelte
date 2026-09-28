@@ -20,8 +20,8 @@
       <span></span><button disabled={liveEdof.holdsStage} onclick={() => move({ y: -settings.stepXY })} title="S / ↓">▼</button><span></span>
     </div>
     <div class="zcol">
-      <button disabled={liveEdof.holdsStage} onclick={() => move({ z: settings.stepZ })} title="PgUp / Q">Z+</button>
-      <button disabled={liveEdof.holdsStage} onclick={() => move({ z: -settings.stepZ })} title="PgDn / E">Z−</button>
+      <button disabled={liveEdof.holdsStage} onclick={() => move({ z: settings.stepZ })} title="Shift+↑ / PgUp / Q">Z+</button>
+      <button disabled={liveEdof.holdsStage} onclick={() => move({ z: -settings.stepZ })} title="Shift+↓ / PgDn / E">Z−</button>
     </div>
   </div>
   <div class="row" style="margin-top:10px">

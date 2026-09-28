@@ -15,6 +15,7 @@ import { H264PassthroughMux } from '../videoEncoder'
 import { chooseSweepSlices, sweepStepTimeUs, zAtTime, type SweepSample } from '../../algo/sweepStack'
 import { laplacianVariance, toGray } from '../../algo/sharpness'
 import { device } from '../../store/device.svelte'
+import { frameLagNs } from '../../store/calibration.svelte'
 import type { GalleryItem } from '../../store/gallery'
 import type { MoveResult } from '../../algo/types'
 import { withCameraLock } from '../cameraLock'
@@ -146,7 +147,8 @@ export async function takeSweepStack(o: SweepStackOptions, say: Say, meta: Photo
   if ((move as MoveResult).cancelled) throw new Error('sweep stack: the sweep was cancelled')
 
   // pass 1: sharpness of every frame exposed during the sweep, at a small size
-  const inSweep = packets.map((p) => p.ts).filter((t): t is number => t != null && zAtTime(t, mv) != null)
+  const lag = frameLagNs()
+  const inSweep = packets.map((p) => p.ts).filter((t): t is number => t != null && zAtTime(t, mv, lag) != null)
   say(`sweep stack: measuring sharpness in ${inSweep.length} frames…`)
   const video = await SweepVideo.open(packets, rec)
   try {
@@ -155,7 +157,7 @@ export async function takeSweepStack(o: SweepStackOptions, say: Say, meta: Photo
     const samples: (SweepSample & { t: number })[] = []
     for (const t of inSweep) {
       sctx.drawImage(await video.frame(t), 0, 0, small.width, small.height)
-      samples.push({ z: zAtTime(t, mv)!, s: laplacianVariance(toGray(sctx.getImageData(0, 0, small.width, small.height))), t })
+      samples.push({ z: zAtTime(t, mv, lag)!, s: laplacianVariance(toGray(sctx.getImageData(0, 0, small.width, small.height))), t })
     }
     if (samples.length < 3) throw new Error(`sweep stack: only ${samples.length} frames fell inside the sweep (timestamps off?)`)
     const sel = chooseSweepSlices(samples, maxSlices)

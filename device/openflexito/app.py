@@ -169,7 +169,7 @@ class Device:
             r.register("stage.position", g(lambda: st.position, mutating=False), "Current position in program frame (steps).")
             r.register("stage.move_rel", g(st.move_rel), "Relative move in steps; compensate=false skips backlash handling.")
             r.register("stage.move_to", g(st.move_to), "Absolute move in program frame; omitted axes stay.")
-            r.register("stage.jog", g(st.jog), "Newest-wins relative move without backlash compensation (cancels a running jog).")
+            r.register("stage.jog", g(st.jog), "Newest-wins relative move without backlash compensation (cancels a running jog); take_up=true crosses a z reversal's dead band at once.")
             r.register("stage.stop", g(st.stop), "Abort the current move.")
             r.register("stage.release", g(st.release), "De-energise motor coils now.")
             r.register("stage.set_release_after", g(st.set_release_after), "Idle seconds before coils are released automatically (0 = hold for ever).")

@@ -4,6 +4,7 @@ import { fastAutofocus, loopingAutofocus, stepAutofocus, twoPassAutofocus, type 
 import { laplacianVariance } from '../algo/sharpness'
 import { grabGray } from '../api/sampler'
 import { device } from '../store/device.svelte'
+import { frameLagNs } from '../store/calibration.svelte'
 
 export interface AutofocusOptions {
   mode: 'fast' | 'looping' | 'step' | 'twopass'
@@ -34,6 +35,7 @@ export async function runAutofocus(opts: AutofocusOptions): Promise<{ peakZ: num
     frames: () => device.frames,
     onProgress: opts.onProgress,
     cancelled: () => cancelFlag,
+    lagNs: frameLagNs(),
   }
   const measure = async () => laplacianVariance(await grabGray(410, 60))
   if (opts.mode === 'step') return stepAutofocus({ ...io, measure }, opts.dz, 9)

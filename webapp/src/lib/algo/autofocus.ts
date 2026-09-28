@@ -25,22 +25,28 @@ export interface FastAutofocusIO {
   frames(): readonly FrameMeta[]                // ring buffer of recent frames (device clock ns)
   onProgress?(msg: string): void
   cancelled?(): boolean
+  /** frame lag, ns: a frame stamped ts was exposed at ts + lag (`algo/zCalibration.ts`); default 0 */
+  lagNs?: number
 }
 
 export function frameTime(f: FrameMeta): number | null {
   return f.ts ?? f.t ?? null
 }
 
-/** Frames captured during a move (t0 < t <= t1) mapped to interpolated z. */
-export function samplesFromSweep(frames: readonly FrameMeta[], t0: number, t1: number, z0: number, z1: number, metric: SharpnessMetric): Sample[] {
+/** Frames exposed during a move (t0 < t <= t1) mapped to interpolated z. `lagNs`: a frame stamped
+ *  ts was exposed at ts + lagNs (measured by the focus calibration, `algo/zCalibration.ts`); the
+ *  exposure time is what is interpolated, and `t` of each sample stays the stamp. */
+export function samplesFromSweep(frames: readonly FrameMeta[], t0: number, t1: number, z0: number, z1: number, metric: SharpnessMetric, lagNs = 0): Sample[] {
   const out: Sample[] = []
   if (t1 <= t0) return out
   for (const f of frames) {
-    const t = frameTime(f)
-    if (t === null || t <= t0 || t > t1) continue
+    const ts = frameTime(f)
+    if (ts === null) continue
+    const t = ts + lagNs
+    if (t <= t0 || t > t1) continue
     const s = metric === 'fom' ? (f.focus_fom ?? NaN) : f.size
     if (!Number.isFinite(s)) continue
-    out.push({ z: z0 + ((t - t0) / (t1 - t0)) * (z1 - z0), s, t })
+    out.push({ z: z0 + ((t - t0) / (t1 - t0)) * (z1 - z0), s, t: ts })
   }
   return out
 }
@@ -120,7 +126,7 @@ export async function fastAutofocus(io: FastAutofocusIO, dz = 2000, metric: Shar
   const z1 = io.currentZ()
   // give the last frames of the sweep a moment to arrive over the socket
   await new Promise((r) => setTimeout(r, 150))
-  const samples = samplesFromSweep(io.frames(), move.t0, move.t1, z0, z1, metric)
+  const samples = samplesFromSweep(io.frames(), move.t0, move.t1, z0, z1, metric, io.lagNs ?? 0)
   const best = argmax(samples)
   if (!best || samples.length < 3) {
     await io.moveZ(startZ - io.currentZ())

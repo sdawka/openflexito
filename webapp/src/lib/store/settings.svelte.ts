@@ -8,6 +8,9 @@ export interface Settings {
   stepZ: number            // steps per jog tick in z
   gamepad: boolean
   invertYKeys: boolean
+  /** z jogs (keyboard, HUD, gamepad) ask the device to take up the z backlash on a reversal
+   *  (`stage.jog` `take_up: true`), so focus responds at once instead of after the dead band */
+  zJogTakeUp: boolean
   showLores: boolean
   detectModel: string
   clipModel: string
@@ -82,7 +85,7 @@ export interface Settings {
 }
 
 const defaults: Settings = {
-  deviceUrl: '', stepXY: 500, stepZ: 100, gamepad: true, invertYKeys: false, showLores: false,
+  deviceUrl: '', stepXY: 500, stepZ: 100, gamepad: true, invertYKeys: false, zJogTakeUp: true, showLores: false,
   detectModel: 'Xenova/yolos-tiny', clipModel: 'Xenova/clip-vit-base-patch32', detectThreshold: 0.5, detectIntervalMs: 800,
   followDeadbandPx: 12, followIntervalMs: 400,
   lightPresets: {

@@ -114,8 +114,8 @@
       <span></span>
     </div>
     <div class="zcol">
-      <button disabled={liveEdof.holdsStage} onpointerdown={() => onDirDown('hud-z', { z: 1 })} onpointerup={() => onDirUp('hud-z', { z: 1 })} onpointercancel={() => onDirCancel('hud-z')} onpointerleave={() => onDirCancel('hud-z')} title="PgUp / Q">Z+</button>
-      <button disabled={liveEdof.holdsStage} onpointerdown={() => onDirDown('hud-z', { z: -1 })} onpointerup={() => onDirUp('hud-z', { z: -1 })} onpointercancel={() => onDirCancel('hud-z')} onpointerleave={() => onDirCancel('hud-z')} title="PgDn / E">Z−</button>
+      <button disabled={liveEdof.holdsStage} onpointerdown={() => onDirDown('hud-z', { z: 1 })} onpointerup={() => onDirUp('hud-z', { z: 1 })} onpointercancel={() => onDirCancel('hud-z')} onpointerleave={() => onDirCancel('hud-z')} title="Shift+↑ / PgUp / Q">Z+</button>
+      <button disabled={liveEdof.holdsStage} onpointerdown={() => onDirDown('hud-z', { z: -1 })} onpointerup={() => onDirUp('hud-z', { z: -1 })} onpointercancel={() => onDirCancel('hud-z')} onpointerleave={() => onDirCancel('hud-z')} title="Shift+↓ / PgDn / E">Z−</button>
     </div>
     <button class="af" class:busy={focusCtl.focusing} disabled={liveEdof.holdsStage} onclick={() => focusCtl.run()} title="autofocus">
       {#if focusCtl.focusing}<span class="spinner"></span>{:else}AF{/if}

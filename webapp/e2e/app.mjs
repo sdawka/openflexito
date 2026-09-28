@@ -86,6 +86,21 @@ if (moves) await step('jog buttons move the stage by the step size', async () =>
   await page.waitForFunction((x0) => { const m = document.querySelector('nav')?.textContent?.match(/x\s+(-?\d+)/); return m && +m[1] === x0 }, p0.x, { timeout: 8000 })
 })
 
+if (moves) await step('Shift+↑/↓ jog Z, not Y', async () => {
+  await page.evaluate(() => document.activeElement?.blur?.())
+  const settled = async () => { let a = await position(), b; for (;;) { await page.waitForTimeout(400); b = await position(); if (b.z === a.z && b.y === a.y) return b; a = b } }
+  const p0 = await settled()
+  await page.keyboard.down('Shift'); await page.keyboard.down('ArrowUp')
+  await page.waitForTimeout(500)
+  await page.keyboard.up('ArrowUp'); await page.keyboard.up('Shift')
+  const p1 = await settled()
+  expect(p1.z > p0.z && p1.y === p0.y, `Shift+↑ moved z ${p0.z}→${p1.z}, y ${p0.y}→${p1.y}`)
+  await page.keyboard.down('Shift'); await page.keyboard.down('ArrowDown')
+  await page.waitForTimeout(500)
+  await page.keyboard.up('ArrowDown'); await page.keyboard.up('Shift')
+  const p2 = await settled()
+  expect(p2.z < p1.z && p2.y === p0.y, `Shift+↓ moved z ${p1.z}→${p2.z}, y ${p1.y}→${p2.y}`)
+})
 await step('photo (full resolution) lands in the gallery', async () => {
   await nav('gallery'); await page.waitForTimeout(500)
   const before = await page.locator('.card').count()
@@ -170,6 +185,27 @@ if (moves) await step('calibration 2: stage ↔ camera mapping', async () => {
   const row = await page.locator('table.result tbody tr').first().innerText()
   const pxPerStep = parseFloat(row.split('\t')[1])
   expect(pxPerStep > 0.005 && pxPerStep < 5, `implausible pixels/step ${pxPerStep}`)
+})
+
+if (moves) await step('focus calibration: z backlash and frame lag, stage speed restored, z returned', async () => {
+  await nav('calibrate')
+  // the fake's specimen is in focus at z = 0 (defocus ∝ |z|); on a real Pi calibrate where it is
+  if (/127\.0\.0\.1|localhost/.test(base)) await rpc('stage.move_to', { z: 0, compensate: 'z' })
+  const before = (await rpc('system.status')).stage.step_time_us
+  await page.waitForTimeout(800)
+  const z0 = (await position()).z
+  await page.click('button:has-text("Calibrate Z")')
+  await logHas(/focus calibration: (done|FAILED)/, 180000)
+  const log = await page.locator('pre.log').innerText()
+  expect(/focus calibration: done/.test(log), log.split('\n').filter((l) => /focus calibration/.test(l)).slice(-3).join(' | '))
+  const cells = await page.locator('table.zcal tbody td').allInnerTexts()
+  const b = parseFloat(cells[0]), lag = parseFloat(cells[1]), rep = parseFloat(cells[2])
+  expect([b, lag, rep].every(Number.isFinite), `non-finite result: ${cells.join(' / ')}`)
+  const after = (await rpc('system.status')).stage.step_time_us
+  expect(after === before, `stage step time ${after} µs after the calibration, was ${before} µs`)
+  await page.waitForTimeout(800)
+  const z1 = (await position()).z
+  expect(Math.abs(z1 - z0) <= 2, `ended at z=${z1}, started at z=${z0}`)
 })
 
 await step('RAW flat field: capture and clear', async () => {

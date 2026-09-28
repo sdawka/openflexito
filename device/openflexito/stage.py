@@ -86,6 +86,10 @@ class Stage:
         self._energised = True          # the firmware energises coils on the first move and never releases
         self._release_timer: threading.Timer | None = None
         self._engaged = {a: 0.0 for a in AXES}   # 1 = engaged in +backlash direction; 0 = unknown (v3 starts here)
+        # What the engagement could really be: v3's start-up 0.0 means "unknown", i.e. anywhere in
+        # [0, 1]. Both ends move with every real move and are clamped; once they meet (a move has
+        # crossed the whole dead band) `_engaged` is known, and a take-up jog may act on it.
+        self._engaged_range = {a: (0.0, 1.0) for a in AXES}
         self._offset = {a: 0 for a in AXES}      # program hw-frame offset for restored positions
         self._hw = {a: 0 for a in AXES}
         self._moving = False
@@ -140,6 +144,7 @@ class Stage:
             "backlash": dict(self.backlash),
             "inverted": dict(self.inverted),
             "engaged": dict(self._engaged),
+            "engaged_known": {a: self._engaged_known(a) for a in AXES},
             "step_time_us": self.board.info.step_time_us,
             "energised": self._energised,
             "release_after": self.release_after,
@@ -185,6 +190,7 @@ class Stage:
         self._refresh_hw()
         for a in AXES:
             self._offset[a] = self._saved_hw[a] + self._offset[a] - self._hw[a]
+        self._engaged_range = {a: (0.0, 1.0) for a in AXES}  # a power-cycled board's gears are anywhere
         self._save_state()
         self._emit_position(False)
         return self.position
@@ -269,15 +275,46 @@ class Stage:
             except SangaboardError as e:
                 log.error("position readback failed after move: %s", e)
             t1 = now_ns()
-            # v3 update_position: state += delta / backlash, clamped to [0, 1]
-            for a in AXES:
-                bl = self.backlash.get(a, 0)
-                if bl:
-                    self._engaged[a] = min(1.0, max(0.0, self._engaged[a] + (self._hw[a] - start_hw[a]) / bl))
+            self._update_engaged(start_hw)
             self._save_state()
             self._emit_position(False, cancelled=cancelled)
             self._schedule_release()
         return MoveResult(start_hw, dict(self._hw), t0, t1, cancelled)
+
+    def _update_engaged(self, start_hw: dict[str, int]) -> None:
+        """v3 update_position: state += delta / backlash, clamped to [0, 1], from the *real* hardware
+        delta (so a cancelled move leaves it consistent). The same update narrows `_engaged_range`
+        (not in v3)."""
+        def clamp(v: float) -> float:
+            return min(1.0, max(0.0, v))
+        for a in AXES:
+            bl = self.backlash.get(a, 0)
+            if bl:
+                f = (self._hw[a] - start_hw[a]) / bl
+                self._engaged[a] = clamp(self._engaged[a] + f)
+                lo, hi = self._engaged_range[a]
+                self._engaged_range[a] = (clamp(lo + f), clamp(hi + f))
+
+    def _engaged_known(self, axis: str) -> bool:
+        lo, hi = self._engaged_range[axis]
+        return hi - lo < 1e-9
+
+    def _take_up(self, move: dict[str, int]) -> dict[str, int]:
+        """Lengthen a hardware z move that reverses against the gears by the dead band still left in
+        that direction ((1 - engaged)·bl going +, engaged·bl going -), so the objective starts to
+        move at once instead of after ~backlash steps of nothing. Only while the engagement is
+        known; x/y are left alone."""
+        dz, bl = move["z"], self.backlash.get("z", 0)
+        if not dz or not bl or not self._engaged_known("z"):
+            return move
+        e = self._engaged["z"]
+        extra = int(round((1.0 - e) * bl if dz > 0 else e * bl))
+        return {**move, "z": dz + (extra if dz > 0 else -extra)}
+
+    def _jog_sync(self, move: dict[str, int], take_up: bool) -> MoveResult:
+        # the take-up is worked out here, on the stage thread, after the jog it replaced has stopped
+        # and updated the engagement
+        return self._move_rel_sync(self._take_up(move) if take_up else move, False)
 
     def _move_rel_sync(self, move: dict[str, int], compensate) -> MoveResult:
         axes = compensation_axes(compensate, move)  # validate before touching the hardware
@@ -337,13 +374,18 @@ class Stage:
         delta = {a: target[a] - cur[a] for a in AXES}
         return await self.move_rel(delta["x"], delta["y"], delta["z"], compensate)
 
-    async def jog(self, x: int = 0, y: int = 0, z: int = 0) -> dict:
-        """Newest-wins jog: if a move is in progress, cancel it and run the latest request."""
+    async def jog(self, x: int = 0, y: int = 0, z: int = 0, take_up: bool = False) -> dict:
+        """Newest-wins raw jog: if a move is in progress, cancel it and run the latest request.
+        take_up: true lengthens a z jog that reverses direction by the backlash dead band still to
+        cross (`_take_up`), so focus responds immediately; only once the engagement state is known,
+        x/y unchanged. The reported position is the real motor count, take-up included. Not in v3,
+        which only corrects backlash at the end of a move (overshoot and approach from +)."""
         if self._oscillating:  # refuse before cancelling: a jog must not end the sweeps and then fail
             raise StageBusy("z is sweeping for live extended focus; stop that first")
         if self._busy.locked():
             self._cancel.set()
-        return await self.move_rel(x, y, z, compensate=False)
+        res = await self._run(self._jog_sync, self._program_to_hw_delta(x, y, z), bool(take_up))
+        return self._result_dict(res)
 
     # ---- continuous z sweeps (live extended depth of field) ---------------------------------
 
@@ -413,10 +455,7 @@ class Stage:
                 else:  # a finished leg ends where it was sent: a `p?` here cost ~10 ms per leg on the Pi
                     self._hw = {a: start_hw[a] + d[a] for a in AXES}
                 self._live = None  # after the update, or live_position() would show the leg's start
-                for a in AXES:
-                    bl = self.backlash.get(a, 0)
-                    if bl:
-                        self._engaged[a] = min(1.0, max(0.0, self._engaged[a] + (self._hw[a] - start_hw[a]) / bl))
+                self._update_engaged(start_hw)
                 report({"type": "leg_end", "leg": legs, "t_end": t_end, "z1": self.position["z"], "cancelled": cancelled})
                 legs += 1
                 sign = -sign

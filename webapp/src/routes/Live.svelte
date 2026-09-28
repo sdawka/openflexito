@@ -103,7 +103,7 @@
 
   onMount(() => {
     const j = new JogController(
-      (d) => device.jog(d),
+      (d) => device.jog(d, settings.zJogTakeUp),
       () => device.stop(),
       () => ({ xy: settings.stepXY, z: settings.stepZ }),
     )
@@ -167,7 +167,7 @@
         <details class="help">
           <summary>Mouse, keys and gamepad</summary>
           <p><b>Mouse</b>: click-hold-drag the image to pan the stage like a map · click to centre a point · <kbd>⇧</kbd>-drag to select a region for image search.</p>
-          <p><b>Keys</b>: <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or arrows move XY · <kbd>Q</kbd>/<kbd>E</kbd> or <kbd>PgUp</kbd>/<kbd>PgDn</kbd> move Z · hold for continuous motion.</p>
+          <p><b>Keys</b>: <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or arrows move XY · <kbd>Shift</kbd>+<kbd>↑</kbd>/<kbd>↓</kbd>, <kbd>Q</kbd>/<kbd>E</kbd> or <kbd>PgUp</kbd>/<kbd>PgDn</kbd> move Z · hold for continuous motion.</p>
           <p><b>Gamepad</b>: left stick XY · right stick or triggers Z · <kbd>B</kbd> stops.</p>
         </details>
       </div>
