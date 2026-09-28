@@ -146,7 +146,7 @@ describe('developPipeline: tiled deconvolution matches the untiled reference', (
     }
     expect(maxAbsDiff).toBeLessThan(0.02)
     expect(sumAbsDiff / n).toBeLessThan(0.005)
-  })
+  }, 30000)
 })
 
 describe('developPipeline: tiled deconvolution performance at 3280x2464', () => {

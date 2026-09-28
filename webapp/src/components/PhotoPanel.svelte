@@ -145,6 +145,7 @@
   async function toggleRecord() {
     if (recorder.recording) { void recorder.stop().then((i) => { if (i) status = { kind: 'ok', text: `saved "${i.name}"` } }); return }
     if (starting) return
+    status = null  // a previous recording's "saved …" would otherwise stay up for this one
     const opts = {
       container: vidContainer, codec: vidCodec, quality: vidQuality, keyframeS: settings.videoKeyframeS,
       stabilize: vidStabilise, deflicker: vidDeflicker, retime: vidRetime, retimeFps: vidRetimeFps, burnIn: [...vidBurnIn],
@@ -154,7 +155,7 @@
       // processing needs the camera's H.264 decoded in the browser; without a decoder, record the live view
       if (!reencodes || await Recorder.canDecodeSensor()) {
         starting = true
-        try { await recorder.startSensor(sourceLabel, opts); status = null; return }
+        try { await recorder.startSensor(sourceLabel, opts); return }
         catch (e) { status = { kind: 'err', text: `sensor recording refused (${(e as Error).message}); recording the live view instead` } }
         finally { starting = false }
       } else {
