@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { LegGrouper, SweepFuser, deadBandEnd, deadBandFraction, usefulFraction, legMidTime, legPeakStep, suggestBacklash, type SweepLegStart } from '../sweepFuse'
+import { DeadBandFilter, LegGrouper, SweepFuser, deadBandEnd, deadBandFraction, usefulFraction, legMidTime, legPeakStep, suggestBacklash, type SweepLegStart } from '../sweepFuse'
 
 function mulberry32(a: number) {
   return () => { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296 }
@@ -102,6 +102,36 @@ describe('backlash dead band', () => {
     }
     expect(Math.abs(suggestBacklash(peaks, S)! - b)).toBeLessThanOrEqual(3)
     expect(suggestBacklash(peaks.slice(0, 4), S)).toBeNull() // two per direction is not enough
+  })
+
+  it('skips dead-band frames undecoded, keeping the last one; the composite spans only the fused frames', () => {
+    const ms = 1e6, filt = new DeadBandFilter<number>(200)
+    filt.startLeg({ leg: 0, t_ack: 0, steps: 300, step_us: 1000 }) // dead band 0..200 ms, leg ends at 300 ms
+    const passed: number[] = []
+    for (let t = 0; t <= 300; t += 10) passed.push(...filt.offer(t * ms, t))
+    expect(passed).toEqual([190, 200, 210, 220, 230, 240, 250, 260, 270, 280, 290, 300])
+    expect(filt.skipped).toBe(19)
+    expect(filt.useful(0)).toBeCloseTo(11 / 31)
+    const f = new SweepFuser(32, 32)
+    for (const t of passed) f.add(image(32, 32, () => 80), t * ms)
+    const r = f.finish(legMidTime({ leg: 0, t_ack: 0, steps: 300, step_us: 1000 }, { leg: 0, t_end: 300 * ms }, 200))!
+    expect([r.t0, r.t1]).toEqual([190 * ms, 300 * ms])
+    expect(r.tMid).toBe(250 * ms)
+    expect(r.tMid).toBeGreaterThanOrEqual(r.t0)
+  })
+
+  it('releases a held dead-band frame at the next leg, on a frame outside legs, and on flush', () => {
+    const filt = new DeadBandFilter<string>(100)
+    expect(filt.offer(null, 'untimed')).toEqual(['untimed'])
+    expect(filt.offer(5, 'before any leg')).toEqual(['before any leg'])
+    filt.startLeg({ leg: 0, t_ack: 1000, steps: 100, step_us: 1 }) // the whole leg is dead band
+    expect(filt.offer(1000, 'a')).toEqual([])
+    expect(filt.offer(1050, 'b')).toEqual([])
+    filt.startLeg({ leg: 1, t_ack: 2000, steps: 300, step_us: 1 })
+    expect(filt.offer(2010, 'c')).toEqual(['b'])
+    expect(filt.useful(0)).toBe(0)
+    expect(filt.flush()).toEqual(['c'])
+    expect(filt.flush()).toEqual([])
   })
 
   it('finds no peak in a flat curve', () => {

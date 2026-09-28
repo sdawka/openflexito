@@ -173,6 +173,7 @@ async def test_oscillate_sweeps_back_and_forth_and_returns(stage, transport, eve
     await stage.move_rel(z=500)
     start_z = stage.position["z"]
     recs, stop = [], threading.Event()
+    sent_before = len(transport.sent)
     task = asyncio.ensure_future(stage.oscillate(40, recs.append, stop))
     for _ in range(200):
         if sum(r["type"] == "leg_end" for r in recs) >= 4:
@@ -190,6 +191,8 @@ async def test_oscillate_sweeps_back_and_forth_and_returns(stage, transport, eve
     assert all(l["t_cmd"] <= l["t_ack"] <= e["t_end"] for l, e in zip(legs, ends))
     assert all(e["t_end"] <= n["t_cmd"] for e, n in zip(ends, legs[1:]))  # no overlap between legs
     assert [e["z1"] for e in ends[:2]] == [start_z + 40, start_z]
+    # finished legs are tracked from the commanded delta, not read back with `p?` (~10 ms each on the Pi)
+    assert transport.sent[sent_before:].count("p?") < len(ends)
     assert not any(e["cancelled"] for e in ends)
     assert stage.position["z"] == start_z and not stage.oscillating and not stage.moving
     await stage.move_rel(x=10)  # moves work again

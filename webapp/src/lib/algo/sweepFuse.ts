@@ -136,6 +136,62 @@ export function deadBandFraction(leg: SweepLegStart, end: SweepLegEnd | undefine
   return Math.min(1, (deadBandEnd(leg, backlash) - leg.t_ack) / (t1 - leg.t_ack))
 }
 
+/** Drops backlash dead-band frames before they are decoded. Every frame of a leg's dead band is at
+ *  the leg's starting z, and each could still win a block, stretching the composite's time window
+ *  over the whole leg instead of the stage's actual motion; so only the last dead-band frame is
+ *  kept (it stands for the band's end z). It is held until the next frame shows it was the last.
+ *  Frames outside any leg, or without a time, pass straight through. Counts per leg feed `useful`. */
+export class DeadBandFilter<T> {
+  private legs: SweepLegStart[] = []
+  private held: { item: T; leg: number } | null = null
+  private counts = new Map<number, { dead: number; moving: number }>()
+  skipped = 0
+
+  constructor(public backlash: number) {}
+
+  reset(): void { this.legs = []; this.held = null; this.counts.clear(); this.skipped = 0 }
+
+  startLeg(l: SweepLegStart): void {
+    this.legs.push(l)
+    if (this.legs.length > 4) this.counts.delete(this.legs.shift()!.leg)
+  }
+
+  /** Offer a frame (in time order); returns the frames to decode, in order. */
+  offer(ts: number | null, item: T): T[] {
+    const out: T[] = []
+    let leg: SweepLegStart | undefined
+    if (ts != null) for (let i = this.legs.length - 1; i >= 0; i--) if (this.legs[i].t_ack <= ts) { leg = this.legs[i]; break }
+    if (!leg || ts == null) return this.release(out, item)
+    const c = this.counts.get(leg.leg) ?? { dead: 0, moving: 0 }
+    this.counts.set(leg.leg, c)
+    if (ts < deadBandEnd(leg, this.backlash)) {
+      c.dead++
+      if (this.held && this.held.leg === leg.leg) this.skipped++
+      else if (this.held) out.push(this.held.item)
+      this.held = { item, leg: leg.leg }
+      return out
+    }
+    c.moving++
+    return this.release(out, item)
+  }
+
+  /** Release the held frame (stream ended). */
+  flush(): T[] { return this.release([]) }
+
+  /** Fraction of the leg's frames that were exposed after its dead band (skipped frames included). */
+  useful(leg: number): number {
+    const c = this.counts.get(leg)
+    if (c) this.counts.delete(leg)
+    return c && c.dead + c.moving ? c.moving / (c.dead + c.moving) : 0
+  }
+
+  private release(out: T[], item?: T): T[] {
+    if (this.held) { out.push(this.held.item); this.held = null }
+    if (item !== undefined) out.push(item)
+    return out
+  }
+}
+
 /** Fraction of the frame times that fell in the moving part of the leg (after the dead band). */
 export function usefulFraction(times: ArrayLike<number>, leg: SweepLegStart, backlash: number): number {
   if (!times.length) return 0

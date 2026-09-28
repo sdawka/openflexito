@@ -1,13 +1,14 @@
 /** Live extended depth of field off the main thread: decodes the `/edof.bin` JPEG frames, groups
  *  them into sweep legs by timestamp (`LegGrouper`) and fuses each leg (`SweepFuser`), posting one
  *  composite per completed leg. Leg records are applied as they arrive; frames are decoded one at a
- *  time in arrival (= time) order, and when decoding falls more than `MAX_QUEUE` frames behind the
+ *  time in arrival (= time) order. Backlash dead-band frames are dropped undecoded except the last
+ *  one of each band (`DeadBandFilter`), and when decoding falls more than `MAX_QUEUE` frames behind the
  *  oldest undecoded frames are dropped (counted in `droppedInWorker`).
  *
  *  Protocol: post `EdofWorkerIn` (`init` first, carrying the stream's `backlash_z` as `backlash`;
  *  pass `windowMs` only for a camera-only stream, steps = 0), receive `EdofWorkerOut`. */
 import { defineWorker, post } from './workerUtil'
-import { LegGrouper, SweepFuser, legMidTime, legPeakStep, suggestBacklash, usefulFraction, type LegGroup, type SweepLegEnd, type SweepLegStart } from '../algo/sweepFuse'
+import { DeadBandFilter, LegGrouper, SweepFuser, legMidTime, legPeakStep, suggestBacklash, type LegGroup, type SweepLegEnd, type SweepLegStart } from '../algo/sweepFuse'
 
 export type EdofWorkerIn =
   | { type: 'init'; width: number; height: number; cell?: number; flatRatio?: number; windowMs?: number; backlash?: number }
@@ -26,14 +27,16 @@ export interface EdofComposite {
   /** leg number, null for a camera-only time window */
   leg: number | null
   frames: number
-  /** fraction of the frames exposed after the backlash dead band */
+  /** fraction of the leg's frames exposed after the backlash dead band (skipped ones included) */
   useful: number
   flatBlocks: number
   motionBlocks: number
-  /** ns: first/last frame, and the reference frame (moving things are shown where they were then) */
+  /** ns: first/last fused frame, and the reference frame (moving things are shown where they were then) */
   t0: number
   t1: number
   tMid: number
+  /** the composite's true time window, t1 − t0 of the fused frames, ms */
+  windowMs: number
   /** mean decode time per frame of this leg, ms */
   decodeMs: number
   /** fusion time of this leg (all `add`s + `finish`), ms */
@@ -44,15 +47,17 @@ export interface EdofComposite {
   backlashEstimate: number | null
 }
 
-export interface EdofStats { type: 'stats'; received: number; decoded: number; droppedInWorker: number }
+/** `deadBand`: dead-band frames skipped undecoded (by design, not a loss) */
+export interface EdofStats { type: 'stats'; received: number; decoded: number; droppedInWorker: number; deadBand: number }
 
 export type EdofWorkerOut = EdofComposite | EdofStats | { error: string }
 
-const MAX_QUEUE = 4
+const MAX_QUEUE = 16 // finish takes ~30 ms on the Pi's client, ~3 frame intervals at 95 fps
 
 let width = 0, height = 0, cell = 16, flatRatio = 1.25, backlash = 0
 let fuser: SweepFuser | null = null
 let grouper = new LegGrouper()
+let deadBand = new DeadBandFilter<Extract<EdofWorkerIn, { type: 'frame' }>>(0)
 let cur: LegGroup | null = null
 let decodeMs = 0, fuseMs = 0
 let received = 0, decoded = 0, droppedInWorker = 0
@@ -64,7 +69,7 @@ let lastSteps = 0
 let canvas: OffscreenCanvas | null = null
 let ctx: OffscreenCanvasRenderingContext2D | null = null
 
-function stats(): void { post({ type: 'stats', received, decoded, droppedInWorker } satisfies EdofStats) }
+function stats(): void { post({ type: 'stats', received, decoded, droppedInWorker, deadBand: deadBand.skipped } satisfies EdofStats) }
 
 async function emit(g: LegGroup): Promise<void> {
   if (cur !== g || !fuser) return
@@ -88,8 +93,8 @@ async function emit(g: LegGroup): Promise<void> {
   if (gen !== generation) { bitmap.close(); return }
   post({
     type: 'composite', bitmap, leg: g.leg, frames: r.frames,
-    useful: g.start ? usefulFraction(r.times, g.start, backlash) : 1,
-    flatBlocks: r.flatBlocks, motionBlocks: r.motionBlocks, t0: r.t0, t1: r.t1, tMid: r.tMid,
+    useful: g.leg != null ? deadBand.useful(g.leg) : 1,
+    flatBlocks: r.flatBlocks, motionBlocks: r.motionBlocks, t0: r.t0, t1: r.t1, tMid: r.tMid, windowMs: (r.t1 - r.t0) / 1e6,
     decodeMs: dMs, fuseMs: fMs, peakStep, backlashEstimate: suggestBacklash(peaks, lastSteps),
   } satisfies EdofComposite, [bitmap])
   stats()
@@ -159,6 +164,7 @@ function clear(): void {
   decodeMs = 0; fuseMs = 0
   fuser?.reset()
   grouper.reset()
+  deadBand.reset()
   if (expireTimer) { clearTimeout(expireTimer); expireTimer = null }
 }
 
@@ -169,12 +175,14 @@ defineWorker<EdofWorkerIn>(async (m) => {
       width = m.width; height = m.height; cell = m.cell ?? 16; flatRatio = m.flatRatio ?? 1.25; backlash = m.backlash ?? 0
       fuser = new SweepFuser(width, height, { cell, flatRatio })
       grouper = new LegGrouper({ windowMs: m.windowMs })
+      deadBand = new DeadBandFilter(backlash)
       received = 0; decoded = 0; droppedInWorker = 0
       return
     case 'reset':
       clear(); stats()
       return
     case 'leg':
+      deadBand.startLeg(m.leg)
       await emitAll(grouper.startLeg(m.leg))
       return
     case 'leg_end':
@@ -183,11 +191,12 @@ defineWorker<EdofWorkerIn>(async (m) => {
       return
     case 'frame':
       received++
-      queue.push(m)
+      queue.push(...deadBand.offer(m.ts, m))
       while (queue.length > MAX_QUEUE) { queue.shift(); droppedInWorker++ }
       void pump()
       return
     case 'flush':
+      queue.push(...deadBand.flush())
       flushWanted = true
       void pump()
       return

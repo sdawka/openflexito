@@ -408,8 +408,11 @@ class Stage:
                     self.board.stop()
                     time.sleep(0.05)  # as in _hw_move: let the board settle before reading p?
                 t_end = now_ns()
-                self._refresh_hw()
-                self._live = None  # after the readback, or live_position() would show the leg's start
+                if cancelled:
+                    self._refresh_hw()
+                else:  # a finished leg ends where it was sent: a `p?` here cost ~10 ms per leg on the Pi
+                    self._hw = {a: start_hw[a] + d[a] for a in AXES}
+                self._live = None  # after the update, or live_position() would show the leg's start
                 for a in AXES:
                     bl = self.backlash.get(a, 0)
                     if bl:
@@ -421,6 +424,7 @@ class Stage:
             # under `_busy` (a gap would let a queued move in); it clears `_cancel`, so a stage.stop
             # ends the sweeps but still returns z, and a second one aborts the return.
             self._live = None
+            self._check_tracked_hw()
             self._move_rel_locked(self._program_to_hw_delta(0, 0, start_z - self.position["z"]), ("z",))
         finally:
             # also after a serial error mid-leg: the device must not report "moving" for ever
@@ -435,6 +439,13 @@ class Stage:
             self._schedule_release()
             self._busy.release()
         return {"legs": legs, "position": self.position}
+
+    def _check_tracked_hw(self) -> None:
+        """Read the board's position back after the sweeps, whose legs were tracked from the
+        commanded deltas; a mismatch means the board skipped or dropped a leg."""
+        tracked = dict(self._hw)
+        if self._refresh_hw() != tracked:
+            log.warning("z sweep: board reports %s, tracked %s; using the board's", self._hw, tracked)
 
     async def stop(self) -> dict:
         self._cancel.set()

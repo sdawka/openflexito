@@ -52,7 +52,7 @@
     {/if}
   </div>
   {#if liveEdof.active && s}
-    <div class="status-line busy mono" data-sweeps={s.sweeps}>{s.sweepsPerS.toFixed(1)} sweeps/s · {s.framesPerSweep} frames/sweep ({Math.round(s.usefulFraction * 100)}% useful) · {Math.round(s.windowMs)} ms window · dropped {s.deviceDropped + s.workerDropped}</div>
+    <div class="status-line busy mono" data-sweeps={s.sweeps} title={`decode ${s.decodeMs.toFixed(1)} ms/frame · fuse ${Math.round(s.fuseMs)} ms/sweep · dropped on the device ${s.deviceDropped}, in the browser ${s.workerDropped}`}>{s.sweepsPerS.toFixed(1)} sweeps/s · {s.framesPerSweep} frames/sweep ({Math.round(s.usefulFraction * 100)}% useful) · {Math.round(s.windowMs)} ms window · dropped {s.deviceDropped + s.workerDropped}</div>
   {:else if liveEdof.active}
     <div class="status-line busy">sweeping…</div>
   {/if}
