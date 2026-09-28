@@ -170,10 +170,11 @@ on hardware.
 - Colour-checker CCM calibration and CA/distortion correction from a grid target (CAPTURE_AUDIT.md
   Tier C).
 
-- **Sensor video recording on the Pi** (`/record.h264`, `camera.py` `_start_recording_sync`): written
-  against picamera2's documented API and exercised only with the fake camera (PyAV libx264). On the
-  Pi 3B+ check: the 1640×1232 `main` + 820×616 `lores` configuration starts; H.264 (`profile="high"`)
-  and MJPEG encoders run together at 30 fps without dropping frames (CPU, bcm2835-codec throughput,
-  level 4.1 limit); encoder timestamps line up with SensorTimestamp; the MP4 plays in Chrome/Safari; the
-  stream configuration comes back cleanly after stop, standby and a closed tab; real throughput on
-  WiFi at 25 Mbit/s + the preview stream.
+- **Sensor video recording on the Pi** (`/record.h264`): verified 2026-09-28 on the Pi 3B+ (1640×1232
+  at 28–29 fps, timestamps = SensorTimestamp, live view keeps streaming, config restored, plays in
+  Chrome). Still open: Safari playback, a closed tab / standby mid-recording on hardware, WiFi
+  throughput under a long recording. Over plain http there is no WebCodecs, so processed sensor
+  recordings fall back to the live view — serving the app over https (or localhost) would enable them.
+- **Sweep focus stack on a real specimen**: runs end to end on the Pi (119 frames / 1000 steps,
+  7 fused, 10.7 s) but only on an empty field; check fusion quality and the chosen band on a thick
+  sample, and whether 8 steps/frame is fine enough at 40×.
