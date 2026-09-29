@@ -47,7 +47,13 @@ export interface GalleryItem {
     depth?: { minZ: number; maxZ: number; colorMap: 'ramp'; unit?: 'steps' | 'µm'; umPerStep?: number }
     /** source 'sweep' (services/photo/sweepStack.ts): frames recorded during the sweep, camera fps,
      *  stage step delay and the recording size the slices were decoded at */
-    sweep?: { frames: number; fps: number; stepTimeUs: number; stepsPerFrame: number; range: number; width: number; height: number; sensorSize: [number, number] }
+    sweep?: {
+      frames: number; fps: number; stepTimeUs: number; stepsPerFrame: number; range: number; width: number; height: number; sensorSize: [number, number]
+      /** method 'deconvolve' (services/photo/sweepDeconv.ts): the image is the deconvolved mean of
+       *  `frames` sweep frames over z `window`, blur slope in px/step (measured from the sweep or from
+       *  the NA + calibrations), Wiener noise ratio */
+      deconvolved?: { frames: number; slopePxPerStep: number; slopeSource: 'measured' | 'theory'; window: number[]; noise: number }
+    }
   }
   /** pixel-shift super-resolution: N sub-pixel-shifted stills fused by drizzle onto a finer grid;
    *  `used` is how many of `frames` passed registration confidence + phase-validity checks and

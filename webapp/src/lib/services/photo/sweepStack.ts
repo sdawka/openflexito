@@ -21,10 +21,13 @@ import type { MoveResult } from '../../algo/types'
 import { withCameraLock } from '../cameraLock'
 import { moveZVerified, pyramidWorker, saveFusedStack, type FocusStackOptions } from './focusStack'
 import { settle, type Say, type PhotoMeta } from './common'
+import { deconvolveSweepFrames, type DeconvResult } from './sweepDeconv'
 
 export interface SweepStackOptions extends FocusStackOptions {
   /** z steps between consecutive frames (the sweep speed); default 8 */
   stepsPerFrame?: number
+  /** method 'deconvolve': Wiener noise-to-signal ratio (`algo/sweepDeconv#DeconvOptions.noise`) */
+  deconvNoise?: number
 }
 
 const SHARPNESS_WIDTH = 410
@@ -175,7 +178,8 @@ export async function takeSweepStack(o: SweepStackOptions, say: Say, meta: Photo
     const fctx = full.getContext('2d', { willReadFrequently: true })!
     const fuse = pyramidWorker()
     fuse.onProgress = (m) => say(`sweep stack: ${m}`)
-    fuse.post({ type: 'init', width: w, height: h, depth: 8, count: chosen.length, reference: 'middle', method: o.method })
+    const deconvolve = o.method === 'deconvolve'
+    fuse.post({ type: 'init', width: w, height: h, depth: 8, count: chosen.length, reference: 'middle', method: deconvolve ? 'pyramid' : o.method })
     const slices: Promise<Blob>[] = []
     for (let i = 0; i < chosen.length; i++) {
       fctx.drawImage(await video.frame(chosen[i].t), 0, 0)
@@ -191,12 +195,34 @@ export async function takeSweepStack(o: SweepStackOptions, say: Say, meta: Photo
     fuse.post({ type: 'finish' })
     const r = await fuse.finished.finally(() => fuse.worker.terminate())
     await back
+    // method 'deconvolve': the pyramid above still aligns the slices (its shifts stand in for every
+    // frame's) and gives the depth map; the picture itself is the deconvolved mean of the sweep
+    let deconv: DeconvResult | null = null
+    if (deconvolve) {
+      const order = chosen.map((c, i) => ({ z: c.z, s: r.shifts[i] ?? { dx: 0, dy: 0 } })).sort((a, b) => a.z - b.z)
+      try {
+        deconv = await deconvolveSweepFrames({
+          video: { width: w, height: h, frame: (t) => video.frame(t) },
+          samples, peak: sel.peak, band: sel.span, sweep: [Math.min(mv.z0, mv.z1), Math.max(mv.z0, mv.z1)],
+          alignedZ: order.map((a) => a.z), shifts: order.map((a) => a.s), noise: o.deconvNoise,
+        }, say)
+        r.data = deconv.data
+      } catch (e) {
+        say(`sweep EDOF: ${(e as Error).message} — keeping the pyramid fusion`)
+      }
+    }
     const blobs = await Promise.all(slices)
     return await saveFusedStack(r, {
-      label: 'sweep stack', say, meta, name: `Sweep focus stack ${chosen.length} of ${samples.length}`,
+      label: 'sweep stack', say, meta,
+      name: deconv ? `Sweep EDOF ${deconv.frames} frames (deconvolved)` : `Sweep focus stack ${chosen.length} of ${samples.length}`,
       frames: blobs.map((blob, i) => ({ blob, z: zs[i] })), centreZ: peakZ, step, span: zs[zs.length - 1] - zs[0], source: 'sweep',
       capture: null,
-      extraStack: { sweep: { frames: samples.length, fps: Math.round(fps * 10) / 10, stepTimeUs: stepUs, stepsPerFrame, range, width: w, height: h, sensorSize: rec.sensor_size } },
+      extraStack: {
+        sweep: {
+          frames: samples.length, fps: Math.round(fps * 10) / 10, stepTimeUs: stepUs, stepsPerFrame, range, width: w, height: h, sensorSize: rec.sensor_size,
+          ...(deconv ? { deconvolved: { frames: deconv.frames, slopePxPerStep: +deconv.slope.toFixed(4), slopeSource: deconv.slopeSource, window: deconv.window.map(Math.round), noise: o.deconvNoise ?? 0.0015 } } : {}),
+        },
+      },
     })
   } finally {
     video.close()

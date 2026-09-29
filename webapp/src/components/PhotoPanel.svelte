@@ -32,7 +32,9 @@
   let stackCapture = $state<'stills' | 'sweep'>('stills')
   let sweepStepsPerFrame = $state(8)
   const sweepAvailable = $derived(!!device.status?.camera?.record?.available)
-  let stackMethod = $state<'pyramid' | 'hybrid'>('pyramid')
+  let stackMethod = $state<'pyramid' | 'hybrid' | 'deconvolve'>('pyramid')
+  /** sweep deconvolution: Wiener noise-to-signal ratio (gentle / normal / strong) */
+  let deconvNoise = $state(0.0015)
   let hdrSource = $state<'jpeg' | 'raw'>('jpeg')
   let ledLevelsText = $state('0.4,0.7,1,1.5')
   let hdrFactorsText = $state('0.25,1,4')
@@ -46,6 +48,8 @@
 
   const current = $derived.by(() => {
     const c = choices.find((c) => c.id === choice)!
+    if (choice === 'stack' && stackCapture === 'sweep' && sweepAvailable && stackMethod === 'deconvolve')
+      return { ...c, blurb: 'One continuous z sweep recorded from the sensor; every frame around the in-focus band is aligned, averaged and deconvolved with the sweep’s own measured defocus blur. No per-pixel slice picking, so no halos or colour fringes; hundreds of frames average the noise away. Depth map from the sharp frames. Ends on the sharpest plane.', time: '~15–30 s' }
     return choice === 'stack' && stackCapture === 'sweep' && sweepAvailable
       ? { ...c, blurb: 'One continuous z sweep recorded from the sensor (1640×1232, 30 fps, the stage slowed so frames land a few steps apart). The sharp frames are picked from the sweep, aligned and fused in a Laplacian pyramid, with a depth map. Ends on the sharpest plane.', time: '~5–10 s' }
       : c
@@ -87,8 +91,9 @@
     try {
       const item = await takePhoto({
         mode, slices: isStack ? stackSlices : undefined, range: isStack ? stackRange : undefined,
-        method: isStack ? stackMethod : undefined,
+        method: isStack ? (stackMethod === 'deconvolve' && mode !== 'focussweep' ? 'pyramid' : stackMethod) : undefined,
         stepsPerFrame: mode === 'focussweep' ? sweepStepsPerFrame : undefined,
+        deconvNoise: mode === 'focussweep' && stackMethod === 'deconvolve' ? deconvNoise : undefined,
         frames: mode === 'rawavg' ? rawFrames : undefined,
         bracket: mode === 'exposure' ? 'led' : undefined,
         levels: mode === 'exposure' ? parseNums(ledLevelsText, [0.4, 0.7, 1, 1.5]) : mode === 'hdrraw' ? parseNums(hdrFactorsText, [0.25, 1, 4]) : undefined,
@@ -224,12 +229,18 @@
     <details class="adv">
       <summary>Advanced</summary>
       <div class="params">
-        <label title="pyramid: standard Laplacian-pyramid fusion. hybrid: additionally runs a Zerene DMap-style depth-guided refinement pass (more expensive).">Fusion method
-          <select bind:value={stackMethod} disabled={busy}>
+        <label title="pyramid: standard Laplacian-pyramid fusion. hybrid: additionally runs a Zerene DMap-style depth-guided refinement pass (more expensive). sweep deconvolution (sweep capture only): average the whole sweep and deconvolve its integrated defocus blur.">Fusion method
+          <select aria-label="focus stack fusion method" bind:value={stackMethod} disabled={busy}>
             <option value="pyramid">Pyramid</option>
             <option value="hybrid">Hybrid (DMap-style)</option>
+            <option value="deconvolve" disabled={photoMode !== 'focussweep'}>Sweep deconvolution{photoMode === 'focussweep' ? '' : ' (sweep capture)'}</option>
           </select>
         </label>
+        {#if photoMode === 'focussweep' && stackMethod === 'deconvolve'}<label title="how hard the deconvolution sharpens: strong recovers more fine detail and more noise">Strength
+          <select aria-label="sweep deconvolution strength" bind:value={deconvNoise} disabled={busy}>
+            <option value={0.004}>Gentle</option><option value={0.0015}>Normal</option><option value={0.0005}>Strong</option>
+          </select>
+        </label>{/if}
         {#if photoMode === 'focussweep'}<label title="z steps the stage moves between two recorded frames: smaller is a slower, denser sweep">Steps per frame <input type="number" min="1" max="40" aria-label="sweep steps per frame" bind:value={sweepStepsPerFrame} disabled={busy} /></label>{/if}
       </div>
     </details>

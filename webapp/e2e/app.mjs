@@ -335,6 +335,40 @@ if (moves) await step('sweep focus stack records one z sweep from the sensor, fu
   expect(shares.filter((s) => s > 5).length >= 2, `sweep stack did not draw on several slices: ${m[1]}`)
 })
 
+if (moves) await step('sweep deconvolution averages the sweep, deconvolves it and keeps the depth map', async () => {
+  await nav('live')
+  const panel = await tool('Photo')
+  await panel.locator('select[aria-label="capture mode"]').selectOption('stack')
+  await panel.locator('select[aria-label="focus stack capture"]').selectOption('sweep')
+  // put the panel back even on failure, or the next stack steps find it on Sweep (no From RAW box)
+  const restore = async () => {
+    await panel.locator('select[aria-label="focus stack fusion method"]').selectOption('pyramid').catch(() => {})
+    await panel.locator('select[aria-label="focus stack capture"]').selectOption('stills').catch(() => {})
+    await panel.locator('select[aria-label="capture mode"]').selectOption('single').catch(() => {})
+  }
+  try {
+    const adv = panel.locator('details.adv:has(select[aria-label="focus stack fusion method"])')
+    if (!(await adv.evaluate((d) => d.open))) await adv.locator('summary').click()
+    await panel.locator('select[aria-label="focus stack fusion method"]').selectOption('deconvolve')
+    expect(await panel.locator('select[aria-label="sweep deconvolution strength"]').count() === 1, 'no strength control for sweep deconvolution')
+    await rpc('stage.move_rel', { z: 120, compensate: false })
+    const seen = []
+    const poll = setInterval(async () => { const t = await panel.innerText().catch(() => ''); const m = t.match(/sweep EDOF[^\n]*/); if (m && seen[seen.length - 1] !== m[0]) seen.push(m[0]) }, 250)
+    try {
+      await page.click('button:has-text("Take photo")')
+      await page.waitForFunction(() => /saved "Sweep (EDOF|focus stack)/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 180000 })
+        .catch(async () => { throw new Error('sweep deconvolution did not finish: ' + (await panel.innerText()).replace(/\s+/g, ' ').slice(-240)) })
+    } finally { clearInterval(poll) }
+    const done = await panel.innerText()
+    expect(/saved "Sweep EDOF \d+ frames \(deconvolved\)/.test(done), `fell back to the pyramid fusion: ${seen.join(' | ')} ${done.replace(/\s+/g, ' ').slice(-200)}`)
+    const z = (await position()).z
+    expect(Math.abs(z) < 60, `sweep deconvolution ended at z=${z}; the fake specimen is in focus at z=0`)
+  } finally { await restore() }
+  await nav('gallery'); await page.waitForTimeout(600)
+  const g = await page.locator('main').innerText()
+  expect(/Sweep EDOF \d+ frames \(deconvolved\)/.test(g), 'gallery does not list the deconvolved sweep: ' + g.replace(/\s+/g, ' ').slice(0, 200))
+})
+
 if (moves) await step('fine focus stack from RAW fuses 16-bit slices and renders a relief', async () => {
   // Regression: the RAW path fuses to a Uint16Array, and the relief base was downscaled 4x while the
   // encode still used full width/height -> "Failed to construct 'ImageData'". `focusfine` (8-bit)

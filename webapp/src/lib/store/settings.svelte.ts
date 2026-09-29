@@ -29,6 +29,9 @@ export interface Settings {
    *  Different builds (screw pitch, gearing, worn parts) will vary — override per instrument here, or
    *  use "calibrate from a known length" against a stage micrometer instead. */
   stageStepUm: { x: number; y: number; z: number }
+  /** Numerical aperture of the objective in use (0.65 for a typical 40× plan achromat). Sets the
+   *  theoretical depth of field that spaces focus-stack slices (`algo/stackPlan.ts`). */
+  objectiveNA: number
   showScaleBar: boolean
   /** Video recording defaults (`PhotoPanel.svelte`); `codec` mirrors `services/recorder.svelte.ts`'s
    *  `VideoCodec` ('vp9' | 'av1' | 'vp8' | 'auto') but is kept as `string` here to avoid a runtime
@@ -95,6 +98,7 @@ const defaults: Settings = {
     Rheinberg: { cc: 0.1, pwm: [1, 0] },
   },
   stageStepUm: { x: 0.088, y: 0.088, z: 0.050 },
+  objectiveNA: 0.65,
   showScaleBar: true,
   videoCodec: 'vp9', videoBitrateMbps: 12, videoStabilise: false,
   videoCodecPref: 'auto', videoContainer: 'mp4', videoQuality: 'high', videoKeyframeS: 2, videoDeflicker: false, deflickerLive: false,
