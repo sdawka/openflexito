@@ -86,6 +86,21 @@ if (moves) await step('jog buttons move the stage by the step size', async () =>
   await page.waitForFunction((x0) => { const m = document.querySelector('nav')?.textContent?.match(/x\s+(-?\d+)/); return m && +m[1] === x0 }, p0.x, { timeout: 8000 })
 })
 
+if (moves) await step('Shift+↑/↓ jog Z, not Y', async () => {
+  await page.evaluate(() => document.activeElement?.blur?.())
+  const settled = async () => { let a = await position(), b; for (;;) { await page.waitForTimeout(400); b = await position(); if (b.z === a.z && b.y === a.y) return b; a = b } }
+  const p0 = await settled()
+  await page.keyboard.down('Shift'); await page.keyboard.down('ArrowUp')
+  await page.waitForTimeout(500)
+  await page.keyboard.up('ArrowUp'); await page.keyboard.up('Shift')
+  const p1 = await settled()
+  expect(p1.z > p0.z && p1.y === p0.y, `Shift+↑ moved z ${p0.z}→${p1.z}, y ${p0.y}→${p1.y}`)
+  await page.keyboard.down('Shift'); await page.keyboard.down('ArrowDown')
+  await page.waitForTimeout(500)
+  await page.keyboard.up('ArrowDown'); await page.keyboard.up('Shift')
+  const p2 = await settled()
+  expect(p2.z < p1.z && p2.y === p0.y, `Shift+↓ moved z ${p1.z}→${p2.z}, y ${p1.y}→${p2.y}`)
+})
 await step('photo (full resolution) lands in the gallery', async () => {
   await nav('gallery'); await page.waitForTimeout(500)
   const before = await page.locator('.card').count()
@@ -170,6 +185,27 @@ if (moves) await step('calibration 2: stage ↔ camera mapping', async () => {
   const row = await page.locator('table.result tbody tr').first().innerText()
   const pxPerStep = parseFloat(row.split('\t')[1])
   expect(pxPerStep > 0.005 && pxPerStep < 5, `implausible pixels/step ${pxPerStep}`)
+})
+
+if (moves) await step('focus calibration: z backlash and frame lag, stage speed restored, z returned', async () => {
+  await nav('calibrate')
+  // the fake's specimen is in focus at z = 0 (defocus ∝ |z|); on a real Pi calibrate where it is
+  if (/127\.0\.0\.1|localhost/.test(base)) await rpc('stage.move_to', { z: 0, compensate: 'z' })
+  const before = (await rpc('system.status')).stage.step_time_us
+  await page.waitForTimeout(800)
+  const z0 = (await position()).z
+  await page.click('button:has-text("Calibrate Z")')
+  await logHas(/focus calibration: (done|FAILED)/, 180000)
+  const log = await page.locator('pre.log').innerText()
+  expect(/focus calibration: done/.test(log), log.split('\n').filter((l) => /focus calibration/.test(l)).slice(-3).join(' | '))
+  const cells = await page.locator('table.zcal tbody td').allInnerTexts()
+  const b = parseFloat(cells[0]), lag = parseFloat(cells[1]), rep = parseFloat(cells[2])
+  expect([b, lag, rep].every(Number.isFinite), `non-finite result: ${cells.join(' / ')}`)
+  const after = (await rpc('system.status')).stage.step_time_us
+  expect(after === before, `stage step time ${after} µs after the calibration, was ${before} µs`)
+  await page.waitForTimeout(800)
+  const z1 = (await position()).z
+  expect(Math.abs(z1 - z0) <= 2, `ended at z=${z1}, started at z=${z0}`)
 })
 
 await step('RAW flat field: capture and clear', async () => {
@@ -299,6 +335,40 @@ if (moves) await step('sweep focus stack records one z sweep from the sensor, fu
   expect(shares.filter((s) => s > 5).length >= 2, `sweep stack did not draw on several slices: ${m[1]}`)
 })
 
+if (moves) await step('sweep deconvolution averages the sweep, deconvolves it and keeps the depth map', async () => {
+  await nav('live')
+  const panel = await tool('Photo')
+  await panel.locator('select[aria-label="capture mode"]').selectOption('stack')
+  await panel.locator('select[aria-label="focus stack capture"]').selectOption('sweep')
+  // put the panel back even on failure, or the next stack steps find it on Sweep (no From RAW box)
+  const restore = async () => {
+    await panel.locator('select[aria-label="focus stack fusion method"]').selectOption('pyramid').catch(() => {})
+    await panel.locator('select[aria-label="focus stack capture"]').selectOption('stills').catch(() => {})
+    await panel.locator('select[aria-label="capture mode"]').selectOption('single').catch(() => {})
+  }
+  try {
+    const adv = panel.locator('details.adv:has(select[aria-label="focus stack fusion method"])')
+    if (!(await adv.evaluate((d) => d.open))) await adv.locator('summary').click()
+    await panel.locator('select[aria-label="focus stack fusion method"]').selectOption('deconvolve')
+    expect(await panel.locator('select[aria-label="sweep deconvolution strength"]').count() === 1, 'no strength control for sweep deconvolution')
+    await rpc('stage.move_rel', { z: 120, compensate: false })
+    const seen = []
+    const poll = setInterval(async () => { const t = await panel.innerText().catch(() => ''); const m = t.match(/sweep EDOF[^\n]*/); if (m && seen[seen.length - 1] !== m[0]) seen.push(m[0]) }, 250)
+    try {
+      await page.click('button:has-text("Take photo")')
+      await page.waitForFunction(() => /saved "Sweep (EDOF|focus stack)/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 180000 })
+        .catch(async () => { throw new Error('sweep deconvolution did not finish: ' + (await panel.innerText()).replace(/\s+/g, ' ').slice(-240)) })
+    } finally { clearInterval(poll) }
+    const done = await panel.innerText()
+    expect(/saved "Sweep EDOF \d+ frames \(deconvolved\)/.test(done), `fell back to the pyramid fusion: ${seen.join(' | ')} ${done.replace(/\s+/g, ' ').slice(-200)}`)
+    const z = (await position()).z
+    expect(Math.abs(z) < 60, `sweep deconvolution ended at z=${z}; the fake specimen is in focus at z=0`)
+  } finally { await restore() }
+  await nav('gallery'); await page.waitForTimeout(600)
+  const g = await page.locator('main').innerText()
+  expect(/Sweep EDOF \d+ frames \(deconvolved\)/.test(g), 'gallery does not list the deconvolved sweep: ' + g.replace(/\s+/g, ' ').slice(0, 200))
+})
+
 if (moves) await step('fine focus stack from RAW fuses 16-bit slices and renders a relief', async () => {
   // Regression: the RAW path fuses to a Uint16Array, and the relief base was downscaled 4x while the
   // encode still used full width/height -> "Failed to construct 'ImageData'". `focusfine` (8-bit)
@@ -347,6 +417,55 @@ await step('live focus stack builds a composite and saves it', async () => {
   await page.click('.panel:has(h3:has-text("Focus")) button:has-text("Save")')
   await page.waitForFunction(() => /saved "Live stack/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 10000 })
   await page.click('.panel:has(h3:has-text("Focus")) .seg button:has-text("Off")')
+})
+
+if (moves) await step('live extended focus sweeps z, fuses composites, records them and returns z', async () => {
+  await nav('live')
+  const panel = await tool('Focus')
+  const setNum = async (label, v) => {
+    const el = panel.locator(`input[aria-label="${label}"]`)
+    await el.fill(String(v)); await el.press('Tab')
+  }
+  await panel.locator('select[aria-label="edof mode"]').selectOption('crop')
+  await setNum('edof fps', 30)
+  await setNum('edof range', 60)
+  await setNum('edof backlash', 20)   // the fake board has no backlash of its own
+  const z0 = (await rpc('stage.status')).position.z
+  await panel.locator('button:has-text("Start extended focus")').click()
+  const sweeps = () => panel.locator('[data-sweeps]').getAttribute('data-sweeps', { timeout: 1000 }).then((v) => +v).catch(() => 0)
+  await page.waitForFunction(() => +(document.querySelector('.panel [data-sweeps]')?.getAttribute('data-sweeps') ?? 0) >= 2, null, { timeout: 30000 })
+    .catch(async () => { throw new Error(`fewer than 2 sweeps fused (${await sweeps()}): ` + (await panel.innerText()).replace(/\s+/g, ' ').slice(-240)) })
+  const drawn = await page.locator('.view canvas.edof').evaluate((c) => {
+    if (!c.width || !c.height) return false
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data
+    let lit = 0
+    for (let i = 0; i < d.length; i += 4 * 97) if (d[i] + d[i + 1] + d[i + 2] > 30) lit++
+    return lit > 50
+  })
+  expect(drawn, 'extended-focus composite canvas is empty')
+  // the stream now carries fast-mode frames: pan/click-to-centre/measure are off on the live view
+  expect(await page.locator('.view.locked').count() === 1, 'live view not locked against pan/centre while sweeping')
+  expect(/crop: central \d+ % of the field/.test(await page.locator('.view .edof-note').innerText()), 'crop-field note missing')
+  const line = await panel.locator('[data-sweeps]').innerText()
+  expect(/[\d.]+ sweeps\/s · \d+ frames\/sweep \(\d+% useful\) · \d+ ms window · dropped \d+/.test(line), `stats line: ${line}`)
+  // record ~3 s of composites
+  await panel.locator('button:has-text("Record extended focus")').click()
+  await page.waitForFunction(() => /Stop recording · \d+ s/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 10000 })
+  await page.waitForTimeout(3000)
+  await panel.locator('button:has-text("Stop recording")').click()
+  await page.waitForFunction(() => /saved "Video extended focus/.test(document.querySelector('main')?.textContent || ''), null, { timeout: 15000 })
+    .catch(async () => { throw new Error('EDOF recording not saved: ' + (await panel.innerText()).replace(/\s+/g, ' ').slice(-240)) })
+  await panel.locator('button:has-text("Stop extended focus")').click()
+  await panel.locator('button:has-text("Start extended focus")').waitFor({ timeout: 20000 })
+  let st = await rpc('stage.status')
+  for (let i = 0; i < 40 && st.moving; i++) { await page.waitForTimeout(250); st = await rpc('stage.status') }
+  expect(st.oscillating === false, `stage still oscillating: ${JSON.stringify(st.oscillating)}`)
+  expect(Math.abs(st.position.z - z0) <= 5, `z ended at ${st.position.z}, started at ${z0}: ` + (await panel.innerText()).replace(/\s+/g, ' ').slice(-200))
+  const snap = await page.request.get(base + '/snapshot.jpg?full=1')
+  expect(snap.status() === 200, `full snapshot after extended focus: ${snap.status()}`)
+  await setNum('edof backlash', '')
+  await nav('gallery'); await page.waitForTimeout(600)
+  expect(/video · \d+ s · extended focus/.test(await page.locator('main').innerText()), 'gallery lacks the extended-focus video')
 })
 
 await step('video recording (stabilise on) lands in the gallery and opens in the viewer', async () => {

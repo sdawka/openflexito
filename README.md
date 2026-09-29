@@ -42,7 +42,7 @@ cd device && python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 cd ../webapp && npm install && OPENFLEXITO_DEVICE=http://localhost:8080 npm run dev
 ```
 
-Open the Vite URL. Keys WASD/arrows jog XY, PgUp/PgDn jog Z, a gamepad works too.
+Open the Vite URL. Keys WASD/arrows jog XY, Shift+↑/↓ or PgUp/PgDn jog Z, a gamepad works too.
 
 ## Build a ready-to-boot image (macOS or Linux, no loop mounts)
 

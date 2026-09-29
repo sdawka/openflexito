@@ -162,3 +162,163 @@ async def test_coils_are_released_after_idle(board, events, tmp_path, transport)
     await asyncio.sleep(0.15)
     assert "release" not in transport.sent
     st.close()
+
+
+async def test_oscillate_sweeps_back_and_forth_and_returns(stage, transport, events):
+    """Legs alternate +steps/-steps back to back on the stage thread, each reported at its start
+    and end; other moves are refused meanwhile; stopping returns z to the start (with z backlash
+    compensation)."""
+    import threading
+    events.bind(asyncio.get_running_loop())
+    await stage.move_rel(z=500)
+    start_z = stage.position["z"]
+    recs, stop = [], threading.Event()
+    sent_before = len(transport.sent)
+    task = asyncio.ensure_future(stage.oscillate(40, recs.append, stop))
+    for _ in range(200):
+        if sum(r["type"] == "leg_end" for r in recs) >= 4:
+            break
+        await asyncio.sleep(0.01)
+    assert stage.oscillating and stage.moving
+    with pytest.raises(Exception, match="sweeping"):
+        await stage.move_rel(x=10)
+    stop.set()
+    res = await task
+    legs = [r for r in recs if r["type"] == "leg"]
+    ends = [r for r in recs if r["type"] == "leg_end"]
+    assert res["legs"] == len(ends) >= 4 and len(legs) == len(ends)
+    assert [l["steps"] for l in legs[:4]] == [40, -40, 40, -40]
+    assert all(l["t_cmd"] <= l["t_ack"] <= e["t_end"] for l, e in zip(legs, ends))
+    assert all(e["t_end"] <= n["t_cmd"] for e, n in zip(ends, legs[1:]))  # no overlap between legs
+    assert [e["z1"] for e in ends[:2]] == [start_z + 40, start_z]
+    # finished legs are tracked from the commanded delta, not read back with `p?` (~10 ms each on the Pi)
+    assert transport.sent[sent_before:].count("p?") < len(ends)
+    assert not any(e["cancelled"] for e in ends)
+    assert stage.position["z"] == start_z and not stage.oscillating and not stage.moving
+    await stage.move_rel(x=10)  # moves work again
+
+
+async def test_stage_stop_cancels_an_oscillation(stage, transport, events):
+    import threading
+    events.bind(asyncio.get_running_loop())
+    transport.step_time_us = 2000
+    stage.board.info.step_time_us = 2000
+    recs = []
+    task = asyncio.ensure_future(stage.oscillate(500, recs.append, threading.Event()))  # 1 s legs
+    for _ in range(100):
+        if recs:
+            break
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.1)
+    await stage.stop()
+    res = await asyncio.wait_for(task, 5)
+    assert res["legs"] == 1 and recs[-1]["type"] == "leg_end" and recs[-1]["cancelled"]
+    assert stage.position["z"] == 0
+
+
+async def test_serial_error_mid_sweep_leaves_the_stage_usable(stage, transport, events):
+    """A serial failure mid-leg ends the sweeps with the error, but the stage must not stay
+    "moving"/"oscillating" or keep its busy lock (every later move would be refused)."""
+    import threading
+    from openflexito.sangaboard import SangaboardError
+    events.bind(asyncio.get_running_loop())
+    real = stage.board.moving
+    calls = [0]
+
+    def flaky():
+        calls[0] += 1
+        if calls[0] == 3:
+            raise SangaboardError("timeout waiting for reply to 'moving?'")
+        return real()
+    stage.board.moving = flaky
+    stop = threading.Event()
+    with pytest.raises(SangaboardError):
+        await asyncio.wait_for(stage.oscillate(40, lambda rec: None, stop), 5)
+    stage.board.moving = real
+    assert not stage.oscillating and not stage.moving
+    await stage.move_rel(x=10)  # the busy lock was released
+
+
+async def test_jog_is_refused_without_ending_a_sweep(stage, transport, events):
+    import threading
+    events.bind(asyncio.get_running_loop())
+    stop = threading.Event()
+    task = asyncio.ensure_future(stage.oscillate(40, lambda rec: None, stop))
+    try:
+        for _ in range(100):
+            if stage.moving:
+                break
+            await asyncio.sleep(0.01)
+        with pytest.raises(Exception, match="sweeping"):
+            await stage.jog(z=5)
+        with pytest.raises(Exception, match="sweeping"):
+            await stage.zero()
+        await asyncio.sleep(0.05)
+        assert stage.oscillating and not task.done()
+    finally:
+        stop.set()
+    assert (await task)["legs"] >= 2
+
+
+# ---- take-up jogs: z reversals cross the backlash dead band at once ---------------------------
+# fixture: backlash 100 on every axis, z inverted (program +z = hardware -z)
+
+async def _known_z(stage, program_dz: int) -> None:
+    """Drive z far enough one way that the engagement saturates (becomes known)."""
+    await stage.jog(z=program_dz)
+    assert stage._engaged_known("z")
+
+
+async def test_take_up_jog_adds_the_remaining_dead_band_on_a_reversal(stage, events):
+    events.bind(asyncio.get_running_loop())
+    await _known_z(stage, -300)  # program -z = hw +: engaged 1
+    assert stage._engaged["z"] == 1.0
+    z0 = stage.position["z"]
+    res = await stage.jog(z=10, take_up=True)  # program +z = hw -: 1.0 * 100 of dead band to cross
+    assert res["position"]["z"] - z0 == 110 and stage.position["z"] - z0 == 110
+    assert stage._engaged["z"] == 0.0
+    # half a dead band back the other way, then reverse: only the remaining half is added
+    await stage.jog(z=-50)
+    assert stage._engaged["z"] == 0.5
+    z1 = stage.position["z"]
+    await stage.jog(z=10, take_up=True)
+    assert stage.position["z"] - z1 == 60
+
+
+async def test_take_up_jog_adds_nothing_in_the_engaged_direction(stage, events):
+    events.bind(asyncio.get_running_loop())
+    await _known_z(stage, -300)
+    z0 = stage.position["z"]
+    await stage.jog(z=-10, take_up=True)  # same direction as the engagement
+    assert stage.position["z"] - z0 == -10
+
+
+async def test_take_up_jog_adds_nothing_while_the_engagement_is_unknown(stage, events):
+    events.bind(asyncio.get_running_loop())
+    assert not stage._engaged_known("z")
+    await stage.jog(z=10, take_up=True)
+    await stage.jog(z=-10, take_up=True)  # 10 steps each way never cross a 100-step band
+    assert stage.position["z"] == 0 and not stage._engaged_known("z")
+    await stage.jog(z=60)  # 60 more one way: still not the whole band
+    assert not stage._engaged_known("z")
+    await _known_z(stage, -300)
+    stage._saved_hw = dict(stage._hw)
+    stage.restore_position()  # a restored position forgets the gear state
+    assert not stage._engaged_known("z")
+    z0 = stage.position["z"]
+    await stage.jog(z=10, take_up=True)
+    assert stage.position["z"] - z0 == 10
+
+
+async def test_jog_without_take_up_and_xy_are_unchanged(stage, events):
+    events.bind(asyncio.get_running_loop())
+    await _known_z(stage, -300)
+    for axis in ("x", "y"):
+        await stage.jog(**{axis: -300})
+        await stage.jog(**{axis: -300})
+    p0 = stage.position
+    await stage.jog(z=10)  # take_up defaults to false
+    assert stage.position["z"] - p0["z"] == 10
+    await stage.jog(x=10, y=10, take_up=True)  # reversals on x/y (x inverted too): no take-up
+    p1 = stage.position
+    assert (p1["x"] - p0["x"], p1["y"] - p0["y"]) == (10, 10)

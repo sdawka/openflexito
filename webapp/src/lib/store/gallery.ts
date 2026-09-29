@@ -47,7 +47,13 @@ export interface GalleryItem {
     depth?: { minZ: number; maxZ: number; colorMap: 'ramp'; unit?: 'steps' | 'µm'; umPerStep?: number }
     /** source 'sweep' (services/photo/sweepStack.ts): frames recorded during the sweep, camera fps,
      *  stage step delay and the recording size the slices were decoded at */
-    sweep?: { frames: number; fps: number; stepTimeUs: number; stepsPerFrame: number; range: number; width: number; height: number; sensorSize: [number, number] }
+    sweep?: {
+      frames: number; fps: number; stepTimeUs: number; stepsPerFrame: number; range: number; width: number; height: number; sensorSize: [number, number]
+      /** method 'deconvolve' (services/photo/sweepDeconv.ts): the image is the deconvolved mean of
+       *  `frames` sweep frames over z `window`, blur slope in px/step (measured from the sweep or from
+       *  the NA + calibrations), Wiener noise ratio */
+      deconvolved?: { frames: number; slopePxPerStep: number; slopeSource: 'measured' | 'theory'; window: number[]; noise: number }
+    }
   }
   /** pixel-shift super-resolution: N sub-pixel-shifted stills fused by drizzle onto a finer grid;
    *  `used` is how many of `frames` passed registration confidence + phase-validity checks and
@@ -87,6 +93,9 @@ export interface GalleryItem {
     /** additive: stabiliser options in force and the re-timer's mode/stats (`algo/retime.ts`) */
     stabiliser?: { strength: string; rotation: boolean; edges: string }
     retime?: { mode: string; fps: number; pushed: number; emitted: number; duplicates: number; dropped: number }
+    /** additive: recorded from the live extended-focus composites (`services/liveEdof.svelte.ts`):
+     *  sensor mode, capture rate, z range/leg length in steps, and the run's sweep statistics */
+    edof?: { mode: string; fps: number; steps: number; range: number; backlash: number; sweeps: number; framesPerSweep: number; usefulFraction: number; windowMs: number; width: number; height: number }
   }
   /** time-lapse: blobs 'f0000', 'f0001', ... one JPEG per frame, plus 'thumb' from the first frame.
    *  `frames[i].shift` is that frame's measured drift (px) from the first frame (see `algo/drift.ts`);
@@ -247,7 +256,8 @@ export async function saveVideo(blob: Blob, thumb: Blob | null, meta: { duration
   sensor?: NonNullable<GalleryItem['video']>['sensor']
   stabilised?: boolean; deflickered?: boolean; framesDropped?: number; framesDuplicated?: number
   mode?: NonNullable<GalleryItem['video']>['mode']; burnIn?: string[]
-  stabiliser?: NonNullable<GalleryItem['video']>['stabiliser']; retime?: NonNullable<GalleryItem['video']>['retime'] }): Promise<GalleryItem> {
+  stabiliser?: NonNullable<GalleryItem['video']>['stabiliser']; retime?: NonNullable<GalleryItem['video']>['retime']
+  edof?: NonNullable<GalleryItem['video']>['edof'] }): Promise<GalleryItem> {
   const id = newId()
   const frames = meta.frames?.length ? meta.frames : undefined
   const item: GalleryItem = {
@@ -256,7 +266,7 @@ export async function saveVideo(blob: Blob, thumb: Blob | null, meta: { duration
     video: {
       durationS: meta.durationS, fps: meta.fps, source: meta.source, mime: blob.type, codec: meta.codec, bitrateBps: meta.bitrateBps, frameCount: frames?.length, frameLog: frames ? 'frames' : undefined,
       stabilised: meta.stabilised, encoder: meta.encoder, container: meta.container, quality: meta.quality, keyframeS: meta.keyframeS, deflickered: meta.deflickered, framesDropped: meta.framesDropped, framesDuplicated: meta.framesDuplicated,
-      mode: meta.mode, burnIn: meta.burnIn?.length ? meta.burnIn : undefined, stabiliser: meta.stabiliser, retime: meta.retime, sensor: meta.sensor,
+      mode: meta.mode, burnIn: meta.burnIn?.length ? meta.burnIn : undefined, stabiliser: meta.stabiliser, retime: meta.retime, sensor: meta.sensor, edof: meta.edof,
     },
     sample: currentSample(),
   }

@@ -23,7 +23,9 @@ import { PyramidFuser, packRgba8, packRgb16, unpackPlanes, hybridFuse } from '..
 import { SliceAligner, chooseReference, luminance, translatePlanesSubpixel, type Resample } from '../algo/align'
 import type { Gray } from '../algo/sharpness'
 
-export type FuseMethod = 'pyramid' | 'hybrid'
+/** 'deconvolve' is the sweep stack's focal-sweep deconvolution (`services/photo/sweepDeconv.ts`);
+ *  this worker fuses it as 'pyramid' (the sweep stack sends that). */
+export type FuseMethod = 'pyramid' | 'hybrid' | 'deconvolve'
 export type ReferenceMode = 'middle' | 'sharpest'
 
 export type StackMessage =

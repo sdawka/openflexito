@@ -8,6 +8,9 @@ export interface Settings {
   stepZ: number            // steps per jog tick in z
   gamepad: boolean
   invertYKeys: boolean
+  /** z jogs (keyboard, HUD, gamepad) ask the device to take up the z backlash on a reversal
+   *  (`stage.jog` `take_up: true`), so focus responds at once instead of after the dead band */
+  zJogTakeUp: boolean
   showLores: boolean
   detectModel: string
   clipModel: string
@@ -26,6 +29,9 @@ export interface Settings {
    *  Different builds (screw pitch, gearing, worn parts) will vary — override per instrument here, or
    *  use "calibrate from a known length" against a stage micrometer instead. */
   stageStepUm: { x: number; y: number; z: number }
+  /** Numerical aperture of the objective in use (0.65 for a typical 40× plan achromat). Sets the
+   *  theoretical depth of field that spaces focus-stack slices (`algo/stackPlan.ts`). */
+  objectiveNA: number
   showScaleBar: boolean
   /** Video recording defaults (`PhotoPanel.svelte`); `codec` mirrors `services/recorder.svelte.ts`'s
    *  `VideoCodec` ('vp9' | 'av1' | 'vp8' | 'auto') but is kept as `string` here to avoid a runtime
@@ -82,7 +88,7 @@ export interface Settings {
 }
 
 const defaults: Settings = {
-  deviceUrl: '', stepXY: 500, stepZ: 100, gamepad: true, invertYKeys: false, showLores: false,
+  deviceUrl: '', stepXY: 500, stepZ: 100, gamepad: true, invertYKeys: false, zJogTakeUp: true, showLores: false,
   detectModel: 'Xenova/yolos-tiny', clipModel: 'Xenova/clip-vit-base-patch32', detectThreshold: 0.5, detectIntervalMs: 800,
   followDeadbandPx: 12, followIntervalMs: 400,
   lightPresets: {
@@ -92,6 +98,7 @@ const defaults: Settings = {
     Rheinberg: { cc: 0.1, pwm: [1, 0] },
   },
   stageStepUm: { x: 0.088, y: 0.088, z: 0.050 },
+  objectiveNA: 0.65,
   showScaleBar: true,
   videoCodec: 'vp9', videoBitrateMbps: 12, videoStabilise: false,
   videoCodecPref: 'auto', videoContainer: 'mp4', videoQuality: 'high', videoKeyframeS: 2, videoDeflicker: false, deflickerLive: false,

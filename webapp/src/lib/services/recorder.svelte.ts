@@ -100,6 +100,8 @@ export function needsProcessing(o: Pick<RecorderOptions, 'stabilize' | 'deflicke
 const GRAY_WIDTH = 480   // downscale width for the stabiliser's tracking frame (register.ts refines from here)
 const STAB_MARGIN_PX = 40   // crop margin (px of an 820-px-wide frame, scaled with the width) the stabiliser's correction is clamped to
 const STAB_THETA_MAX_DEG = 2
+/** `startFeed()`'s muxer timestamp grid (Hz): fine enough that snapping VFR times costs < 17 ms */
+const FEED_TIME_GRID_HZ = 60
 
 export class Recorder {
   recording = $state(false)
@@ -151,6 +153,9 @@ export class Recorder {
   private recError: Error | null = null
   /** packets that arrive while the muxer/encoder is still being set up (the first keyframe among them) */
   private pending: RecordPacket[] | null = null
+  // ---- startFeed() state ----
+  private feeding: { o: RecorderOptions; started: boolean; meta?: () => NonNullable<GalleryItem['video']>['edof'] } | null = null
+  private feedSeq = 0
 
   /** Best-effort browser support probe; `VideoEncoder` (WebCodecs) or `MediaRecorder`. */
   static supported(): boolean { return typeof VideoEncoder !== 'undefined' || typeof MediaRecorder !== 'undefined' }
@@ -240,6 +245,38 @@ export class Recorder {
       frame.bitmap.close()
     }, (e) => { if (this.recording || this.sink) this.status = `stream error: ${e.message}` })
     void run.then(() => { if (this.recording) { this.status = 'stream ended'; void this.stop() } })
+  }
+
+  /** Record frames pushed by the caller with `feed()` (e.g. the live extended-focus composites,
+   *  `services/liveEdof.svelte.ts`): each is drawn once and encoded with its own device time, so a
+   *  slow, irregular source (~3 composites/s) plays back at real speed (VFR). No stabiliser, no
+   *  re-timing and no frame chain: the fed image is already the finished picture. The sink's frame
+   *  rate is only a timestamp grid for the muxer (mediabunny snaps every timestamp to it), so it is set
+   *  well above the feed rate; key frames follow `keyframeS` in seconds as usual. `meta` is read once
+   *  at save time and stored as the item's `video.edof`. */
+  startFeed(label: string, opts: Partial<RecorderOptions> = {}, meta?: () => NonNullable<GalleryItem['video']>['edof']): void {
+    if (this.recording || this.feeding) return
+    const o = { ...this.options, ...opts, stabilize: false, retime: 'vfr' as RetimeMode }
+    this.status = ''
+    this.label = label
+    this.stabilizeWanted = false; this.stabilizer = null; this.holdEdges = false; this.margin = 0
+    this.feeding = { o, started: false, meta }
+  }
+
+  /** One frame for a `startFeed()` recording; `tNs` is its device time (CLOCK_BOOTTIME ns). The image
+   *  is drawn synchronously, so the caller may close it as soon as this returns. */
+  feed(image: CanvasImageSource, width: number, height: number, tNs: number | null): void {
+    const f = this.feeding
+    if (!f) return
+    if (!f.started) {
+      f.started = true
+      this.beginCanvas(width, height, f.o)
+      void createVideoSink(this.canvas!, this.sinkOptions(f.o, FEED_TIME_GRID_HZ))
+        .then((sink) => { if (this.feeding === f) { this.sink = sink; this.finishStart() } else void sink.close().catch(() => {}) })
+        .catch((e) => { this.status = `could not start the recorder: ${(e as Error).message}`; this.feeding = null })
+    }
+    this.drawFrame(image, width, height, tNs)
+    this.pushFrame(tNs, this.feedSeq++)
   }
 
   /** Whether the device can record H.264 from the sensor (`camera.record.available`). */
@@ -441,7 +478,7 @@ export class Recorder {
    *  encoded" by simply not appending to `log`/`frames`. */
   private pushFrame(tNs: number | null, seq: number): void {
     if (!this.sink || !this.recording) return
-    this.processFrame(tNs)
+    if (!this.feeding) this.processFrame(tNs)
     let tSec = tNs != null ? tNs / 1e9 : performance.now() / 1000
     let dupTimes: number[] = []
     if (this.retimer) {
@@ -497,6 +534,8 @@ export class Recorder {
    *  recording ends (normal stop, stream error, unmount) so a hold can never pin the device awake. */
   async stop(): Promise<GalleryItem | null> {
     const recInfo = this.recInfo
+    const feedMeta = this.feeding?.meta
+    this.feeding = null; this.feedSeq = 0
     // closing the /record.h264 connection is what returns the camera to its stream configuration
     this.recStream?.stop(); this.recStream = null; this.recInfo = null
     if (this.decoder) {
@@ -559,7 +598,7 @@ export class Recorder {
         keyframeS: this.optsUsed.keyframeS, stabilised: this.stabiliseUsed, deflickered: this.deflickerUsed,
         framesDropped: result.dropped + this.retimeDropped, framesDuplicated: result.duplicated + this.retimeDuplicated,
         stabiliser: this.stabiliseUsed ? { strength: this.optsUsed.stabilizeStrength ?? 'normal', rotation: !!this.optsUsed.stabilizeRotation, edges: this.optsUsed.stabilizeEdges ?? 'crop' } : undefined,
-        retime: retimeMeta, sensor: sensorMeta(true),
+        retime: retimeMeta, sensor: sensorMeta(true), edof: feedMeta?.(),
       })
       this.status = `saved "${item.name}" (${result.durationS.toFixed(0)} s, ${log.length} frames${result.dropped ? `, ${result.dropped} dropped` : ''}, ${(result.blob.size / 1048576).toFixed(1)} MB)`
       this.clearStatusLater()

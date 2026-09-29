@@ -210,3 +210,99 @@ async def test_record_streams_h264_and_blocks_stills(tmp_path):
             assert (await c.get("/snapshot.jpg?full=1")).status == 200
     finally:
         await cam.stop()
+
+
+async def test_edof_streams_fast_frames_and_sweep_records(tmp_path, transport, stage):
+    """`/edof.bin` runs the fast mode and the z sweeps while it is read: typed records, JPEG frames
+    with rising device times, leg start/end records from the stage; stills and recordings are
+    refused meanwhile; closing restores the stream mode and returns z to where it started."""
+    from openflexito.web import EDOF_HEADER, EDOF_MAGIC, EDOF_FRAME, EDOF_LEG, EDOF_LEG_END
+    events = EventBus()
+    events.bind(asyncio.get_running_loop())
+    stage.events = events
+    transport.step_time_us = stage.board.info.step_time_us = 1000  # 30 ms legs, as on the Pi
+    cam = FakeCamera(CameraConfig(fake=True, stream_size=(160, 120), lores_size=(40, 30), full_size=(64, 48),
+                                  fast_modes={"crop": {"sensor": [640, 480], "size": [128, 96], "max_fps": 200}}),
+                     tmp_path, events, fps=30)
+    cam.bind(asyncio.get_running_loop())
+    cam.position_provider = stage.live_position
+    app = build_app(RpcRegistry(), events, cam, None, lambda changed=False: {}, stage=stage)
+    await cam.start()
+    try:
+        async with TestClient(TestServer(app)) as c:
+            assert (await c.get("/edof.bin?mode=nope")).status == 400
+            async with c.get("/edof.bin?fps=100&steps=30") as r:
+                assert r.status == 200
+                info = json.loads(r.headers["X-Edof"])
+                assert (info["codec"], info["width"], info["height"], info["fps"], info["steps"]) == ("jpeg", 128, 96, 100, 30)
+                assert cam.fast is not None
+                frames, legs, ends = [], [], []
+                while len(ends) < 2 or len(frames) < 5:
+                    magic, kind, n, t, seq = EDOF_HEADER.unpack(await r.content.readexactly(EDOF_HEADER.size))
+                    assert magic == EDOF_MAGIC
+                    body = await r.content.readexactly(n)
+                    if kind == EDOF_FRAME:
+                        assert body[:2] == b"\xff\xd8"
+                        frames.append((t, seq))
+                    elif kind == EDOF_LEG:
+                        legs.append(json.loads(body))
+                    elif kind == EDOF_LEG_END:
+                        ends.append(json.loads(body))
+                assert all(b[0] > a[0] and b[1] == a[1] + 1 for a, b in zip(frames, frames[1:]))
+                assert [l["steps"] for l in legs[:2]] == [30, -30] and "dropped" in ends[0]
+                assert (await c.get("/snapshot.jpg?full=1")).status == 409
+                assert (await c.get("/edof.bin")).status == 409
+                assert (await c.get("/snapshot.jpg")).status == 200  # the live view carries on
+            for _ in range(100):
+                if cam.fast is None and not stage.oscillating:
+                    break
+                await asyncio.sleep(0.05)
+            assert cam.fast is None and not stage.oscillating
+            assert stage.position["z"] == 0
+            assert (await c.get("/snapshot.jpg?full=1")).status == 200
+    finally:
+        await cam.stop()
+
+
+async def test_edof_ends_when_the_camera_stalls(tmp_path, transport, stage, monkeypatch):
+    """No frame for `EDOF_STALL_S`: a status {error} record, then the response ends, so the sweeps
+    stop (z back at the start) and the camera leaves the fast mode instead of the stage sweeping
+    until the client happens to leave."""
+    from openflexito import web as webmod
+    from openflexito.web import EDOF_HEADER, EDOF_FRAME, EDOF_STATUS
+    monkeypatch.setattr(webmod, "EDOF_STALL_S", 0.3)
+    events = EventBus()
+    events.bind(asyncio.get_running_loop())
+    stage.events = events
+    transport.step_time_us = stage.board.info.step_time_us = 1000
+    cam = FakeCamera(CameraConfig(fake=True, stream_size=(160, 120), lores_size=(40, 30), full_size=(64, 48),
+                                  fast_modes={"crop": {"sensor": [640, 480], "size": [128, 96], "max_fps": 200}}),
+                     tmp_path, events, fps=30)
+    cam.bind(asyncio.get_running_loop())
+    app = build_app(RpcRegistry(), events, cam, None, lambda changed=False: {}, stage=stage)
+    await cam.start()
+    try:
+        async with TestClient(TestServer(app)) as c:
+            async with c.get("/edof.bin?fps=30&steps=30") as r:
+                assert r.status == 200
+                statuses, frames = [], 0
+                while True:
+                    head = await asyncio.wait_for(r.content.read(EDOF_HEADER.size), 5)
+                    if not head:
+                        break  # the device ended the response
+                    _, kind, n, _, _ = EDOF_HEADER.unpack(head)
+                    body = await r.content.readexactly(n)
+                    if kind == EDOF_FRAME:
+                        frames += 1
+                        if frames == 3:
+                            cam._fast["gap"] = 1e9  # the camera stalls
+                    elif kind == EDOF_STATUS:
+                        statuses.append(json.loads(body))
+                assert frames >= 3 and statuses[-1]["error"] == "no frames from the camera"
+            for _ in range(100):
+                if cam.fast is None and not stage.oscillating:
+                    break
+                await asyncio.sleep(0.05)
+            assert cam.fast is None and not stage.oscillating and stage.position["z"] == 0
+    finally:
+        await cam.stop()

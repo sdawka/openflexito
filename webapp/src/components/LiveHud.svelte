@@ -10,6 +10,7 @@
   import { settings, saveSettings } from '../lib/store/settings.svelte'
   import { ui } from '../lib/store/ui.svelte'
   import { focusCtl } from '../lib/store/focusCtl.svelte'
+  import { liveEdof } from '../lib/services/liveEdof.svelte'
   import type { JogController } from '../lib/input/jog'
 
   let { jog }: { jog: JogController } = $props()
@@ -103,20 +104,20 @@
   <div class="corner bottom-right">
     <div class="pad">
       <span></span>
-      <button onpointerdown={() => onDirDown('hud-y', { y: 1 })} onpointerup={() => onDirUp('hud-y', { y: 1 })} onpointercancel={() => onDirCancel('hud-y')} onpointerleave={() => onDirCancel('hud-y')} title="W / ↑">▲</button>
+      <button disabled={liveEdof.holdsStage} onpointerdown={() => onDirDown('hud-y', { y: 1 })} onpointerup={() => onDirUp('hud-y', { y: 1 })} onpointercancel={() => onDirCancel('hud-y')} onpointerleave={() => onDirCancel('hud-y')} title="W / ↑">▲</button>
       <span></span>
-      <button onpointerdown={() => onDirDown('hud-x', { x: -1 })} onpointerup={() => onDirUp('hud-x', { x: -1 })} onpointercancel={() => onDirCancel('hud-x')} onpointerleave={() => onDirCancel('hud-x')} title="A / ←">◀</button>
+      <button disabled={liveEdof.holdsStage} onpointerdown={() => onDirDown('hud-x', { x: -1 })} onpointerup={() => onDirUp('hud-x', { x: -1 })} onpointercancel={() => onDirCancel('hud-x')} onpointerleave={() => onDirCancel('hud-x')} title="A / ←">◀</button>
       <button class="danger" onclick={() => device.stop()} title="stop">■</button>
-      <button onpointerdown={() => onDirDown('hud-x', { x: 1 })} onpointerup={() => onDirUp('hud-x', { x: 1 })} onpointercancel={() => onDirCancel('hud-x')} onpointerleave={() => onDirCancel('hud-x')} title="D / →">▶</button>
+      <button disabled={liveEdof.holdsStage} onpointerdown={() => onDirDown('hud-x', { x: 1 })} onpointerup={() => onDirUp('hud-x', { x: 1 })} onpointercancel={() => onDirCancel('hud-x')} onpointerleave={() => onDirCancel('hud-x')} title="D / →">▶</button>
       <span></span>
-      <button onpointerdown={() => onDirDown('hud-y', { y: -1 })} onpointerup={() => onDirUp('hud-y', { y: -1 })} onpointercancel={() => onDirCancel('hud-y')} onpointerleave={() => onDirCancel('hud-y')} title="S / ↓">▼</button>
+      <button disabled={liveEdof.holdsStage} onpointerdown={() => onDirDown('hud-y', { y: -1 })} onpointerup={() => onDirUp('hud-y', { y: -1 })} onpointercancel={() => onDirCancel('hud-y')} onpointerleave={() => onDirCancel('hud-y')} title="S / ↓">▼</button>
       <span></span>
     </div>
     <div class="zcol">
-      <button onpointerdown={() => onDirDown('hud-z', { z: 1 })} onpointerup={() => onDirUp('hud-z', { z: 1 })} onpointercancel={() => onDirCancel('hud-z')} onpointerleave={() => onDirCancel('hud-z')} title="PgUp / Q">Z+</button>
-      <button onpointerdown={() => onDirDown('hud-z', { z: -1 })} onpointerup={() => onDirUp('hud-z', { z: -1 })} onpointercancel={() => onDirCancel('hud-z')} onpointerleave={() => onDirCancel('hud-z')} title="PgDn / E">Z−</button>
+      <button disabled={liveEdof.holdsStage} onpointerdown={() => onDirDown('hud-z', { z: 1 })} onpointerup={() => onDirUp('hud-z', { z: 1 })} onpointercancel={() => onDirCancel('hud-z')} onpointerleave={() => onDirCancel('hud-z')} title="Shift+↑ / PgUp / Q">Z+</button>
+      <button disabled={liveEdof.holdsStage} onpointerdown={() => onDirDown('hud-z', { z: -1 })} onpointerup={() => onDirUp('hud-z', { z: -1 })} onpointercancel={() => onDirCancel('hud-z')} onpointerleave={() => onDirCancel('hud-z')} title="Shift+↓ / PgDn / E">Z−</button>
     </div>
-    <button class="af" class:busy={focusCtl.focusing} onclick={() => focusCtl.run()} title="autofocus">
+    <button class="af" class:busy={focusCtl.focusing} disabled={liveEdof.holdsStage} onclick={() => focusCtl.run()} title="autofocus">
       {#if focusCtl.focusing}<span class="spinner"></span>{:else}AF{/if}
     </button>
   </div>

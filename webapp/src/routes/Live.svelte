@@ -9,6 +9,7 @@
   import { PanController } from '../lib/input/pan'
   import { wb, pickNeutral } from '../lib/services/whiteBalance.svelte'
   import { liveStack } from '../lib/services/liveStack.svelte'
+  import { liveEdof } from '../lib/services/liveEdof.svelte'
   import StagePad from '../components/StagePad.svelte'
   import FocusPanel from '../components/FocusPanel.svelte'
   import CameraControls from '../components/CameraControls.svelte'
@@ -102,13 +103,14 @@
 
   onMount(() => {
     const j = new JogController(
-      (d) => device.jog(d),
+      // take-up needs a measured z backlash: with the configured default it can jump focus on reversal
+      (d) => device.jog(d, settings.zJogTakeUp && !!calibration.z),
       () => device.stop(),
       () => ({ xy: settings.stepXY, z: settings.stepZ }),
     )
     jog = j
-    const offKeys = attachKeyboard(j, { invertY: () => settings.invertYKeys, enabled: () => device.connected })
-    const offPad = attachGamepad(j, { stop: () => device.stop(), autofocus: () => focusCtl.run() }, () => settings.gamepad && device.connected)
+    const offKeys = attachKeyboard(j, { invertY: () => settings.invertYKeys, enabled: () => device.connected && !liveEdof.holdsStage })
+    const offPad = attachGamepad(j, { stop: () => device.stop(), autofocus: () => focusCtl.run() }, () => settings.gamepad && device.connected && !liveEdof.holdsStage)
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || viewerOpen) return   // Viewer.svelte owns M/Escape while open
@@ -116,7 +118,7 @@
       else if (e.key === 'Escape' && measure.active) measure.cancel()
     }
     window.addEventListener('keydown', onKey)
-    return () => { offKeys(); offPad(); window.removeEventListener('keydown', onKey); j.dispose(); follow.stop(); liveStack.stop(); tracking.stop() }
+    return () => { offKeys(); offPad(); window.removeEventListener('keydown', onKey); j.dispose(); follow.stop(); liveStack.stop(); void liveEdof.stop(); tracking.stop() }
   })
 
   function onClickImage(p: { x: number; y: number; w: number; h: number }) {
@@ -166,7 +168,7 @@
         <details class="help">
           <summary>Mouse, keys and gamepad</summary>
           <p><b>Mouse</b>: click-hold-drag the image to pan the stage like a map · click to centre a point · <kbd>⇧</kbd>-drag to select a region for image search.</p>
-          <p><b>Keys</b>: <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or arrows move XY · <kbd>Q</kbd>/<kbd>E</kbd> or <kbd>PgUp</kbd>/<kbd>PgDn</kbd> move Z · hold for continuous motion.</p>
+          <p><b>Keys</b>: <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or arrows move XY · <kbd>Shift</kbd>+<kbd>↑</kbd>/<kbd>↓</kbd>, <kbd>Q</kbd>/<kbd>E</kbd> or <kbd>PgUp</kbd>/<kbd>PgDn</kbd> move Z · hold for continuous motion.</p>
           <p><b>Gamepad</b>: left stick XY · right stick or triggers Z · <kbd>B</kbd> stops.</p>
         </details>
       </div>

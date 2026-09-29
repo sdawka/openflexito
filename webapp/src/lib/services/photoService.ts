@@ -21,8 +21,9 @@ export interface PhotoOptions {
   slices?: number        // focus: number of z slices (odd, centred on the current z); focusfine: the maximum
   stepZ?: number         // focus: steps between slices
   range?: number         // focusfine: total z range of the autofocus sweep that locates the focus plane
-  method?: FuseMethod    // focusfine: 'pyramid' (default) or 'hybrid' (Zerene DMap-style fusion)
+  method?: FuseMethod    // focusfine: 'pyramid' (default) or 'hybrid' (Zerene DMap-style fusion); focussweep also 'deconvolve'
   stepsPerFrame?: number // focussweep: z steps between recorded frames (sweep speed)
+  deconvNoise?: number   // focussweep, method 'deconvolve': Wiener noise-to-signal ratio
   levels?: number[]      // exposure: LED brightness factors (or, for hdrraw, exposure-time factors) relative to the current level
   factors?: number[]     // exposure: exposure-time multipliers for bracket 'exposure'/'both' (device /bracket.bin)
   frames?: number        // rawavg: raw frames to average (default 4)

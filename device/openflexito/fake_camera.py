@@ -41,6 +41,7 @@ class FakeCamera(CameraBase):
         # recording: PyAV's libx264 stands in for the Pi's hardware H.264 encoder (optional dev extra)
         self._rec_lock = threading.Lock()
         self._rec: dict | None = None
+        self._fast: dict | None = None
 
     PX_PER_STEP = 1.0          # image pixels per motor step at stream resolution (a 1640 px field is ~1640 steps)
     AXIS_ROTATION_DEG = 4.0    # the camera is never perfectly aligned with the stage
@@ -107,13 +108,25 @@ class FakeCamera(CameraBase):
     def _frame(self, size: tuple[int, int], t: float) -> bytes:
         return self._jpeg(self._render(self._position()), size)
 
+    FAST_FPS_CAP = 60  # what PIL can render on a laptop; the stream says the rate it asked for
+
     def _run(self) -> None:
         t = 0.0
+        last_preview = 0.0
         while not self._stop.is_set():
             ts = now_ns()
             meta = {**self._metadata(ts), "matched": True}
             with self._rec_lock:
-                rec = self._rec
+                rec, fast = self._rec, self._fast
+            if fast is not None:
+                t0 = time.monotonic()
+                jpeg = self._jpeg(self._render(self._position()), fast["size"])
+                fast["tap"].put_threadsafe((jpeg, ts))
+                if time.monotonic() - last_preview >= 1 / 15:
+                    last_preview = time.monotonic()
+                    self.main.publish_threadsafe(jpeg, meta)
+                self._stop.wait(max(0.0, fast["gap"] - (time.monotonic() - t0)))  # the gap includes the render
+                continue
             if rec is not None:
                 # render at the full stream size so the recording is not an upscaled thumbnail
                 img = self._render(self._position(), scale=1.0)
@@ -135,12 +148,10 @@ class FakeCamera(CameraBase):
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=2)
-        if self._tap is not None:  # standby ends a running recording, as on the Pi
-            self._tap.close_threadsafe()
-            self._tap = None
-            self.recording = None
+        self._end_taps()  # standby ends a running recording or fast stream, as on the Pi
         with self._rec_lock:
             self._rec = None
+            self._fast = None
 
     # ---- recording ------------------------------------------------------------------------
 
@@ -190,6 +201,17 @@ class FakeCamera(CameraBase):
                 rec["tap"].put_threadsafe(bytes(pkt), int(pkt.pts) * 1000 if pkt.pts is not None else None, bool(pkt.is_keyframe))
         except Exception:  # noqa: BLE001
             log.exception("fake recording flush failed")
+
+    # ---- fast stream -----------------------------------------------------------------------
+
+    async def _start_fast(self, tap, spec: dict, fps: int, bitrate: int) -> None:
+        with self._rec_lock:
+            self._fast = {"tap": tap, "size": tuple(int(v) for v in spec["size"]),
+                          "gap": 1 / min(fps, self.FAST_FPS_CAP)}
+
+    async def _stop_fast(self) -> None:
+        with self._rec_lock:
+            self._fast = None
 
     async def _apply_controls(self, controls: dict) -> None:
         return None

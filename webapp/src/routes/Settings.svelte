@@ -121,6 +121,7 @@
       {#each ['x', 'y', 'z'] as const as a}
         <div><div class="label">{a} µm/step</div><input class="mono" type="number" step="0.001" min="0" style="width:90px" bind:value={settings.stageStepUm[a]} onchange={saveSettings} /></div>
       {/each}
+      <div title="numerical aperture of the objective (engraved on it: 40×/0.65 → 0.65); spaces focus-stack slices by its depth of field"><div class="label">objective NA</div><input class="mono" type="number" step="0.05" min="0.05" max="1.4" style="width:70px" aria-label="objective NA" bind:value={settings.objectiveNA} onchange={saveSettings} /></div>
       <label style="display:flex;gap:8px;align-items:center;margin-left:auto"><input type="checkbox" bind:checked={settings.showScaleBar} onchange={saveSettings} /> show scale bar</label>
     </div>
   </div>
@@ -129,6 +130,7 @@
     <h3>Input</h3>
     <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" bind:checked={settings.gamepad} onchange={saveSettings} /> enable gamepad</label>
     <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" bind:checked={settings.invertYKeys} onchange={saveSettings} /> invert Y for keyboard</label>
+    <label style="display:flex;gap:8px;align-items:center" title="A z jog that reverses direction first crosses the backlash dead band, so focus responds at once"><input type="checkbox" bind:checked={settings.zJogTakeUp} onchange={saveSettings} /> take up z backlash when a focus jog reverses (after Calibrate → Focus has been applied)</label>
     <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" bind:checked={settings.showLores} onchange={saveSettings} /> show low-resolution stream (saves bandwidth)</label>
   </div>
 

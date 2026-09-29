@@ -137,8 +137,10 @@ class DeviceStore {
     return this.guard(this.client.call<MoveResult>('stage.move_to', { ...p, compensate }))
   }
 
-  jog(d: Partial<Vec3>): Promise<MoveResult> {
-    return this.guard(this.client.call<MoveResult>('stage.jog', d))
+  /** Raw jog; `takeUp` adds `take_up: true` to z jogs (the device lengthens a reversing z jog by the
+   *  dead band still to cross), never to x/y-only ones. */
+  jog(d: Partial<Vec3>, takeUp = false): Promise<MoveResult> {
+    return this.guard(this.client.call<MoveResult>('stage.jog', takeUp && d.z ? { ...d, take_up: true } : d))
   }
 
   stop(): Promise<unknown> {

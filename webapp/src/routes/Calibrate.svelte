@@ -4,7 +4,8 @@
    *    2. stage <-> camera mapping           (needs a FOCUSED sample with visible detail)
    *  All maths runs in this browser; the device only supplies raw frames and moves the stage. */
   import { device } from '../lib/store/device.svelte'
-  import { calibration, saveCsm } from '../lib/store/calibration.svelte'
+  import { calibration, saveCsm, saveZCal } from '../lib/store/calibration.svelte'
+  import { runZCalibration, type ZCalRun } from '../lib/services/zCalibration'
   import { settings } from '../lib/store/settings.svelte'
   import { fetchRaw, grabGray } from '../lib/api/sampler'
   import { parseRaw, splitBayer, rawLevel } from '../lib/algo/raw'
@@ -151,6 +152,27 @@
   })
   const pxPerStep = (v: [number, number] | number[]) => Math.hypot(v[0], v[1])
 
+  // ---- focus (z): backlash and frame lag from four sweeps through focus (services/zCalibration.ts) ----
+  const zcal = $derived(calibration.z)
+  let zRun = $state<ZCalRun | null>(null)
+  let zCancel = false
+  const calibrateZ = () => run('focus calibration', async () => {
+    zCancel = false; zRun = null
+    zRun = await runZCalibration({ cancelled: () => zCancel }, say)
+  })
+  /** A run is only applied when both slow up sweeps agree and the backlash is physical: setting a wrong
+   *  (or zero) z backlash would break every compensated move, and the jog take-up relies on it. */
+  const zValid = (r: NonNullable<typeof zRun>) => r.backlash >= 0 && r.repeatability <= Math.max(10, Math.abs(r.backlash) * 0.2)
+  const applyZ = () => run('apply focus calibration', async () => {
+    const r = zRun
+    if (!r || !zValid(r)) return
+    const b = Math.round(r.backlash)
+    await device.client.call('stage.set_backlash', { z: b })
+    saveZCal({ backlash: b, lagNs: Math.round(r.lagNs), repeatability: r.repeatability, slowUs: r.slowUs, fastUs: r.fastUs, when: new Date().toISOString() })
+    await device.refreshStatus()
+    say(`z backlash ${b} steps applied to the stage; frame lag ${(r.lagNs / 1e6).toFixed(2)} ms stored for sweeps`)
+  })
+
   // ---- RAW flat field (device.md §2 `/flat.bin`): per-channel gain maps that override the tuning's
   // ALSC tables in every RAW-family develop (algo/rawdev.ts#prepareMosaic prefers it when present) ----
   const rawFlat = $derived(calibration.rawFlatField)
@@ -257,6 +279,38 @@
       <p class="muted small">Stored for {settings.deviceUrl || 'this device'} in this browser. Stage backlash currently used by the microscope:
         {device.status?.stage?.backlash ? `x ${device.status.stage.backlash.x}, y ${device.status.stage.backlash.y}, z ${device.status.stage.backlash.z}` : '…'}.</p>
     {/if}
+  </div>
+
+  <div class="panel">
+    <h3>2b · Focus: z backlash and frame lag</h3>
+    <p class="muted"><b>Before you start:</b> focus on a still sample with visible detail. The stage sweeps z through
+      focus four times around here (up, down and up slowly, then up at full speed; about half a minute) and finds the
+      sharpest frame of each sweep from the live stream. Up versus down gives the z backlash; slow versus fast gives the
+      frame lag (how long after its timestamp a frame is really exposed), which corrects the z of every frame in
+      autofocus and sweep focus stacks. The stage speed is restored and the stage returns here afterwards.</p>
+    <div class="row">
+      <button class="primary" onclick={calibrateZ} disabled={!!busy || !device.connected}>Calibrate Z</button>
+      {#if busy === 'focus calibration'}<button onclick={() => (zCancel = true)}>Cancel</button>{/if}
+      {#if zRun}<button onclick={applyZ} disabled={!!busy || !device.connected || !zValid(zRun)} title={zValid(zRun) ? "Set the stage's z backlash and store the frame lag for this device" : 'The sweeps disagree or gave a non-physical backlash: nothing to apply'}>Apply</button>{/if}
+      {#if zcal}<button onclick={() => saveZCal(null)} disabled={!!busy} title="Forget the stored frame lag (the stage's backlash is left as it is)">Clear lag</button>{/if}
+    </div>
+    {#if zRun}
+      <div class="scroll-x">
+        <table class="mono small result zcal">
+          <thead><tr><th>z backlash</th><th>frame lag</th><th>repeatability</th><th>peaks (up 1, down, up 2, fast)</th></tr></thead>
+          <tbody><tr>
+            <td>{zRun.backlash.toFixed(1)} steps</td>
+            <td>{(zRun.lagNs / 1e6).toFixed(2)} ms</td>
+            <td>{zRun.repeatability.toFixed(1)} steps</td>
+            <td>{[zRun.peaks.up1, zRun.peaks.down, zRun.peaks.up2, zRun.peaks.fast].map((p) => p.z.toFixed(1)).join(', ')}</td>
+          </tr></tbody>
+        </table>
+      </div>
+      {#if zRun.repeatability > Math.max(10, Math.abs(zRun.backlash) * 0.2)}<p class="small" style="color:var(--warn)">The two slow up sweeps disagree by {zRun.repeatability.toFixed(0)} steps: the sample or focus moved during the run, so the result is not applied. Use a thin, still, high-contrast sample (a stained section or a printed target) and re-run.</p>{/if}
+      {#if zRun.backlash < 0}<p class="small" style="color:var(--warn)">A negative backlash is not physical (the down sweep found focus above the up sweeps), so the result is not applied.</p>{/if}
+    {/if}
+    <p class="muted small">{zcal ? `Stored for ${settings.deviceUrl || 'this device'}: frame lag ${(zcal.lagNs / 1e6).toFixed(2)} ms, z backlash ${zcal.backlash} steps (${new Date(zcal.when).toLocaleString()}).` : 'No frame lag stored: sweeps assume frames are exposed at their timestamp.'}
+      Stage z backlash in use: {device.status?.stage?.backlash ? `${device.status.stage.backlash.z} steps` : '…'}.</p>
   </div>
 
   <div class="panel">

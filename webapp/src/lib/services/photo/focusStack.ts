@@ -13,6 +13,7 @@
 import { waitForFrames, grabGray } from '../../api/sampler'
 import { focusStack as blockFuse, type Rgba } from '../../algo/stack'
 import { laplacianVariance } from '../../algo/sharpness'
+import { focusBand, planStack, depthOfFieldUm } from '../../algo/stackPlan'
 import { encodePng16 } from '../../algo/png16'
 import { alignStack, chooseReference, luminance, translateRgbaSubpixel } from '../../algo/align'
 import { toRgba8, developParamsFromTuning } from '../../algo/rawdev'
@@ -137,25 +138,30 @@ async function laplacianWidth(range: number, count: number, say: Say): Promise<{
   return { fwhm: above.length > 1 ? Math.max(...above) - Math.min(...above) : range / 10 }
 }
 
-/** Fine focus stack: locate the focus plane with a fast autofocus sweep, measure the depth of field
- *  with a short Laplacian sweep around it, space slices at ≈0.7× the measured half-width (+1 slice
- *  beyond each end of that span), capped at the user's slice count (a ceiling, not a target — a
- *  narrow DOF needs far fewer slices than a wide one), align and fuse them in a Laplacian pyramid
- *  (worker), end back on the focus plane. */
+/** Fine focus stack: locate the focus plane with a fast autofocus sweep, take the z band of that
+ *  sweep where anything is in focus as the stack's range (`algo/stackPlan#focusBand` — the
+ *  specimen's depth, not one focal plane's), space slices at half the depth of field (the smaller
+ *  of the objective's theoretical DOF, Settings' `objectiveNA` and `stageStepUm.z`, and the width of
+ *  a short Laplacian sweep around the peak), spread them wider when the user's slice count cannot
+ *  cover the band at that spacing, align and fuse them in a Laplacian pyramid (worker), end back on
+ *  the focus plane. */
 export async function takeFineFocusStack(o: FocusStackOptions, say: Say, meta: PhotoMeta, source: 'jpeg' | 'raw'): Promise<GalleryItem> {
   const maxSlices = Math.max(3, Math.round(o.slices ?? 9)), range = Math.max(100, Math.round(o.range ?? 1000))
   say(`fine stack: locating the focus plane (sweep ±${range / 2})`)
   const af = await runAutofocus({ mode: 'fast', dz: range, metric: 'jpeg', onProgress: (m) => say(`fine stack: ${m}`) })
-  const centreZ = af.peakZ
+  const band = focusBand(af.samples) ?? { lo: af.peakZ, hi: af.peakZ, peakZ: af.peakZ, clipped: false }
+  if (band.clipped) say(`fine stack: the in-focus band reaches the end of the ±${range / 2} search — widen the search range if the specimen is deeper`)
   say('fine stack: measuring the depth of field…')
   const { fwhm } = await laplacianWidth(Math.max(60, Math.round(range / 6)), 7, say)
-  const halfWidth = Math.max(2, fwhm / 2)
-  const step = Math.max(2, Math.round(halfWidth * 0.7))
-  // enough slices to cover the half-width on each side of the peak, plus one extra slice beyond each end
-  const neededSlices = 2 * Math.ceil(halfWidth / step) + 1 + 2
-  const slices = Math.max(3, Math.min(maxSlices, neededSlices))
-  let span = step * (slices - 1)
-  say(`fine stack: focus plane z=${centreZ}, half-width ${Math.round(halfWidth)} steps → ${slices} slices ${step} apart (${span} total, capped at ${maxSlices})`)
+  const umPerStep = zUmPerStep()
+  const theoryStep = umPerStep ? depthOfFieldUm(settings.objectiveNA ?? 0.65) / 2 / umPerStep : Infinity
+  const measuredStep = Math.max(2, fwhm / 2) * 0.7
+  const plan = planStack(band.lo, band.hi, Math.min(theoryStep, measuredStep), maxSlices)
+  const { slices, step } = plan
+  const span = plan.span
+  const centreZ = af.peakZ
+  say(`fine stack: in focus over z ${Math.round(band.lo)}…${Math.round(band.hi)} (sharpest ${centreZ}) → ${slices} slices ${step} apart (${span} total)` +
+    (plan.undersampled ? ` — capped at ${maxSlices} slices, spread wider than the depth of field (≈${Math.round(Math.min(theoryStep, measuredStep))} steps); raise Slices to ${Math.ceil((band.hi - band.lo) / Math.min(theoryStep, measuredStep)) + 1} for full sharpness` : ''))
   const frames: { blob: Blob; z: number }[] = []
   const metas: (StillFrameMeta | null)[] = []
   let width = 0, height = 0
@@ -165,7 +171,7 @@ export async function takeFineFocusStack(o: FocusStackOptions, say: Say, meta: P
   await withCameraLock(async () => {
     try {
       // to the bottom of the stack with z backlash compensation, then up in verified raw steps
-      await moveZVerified(-Math.floor((slices - 1) / 2) * step, 'z', say, 'fine stack')
+      await moveZVerified(plan.centreZ - Math.floor((slices - 1) / 2) * step - device.position.z, 'z', say, 'fine stack')
       for (let i = 0; i < slices; i++) {
         const z = i ? await moveZVerified(step, false, say, 'fine stack') : device.position.z
         await settle(200); await waitForFrames(2, 1500)

@@ -11,8 +11,10 @@
 
 export interface SweepMove { t0: number; t1: number; z0: number; z1: number }
 
-/** z of a frame exposed at `t` (ns) during `move`, or null when the frame falls outside it. */
-export function zAtTime(t: number, m: SweepMove): number | null {
+/** z of a frame stamped `ts` (ns) during `move`, or null when the frame falls outside it. `lagNs`:
+ *  the frame was exposed at ts + lagNs (focus calibration, `algo/zCalibration.ts`); default 0. */
+export function zAtTime(ts: number, m: SweepMove, lagNs = 0): number | null {
+  const t = ts + lagNs
   if (!(m.t1 > m.t0) || t < m.t0 || t > m.t1) return null
   return m.z0 + ((t - m.t0) / (m.t1 - m.t0)) * (m.z1 - m.z0)
 }
