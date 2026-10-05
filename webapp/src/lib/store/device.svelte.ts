@@ -17,6 +17,8 @@ class DeviceStore {
   position = $state<Vec3>({ x: 0, y: 0, z: 0 })
   moving = $state(false)
   lastMove = $state<PositionEvent | null>(null)
+  /** Last `event.calibration` push (a key changed on the device); `services/calibrationSync.svelte.ts` reacts. */
+  calibrationEvent = $state<{ key: string; when: string | null; seq: number } | null>(null)
   frame = $state<FrameMeta | null>(null)
   fps = $state(0)
   /** Measured live-stream bitrate in kB/s, from `event.frame`'s own `size`/`t` (no second stream
@@ -82,6 +84,7 @@ class DeviceStore {
         }
       }
     })
+    c.on('event.calibration', (e: { key: string; when: string | null }) => { this.calibrationEvent = { ...e, seq: (this.calibrationEvent?.seq ?? 0) + 1 } })
     c.on('event.light', (l: { cc: number; pwm: number[]; channels?: { cc: number; pwm: number } }) => { this.light = l })
     // Reapply stored call hook (for macro recording) to the new client
     if (this.callHook) c.onCall(this.callHook)

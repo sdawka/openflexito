@@ -55,6 +55,10 @@ async function rpc(method, params = {}) {
   return m.result
 }
 
+// the fake persists power state and calibrations in ~/.openflexito like the Pi does: a fake left idle for
+// 10 minutes restarts in standby, so wake it, and start every suite with no stored calibration
+for (const [method, params] of [['power.set', { on: true }], ['calibration.clear', {}]])
+  await (await page.request.post(base + '/rpc', { data: { jsonrpc: '2.0', method, params } })).json()
 await page.goto(`${base}/#/calibrate`, { waitUntil: 'load' })
 await page.waitForFunction(() => /\d+ fps/.test(document.querySelector('nav')?.textContent || ''), null, { timeout: 15000 })
 

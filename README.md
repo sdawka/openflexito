@@ -7,7 +7,7 @@ Raspberry Pi 3B+ with a Sangaboard v0.5.
 Sangaboard over UART, blinks its status LED, and serves the web app. Nothing heavy runs on it.
 
 **The browser is the brains.** Autofocus, camera calibration, click-to-move, scanning and
-stitching, gallery, and later object detection run in a Svelte + TypeScript app on your laptop.
+stitching, gallery, and later object detection run in a Svelte + TypeScript app on your laptop. Calibration *results* (stage↔camera mapping, focus backlash and lag, flat fields, pixel scale) are stored on the device (`calibration.json`, RPCs `calibration.get|set|clear`) so every phone, tablet or laptop that connects shares them; the camera's lens-shading tables and white balance live in its tuning file on the device as well.
 
 ```
 device/   Python service for the Pi (aiohttp, picamera2, pyserial)   → python -m openflexito

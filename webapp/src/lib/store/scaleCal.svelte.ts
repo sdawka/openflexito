@@ -6,7 +6,7 @@
  *     with the measurement tool and typed its length; persisted per device like the CSM calibration. */
 
 import { settings } from './settings.svelte'
-import { calibration } from './calibration.svelte'
+import { calibration, calibrationSync } from './calibration.svelte'
 import { umPerPixelFromStageCalibration, scaleForWidth } from '../algo/measure'
 
 export interface ManualScale {
@@ -23,9 +23,12 @@ function load(): ManualScale | null {
 
 export const scaleCal = $state<{ manual: ManualScale | null }>({ manual: load() })
 
-export function saveManualScale(m: ManualScale | null): void {
+/** Device key of the manual scale (`calibration.set {key: 'scale'}`); see `calibration.svelte.ts`. */
+export const SCALE_KEY = 'scale'
+export function saveManualScale(m: ManualScale | null, fromDevice = false): void {
   scaleCal.manual = m
   try { m ? localStorage.setItem(key(), JSON.stringify(m)) : localStorage.removeItem(key()) } catch { /* ignore */ }
+  if (!fromDevice) calibrationSync.push(SCALE_KEY, m)
 }
 
 export function clearManualScale(): void { saveManualScale(null) }

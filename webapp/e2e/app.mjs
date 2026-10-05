@@ -49,6 +49,10 @@ async function tool(name) {
   return page.locator(`.panel:has(h3:has-text("${name}"))`)
 }
 
+// the fake persists power state and calibrations in ~/.openflexito like the Pi does: a fake left idle for
+// 10 minutes restarts in standby, so wake it, and start every suite with no stored calibration
+for (const [method, params] of [['power.set', { on: true }], ['calibration.clear', {}]])
+  await (await page.request.post(base + '/rpc', { data: { jsonrpc: '2.0', method, params } })).json()
 await page.goto(`${base}/#/live`, { waitUntil: 'load' })
 
 await step('connects and streams', async () => {

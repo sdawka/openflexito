@@ -18,6 +18,7 @@ from .leds import LedController
 from . import logbuf
 from .netwatch import network_state, wifi_join, wifi_scan
 from .power import PowerController
+from .calibration import CalibrationStore
 from .rpc import RpcRegistry
 from .sangaboard import Sangaboard, SangaboardError
 from .stage import Stage
@@ -41,6 +42,7 @@ class Device:
         self.events.on_change = lambda n: self.status(changed=True)
         self.leds.set_state("booting")
         self.power = PowerController(self)
+        self.calibration = CalibrationStore(cfg.state_dir, self.events)
 
     # ---- hardware bring-up -------------------------------------------------------------------
 
@@ -86,6 +88,7 @@ class Device:
             "stage": self.stage.status() if self.stage else None,
             "stream_clients": clients,
             "power": self.power.status(),
+            "calibration": self.calibration.summary(),
         }
 
     def _compute_led_state(self) -> str:
@@ -160,6 +163,11 @@ class Device:
         r.register("power.activity", self.power.activity,
                    "WS heartbeat: declare this connection active/inactive so it can hold off auto standby.")
         r.register("power.set_idle", self.power.set_idle, "Set the auto-standby timeout in minutes (0 disables it).")
+
+        cal = self.calibration   # browser-computed calibrations, stored here so every client shares them
+        r.register("calibration.get", cal.get, "All stored calibrations, or {key, value} for one key.")
+        r.register("calibration.set", cal.set, "Store a calibration JSON object under key (null deletes); clients get event.calibration.")
+        r.register("calibration.clear", cal.clear, "Forget every stored calibration.")
 
         g = self.power.guard  # camera/stage RPCs refuse with a clear error while in standby; mutating
                                # ones (the default) also count as activity for the idle timer

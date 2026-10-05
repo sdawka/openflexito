@@ -110,6 +110,8 @@ export interface DeviceStatus {
   stage: StageStatus | null
   stream_clients: number
   power?: PowerStatus
+  /** {key: when} of the calibrations stored on the device (`calibration.get` fetches the values) */
+  calibration?: Record<string, string | null>
 }
 
 export interface RpcMethodDoc {

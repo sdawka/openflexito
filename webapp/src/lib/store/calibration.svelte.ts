@@ -1,4 +1,8 @@
-/** Browser-side calibration results (camera-stage mapping), persisted per device in localStorage. */
+/** Calibration results computed in the browser (camera-stage mapping, focus backlash/lag, flat fields,
+ *  scan-derived shading). The microscope is the source of truth: `services/calibrationSync.svelte.ts`
+ *  loads every key from the device's `calibration.get` on connect and each `save*` here pushes through
+ *  `calibrationSync.push`, so all clients of one device share one calibration. localStorage (per device
+ *  URL) is only a cache so the app has values before the socket opens and when the device is away. */
 
 import type { Calibration1D, Mat2 } from '../algo/csm'
 import { settings } from './settings.svelte'
@@ -38,6 +42,13 @@ const flatKey = () => 'openflexito.flat.' + (settings.deviceUrl || 'local')
 const autoKey = () => 'openflexito.autoshading.' + (settings.deviceUrl || 'local')
 const rawFlatKey = () => 'openflexito.rawflat.' + (settings.deviceUrl || 'local')
 
+/** Device keys (`calibration.set {key}`) of each store slot. */
+export const CAL_KEYS = { csm: 'csm', z: 'z', flat: 'flat', rawFlatField: 'raw_flat', autoShading: 'auto_shading' } as const
+export type CalSlot = keyof typeof CAL_KEYS
+/** Set by `services/calibrationSync.svelte.ts`; a save with `fromDevice` false pushes the value there. */
+export const calibrationSync: { push: (key: string, value: object | null) => void } = { push: () => {} }
+const cache = (k: string, v: unknown) => { try { v ? localStorage.setItem(k, JSON.stringify(v)) : localStorage.removeItem(k) } catch { /* ignore */ } }
+
 function load(): CsmCalibration | null {
   try { const raw = localStorage.getItem(key()); return raw ? JSON.parse(raw) : null } catch { return null }
 }
@@ -60,9 +71,10 @@ function loadAuto(): AutoShading | null {
 
 export const calibration = $state<{ csm: CsmCalibration | null; flat: FlatFieldMap | null; rawFlatField: FlatFieldJson | null; z: ZCalibration | null; autoShading: AutoShading | null }>({ csm: load(), flat: loadFlat(), rawFlatField: loadRawFlat(), z: loadZ(), autoShading: loadAuto() })
 
-export function saveZCal(c: ZCalibration | null): void {
+export function saveZCal(c: ZCalibration | null, fromDevice = false): void {
   calibration.z = c
-  try { c ? localStorage.setItem(zKey(), JSON.stringify(c)) : localStorage.removeItem(zKey()) } catch { /* ignore */ }
+  cache(zKey(), c)
+  if (!fromDevice) calibrationSync.push(CAL_KEYS.z, c)
 }
 
 /** The stored frame lag for this device, ns (0 until the focus calibration has been applied). */
@@ -71,23 +83,26 @@ export function frameLagNs(): number {
   return typeof l === 'number' && Number.isFinite(l) ? l : 0
 }
 
-export function saveCsm(c: CsmCalibration | null): void {
+export function saveCsm(c: CsmCalibration | null, fromDevice = false): void {
   calibration.csm = c
-  try { c ? localStorage.setItem(key(), JSON.stringify(c)) : localStorage.removeItem(key()) } catch { /* ignore */ }
+  cache(key(), c)
+  if (!fromDevice) calibrationSync.push(CAL_KEYS.csm, c)
 }
 
-export function saveFlat(f: FlatFieldMap | null): void {
+export function saveFlat(f: FlatFieldMap | null, fromDevice = false): void {
   calibration.flat = f
-  try { f ? localStorage.setItem(flatKey(), JSON.stringify(f)) : localStorage.removeItem(flatKey()) } catch { /* ignore */ }
+  cache(flatKey(), f)
+  if (!fromDevice) calibrationSync.push(CAL_KEYS.flat, f)
 }
 
 /** The measured per-channel flat field from `algo/flatField.ts` (a blank-field RAW capture): replaces
  *  the tuning file's ALSC tables in `rawdev.develop`, feeds DNG GainMap opcodes, and downscales for
  *  stitching. Stored as plain JSON (`flatFieldToJson`/`flatFieldFromJson`), never the Svelte `$state`
  *  proxy or a live `Float32Array` — see the module comment on `FlatField` in `algo/flatField.ts`. */
-export function saveRawFlatField(f: FlatFieldJson | null): void {
+export function saveRawFlatField(f: FlatFieldJson | null, fromDevice = false): void {
   calibration.rawFlatField = f
-  try { f ? localStorage.setItem(rawFlatKey(), JSON.stringify(f)) : localStorage.removeItem(rawFlatKey()) } catch { /* ignore */ }
+  cache(rawFlatKey(), f)
+  if (!fromDevice) calibrationSync.push(CAL_KEYS.rawFlatField, f)
 }
 
 /** The measured illumination map stitching divides its tiles by, in `algo/stitch.ts` `GainMap` shape
@@ -106,10 +121,27 @@ export function measuredIllumination(): { width: number; height: number; channel
 }
 
 /** Store the illumination estimated from a scan's tiles (plain JSON; typed arrays are copied). */
-export function saveAutoShading(map: { width: number; height: number; channels: 3; data: ArrayLike<number> } | null, when = new Date().toISOString()): void {
+export function saveAutoShading(map: { width: number; height: number; channels: 3; data: ArrayLike<number> } | null, when = new Date().toISOString(), fromDevice = false): void {
   const v: AutoShading | null = map ? { width: map.width, height: map.height, channels: 3, data: Array.from(map.data, (x) => Math.round(x * 1e4) / 1e4), when } : null
   calibration.autoShading = v
-  try { v ? localStorage.setItem(autoKey(), JSON.stringify(v)) : localStorage.removeItem(autoKey()) } catch { /* ignore */ }
+  cache(autoKey(), v)
+  if (!fromDevice) calibrationSync.push(CAL_KEYS.autoShading, v)
+}
+
+/** Apply a value that arrived from the device (no push back). `null` clears the slot. */
+export function applyFromDevice(slot: CalSlot, value: unknown): void {
+  const v = (value ?? null) as never
+  switch (slot) {
+    case 'csm': saveCsm(v, true); break
+    case 'z': saveZCal(v, true); break
+    case 'flat': saveFlat(v, true); break
+    case 'rawFlatField': saveRawFlatField(v, true); break
+    case 'autoShading': {
+      const a = value as AutoShading | null
+      saveAutoShading(a ? { width: a.width, height: a.height, channels: 3, data: a.data } : null, a?.when, true)
+      break
+    }
+  }
 }
 
 export type IlluminationSource = 'flat' | 'raw' | 'auto'
