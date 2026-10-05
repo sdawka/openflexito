@@ -72,6 +72,7 @@ async function push(key: string, value: object | null): Promise<void> {
   pending.set(key, when)
   try {
     await device.client.call('calibration.set', { key, value })
+    device.refreshStatus().catch(() => {})   // the {key: when} summary in system.status feeds the Calibrate page's 'stored' line
   } catch (e) {
     console.warn(`calibration.set ${key} failed`, e)
   }
