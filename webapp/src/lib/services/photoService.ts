@@ -7,7 +7,7 @@
 
 import { saveSnapshot, type GalleryItem } from '../store/gallery'
 import { device } from '../store/device.svelte'
-import { captureFullWithMeta, captureField } from './photo/common'
+import { captureFullShaded, captureFieldShaded } from './photo/common'
 import { rawPhoto, rawAveragePhoto, hdrRawPhoto } from './photo/rawPhoto'
 import { exposureStackPhoto, type BracketKind } from './photo/exposureStack'
 import { superresPhoto, type SuperresOptions } from './photo/superres'
@@ -37,8 +37,8 @@ export async function takePhoto(o: PhotoOptions): Promise<GalleryItem> {
   const meta = { position: { ...device.position }, controls: device.controls ?? undefined }
   if (o.mode === 'single') {
     say('capturing full resolution…')
-    const { blob, meta: frameMeta } = await captureFullWithMeta()
-    return saveSnapshot(blob, { ...meta, name: 'Photo', extra: { capture: captureField(frameMeta) } })
+    const { blob, meta: frameMeta, shading } = await captureFullShaded()
+    return saveSnapshot(blob, { ...meta, name: 'Photo', extra: { capture: captureFieldShaded(frameMeta, shading) } })
   }
   if (o.mode === 'raw') return rawPhoto(say, meta)
   if (o.mode === 'rawavg') return rawAveragePhoto(say, meta, o.frames)

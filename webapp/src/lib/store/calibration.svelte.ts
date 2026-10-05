@@ -2,7 +2,7 @@
 
 import type { Calibration1D, Mat2 } from '../algo/csm'
 import { settings } from './settings.svelte'
-import type { FlatFieldJson } from '../algo/flatField'
+import { flatFieldToIllumination, type FlatFieldJson } from '../algo/flatField'
 
 export interface CsmCalibration {
   matrix: Mat2                    // image px -> stage steps
@@ -35,6 +35,7 @@ export interface ZCalibration {
 const zKey = () => 'openflexito.zcal.' + (settings.deviceUrl || 'local')
 const key = () => 'openflexito.csm.' + (settings.deviceUrl || 'local')
 const flatKey = () => 'openflexito.flat.' + (settings.deviceUrl || 'local')
+const autoKey = () => 'openflexito.autoshading.' + (settings.deviceUrl || 'local')
 const rawFlatKey = () => 'openflexito.rawflat.' + (settings.deviceUrl || 'local')
 
 function load(): CsmCalibration | null {
@@ -50,7 +51,14 @@ function loadRawFlat(): FlatFieldJson | null {
   try { const raw = localStorage.getItem(rawFlatKey()); return raw ? JSON.parse(raw) : null } catch { return null }
 }
 
-export const calibration = $state<{ csm: CsmCalibration | null; flat: FlatFieldMap | null; rawFlatField: FlatFieldJson | null; z: ZCalibration | null }>({ csm: load(), flat: loadFlat(), rawFlatField: loadRawFlat(), z: loadZ() })
+/** Illumination estimated from scan tiles (`algo/shading.ts`): relative illumination, mean 1, RGB. A
+ *  fallback for `illuminationMap()` when no blank field has been measured. */
+export interface AutoShading { width: number; height: number; channels: 3; data: number[]; when: string }
+function loadAuto(): AutoShading | null {
+  try { const raw = localStorage.getItem(autoKey()); return raw ? JSON.parse(raw) : null } catch { return null }
+}
+
+export const calibration = $state<{ csm: CsmCalibration | null; flat: FlatFieldMap | null; rawFlatField: FlatFieldJson | null; z: ZCalibration | null; autoShading: AutoShading | null }>({ csm: load(), flat: loadFlat(), rawFlatField: loadRawFlat(), z: loadZ(), autoShading: loadAuto() })
 
 export function saveZCal(c: ZCalibration | null): void {
   calibration.z = c
@@ -81,3 +89,51 @@ export function saveRawFlatField(f: FlatFieldJson | null): void {
   calibration.rawFlatField = f
   try { f ? localStorage.setItem(rawFlatKey(), JSON.stringify(f)) : localStorage.removeItem(rawFlatKey()) } catch { /* ignore */ }
 }
+
+/** The measured illumination map stitching divides its tiles by, in `algo/stitch.ts` `GainMap` shape
+ *  (relative illumination, mean 1): the blank-field JPEG capture (`calibration.flat`) when there is
+ *  one, else derived from the RAW per-channel flat field (1 / gain per channel), else `null`. Plain
+ *  arrays, never `$state` proxies, so the result can be posted to the stitch worker as is. */
+export function measuredIllumination(): { width: number; height: number; channels: 1 | 3; data: number[]; when?: string; source: 'flat' | 'raw' } | null {
+  const f = calibration.flat
+  if (f) return { width: f.width, height: f.height, channels: f.channels, data: Array.from(f.data), when: f.when, source: 'flat' }
+  const r = calibration.rawFlatField
+  if (r) {
+    const ill = flatFieldToIllumination($state.snapshot(r))
+    return { width: ill.width, height: ill.height, channels: 3, data: Array.from(ill.data), when: r.when, source: 'raw' }
+  }
+  return null
+}
+
+/** Store the illumination estimated from a scan's tiles (plain JSON; typed arrays are copied). */
+export function saveAutoShading(map: { width: number; height: number; channels: 3; data: ArrayLike<number> } | null, when = new Date().toISOString()): void {
+  const v: AutoShading | null = map ? { width: map.width, height: map.height, channels: 3, data: Array.from(map.data, (x) => Math.round(x * 1e4) / 1e4), when } : null
+  calibration.autoShading = v
+  try { v ? localStorage.setItem(autoKey(), JSON.stringify(v)) : localStorage.removeItem(autoKey()) } catch { /* ignore */ }
+}
+
+export type IlluminationSource = 'flat' | 'raw' | 'auto'
+export interface IlluminationMapJson { width: number; height: number; channels: 1 | 3; data: number[]; when?: string; source: IlluminationSource }
+
+/** The relative-illumination map to correct images with: the measured one (`measuredIllumination`: a
+ *  blank-field JPEG or RAW capture) when there is one, else the scan-derived estimate, else `null`. */
+export function illuminationMap(): IlluminationMapJson | null {
+  const m = measuredIllumination()
+  if (m) return m
+  const a = calibration.autoShading
+  if (a) return { width: a.width, height: a.height, channels: 3, data: Array.from(a.data), when: a.when, source: 'auto' }
+  return null
+}
+
+/** Cheap, reactive facts about `illuminationMap()` for code that must not build it per frame (the
+ *  shading frame-chain processor's `enabled()`): `has` flips when a map appears or goes; `stamp.version`
+ *  (plain, non-reactive) increments on every change so a cache can tell it is stale. */
+export const illumination = $state({ has: illuminationMap() !== null })
+export const illuminationStamp = { version: 0 }
+$effect.root(() => {
+  $effect(() => {
+    const m = illuminationMap()   // reads calibration.flat / rawFlatField / autoShading
+    illuminationStamp.version++
+    illumination.has = m !== null
+  })
+})

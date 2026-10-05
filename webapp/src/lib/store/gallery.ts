@@ -121,16 +121,39 @@ export interface GalleryItem {
       /** how this tile was focused: 'measured' (autofocus here), 'predicted' (height map), 'refined'
        *  (height map + short local sweep), 'failed' (autofocus threw; `error` says why; the tile was
        *  still captured at whatever z the stage had), 'none' (focus off) */
-      focus?: { status: 'measured' | 'predicted' | 'refined' | 'failed' | 'none'; error?: string }
+      focus?: {
+        status: 'measured' | 'predicted' | 'refined' | 'failed' | 'none'; error?: string
+        /** quality gate (additive): why the sweep's curve was refused (`algo/autofocus.ts#CurveQuality.reason`),
+         *  or `suspect` when the plane tracker's innovation gate held a measured z back; `contrast` is the
+         *  curve's peak/floor. A refused sweep leaves status 'predicted' (plane prediction) or 'failed'.
+         *  `coarse`: the fine pass was refused but the coarse sweep's curve passed, so its peak was used. */
+        reason?: 'flat' | 'multimodal' | 'edge' | 'few' | 'suspect' | 'coarse'; contrast?: number
+        /** sweep half of the tile: metric used ('fom' | 'jpeg' | 'nv' ...) and sweep range, steps */
+        metric?: string; range?: number
+      }
       settleMs?: number }[]
     positions?: { x: number; y: number }[]
-    /** stitching diagnostics: overlaps measured, dropped as outliers, per-tile luminance gains, blend mode, flat-field applied */
-    stitch?: { pairs: number; dropped: number; gains?: number[]; blend: 'feather' | 'multiband'; flatField: boolean; analysisWidth: number }
+    /** stitching diagnostics: overlaps measured, dropped as outliers, per-tile luminance gains (and,
+     *  additive, per-channel `gainsRgb`), blend mode, whether a shading map was applied and which one
+     *  (`shading`: 'measured' flat field, 'auto' self-calibrated from the tiles, 'median' of the tiles,
+     *  'none'; absent on old items = measured iff `flatField`), with the auto estimate's fit quality */
+    stitch?: {
+      pairs: number; dropped: number; gains?: number[]; gainsRgb?: [number, number, number][]; blend: 'feather' | 'multiband'; flatField: boolean
+      shading?: 'none' | 'measured' | 'auto' | 'median'; shadingFit?: { samples: number; pairs: number; rms: number }; analysisWidth: number
+    }
     /** camera lock held for the run and the number of tiles whose autofocus failed */
     locked?: { ae: boolean; awb: boolean }
     focusFailures?: number
     /** how autofocus was used during this scan, and its region/order settings, for the gallery's height-map overlay */
-    focus?: { mode: 'none' | 'every' | 'interpolate'; step?: number; method?: 'plane' | 'bilinear' }
+    focus?: {
+      mode: 'none' | 'every' | 'interpolate'; step?: number; method?: 'plane' | 'bilinear'
+      /** additive, written when the tiles are done: running plane `z = a*col + b*row + c`
+       *  (`algo/heightMap.ts#PlaneTracker`), its residual RMS in steps and accepted-measurement count,
+       *  the depth of field in steps that sized the sweeps, and tile counts by outcome */
+      tracker?: { n: number; coefficients: number[]; residualRms: number }
+      dofSteps?: number
+      outcome?: { measured: number; predicted: number; refined: number; failed: number; reasons: Record<string, number> }
+    }
     region?: { mode: 'rect' | 'polygon'; order: 'raster' | 'snake' | 'spiral'
       /** how the extent was chosen ('centre': N×M fields around the stage position; 'corners': the grid covering two marked positions) and the grid centre in absolute stage steps (additive) */
       extent?: 'centre' | 'corners'; origin?: { x: number; y: number } }

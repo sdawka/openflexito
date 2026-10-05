@@ -10,7 +10,8 @@
     "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
     "test": "vitest",
     "test:e2e": "node e2e/app.mjs",
-    "test:e2e:smoke": "node e2e/smoke.mjs"
+    "test:e2e:smoke": "node e2e/smoke.mjs",
+    "test:e2e:stitch": "node e2e/stitchQuality.mjs"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.0",

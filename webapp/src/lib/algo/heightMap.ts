@@ -173,3 +173,161 @@ export function heightLegend(zMin: number, zMax: number, umPerStep?: number): He
   }
   return { min: zMin, max: zMax, unit: 'steps' }
 }
+
+// ---- recursive plane tracking between tiles --------------------------------------------------------
+
+export interface PlaneTrackerOptions {
+  /** exponential forgetting factor per update (1 = remember everything, 0.9 = ~10-sample memory) */
+  forget?: number
+  /** innovation gate in sigmas: a measurement farther from the prediction is held as suspect */
+  gateSigma?: number
+  /** measurements needed before predictions are `confident` and the gate is active */
+  minSamples?: number
+  /** sigma reported while fewer than `minSamples` are known (steps) */
+  priorSigma?: number
+  /** ridge on the slopes so a single row of tiles still predicts along that row */
+  ridge?: number
+  /** cap for `suggestRange` (± steps) */
+  maxRange?: number
+  /** sigma is never reported below this (steps): a few samples can fit a plane almost exactly and
+   *  would otherwise make honest autofocus scatter look like an outlier */
+  minSigma?: number
+}
+
+export interface PlaneUpdate { accepted: boolean; innovation: number; sigma: number }
+export interface PlanePrediction { z: number; sigma: number; confident: boolean }
+
+/** Recursive weighted least-squares fit of `z = a·x + b·y + c` to the focused z of the tiles
+ *  measured so far (x, y in whatever units the caller likes: grid col/row or stage steps). Used by
+ *  a scan to seed the next tile's autofocus with a prediction and to shrink the sweep around it.
+ *
+ *  A measurement that lands farther than `gateSigma`·σ from the prediction (once `minSamples` are
+ *  in) is not applied at once but held as *suspect*: a single bad autofocus (dust, an empty field)
+ *  must not tilt the plane. If the next measurement agrees with the suspect one (within the same
+ *  gate of its z) both are applied — the plane really did change; otherwise the suspect is dropped
+ *  and the new one is judged on its own. Slopes carry a small ridge so a collinear set of samples
+ *  (one row scanned so far) predicts along that row with a zero slope across it. */
+export class PlaneTracker {
+  private readonly forget: number
+  private readonly gateSigma: number
+  private readonly minSamples: number
+  private readonly priorSigma: number
+  private readonly ridge: number
+  private readonly maxRange: number
+  private readonly minSigma: number
+  // weighted normal equations Σw·[x y 1]ᵀ[x y 1] and Σw·[x y 1]ᵀz, plus Σw·z² for the residual
+  private Sxx = 0; private Sxy = 0; private Sx = 0; private Syy = 0; private Sy = 0; private Sw = 0
+  private Sxz = 0; private Syz = 0; private Sz = 0; private Szz = 0
+  private count = 0
+  private suspect: { x: number; y: number; z: number; weight: number } | null = null
+  private coef: Plane = { a: 0, b: 0, c: 0 }
+  private inv: number[][] | null = null
+  private rms = NaN
+
+  constructor(opts: PlaneTrackerOptions = {}) {
+    this.forget = Math.min(1, Math.max(0.5, opts.forget ?? 1))
+    this.gateSigma = opts.gateSigma ?? 3
+    this.minSamples = Math.max(1, opts.minSamples ?? 3)
+    this.priorSigma = opts.priorSigma ?? 50
+    this.ridge = opts.ridge ?? 1e-6
+    this.maxRange = opts.maxRange ?? Infinity
+    this.minSigma = opts.minSigma ?? 2
+  }
+
+  get n(): number { return this.count }
+  get coefficients(): Plane { return { ...this.coef } }
+  /** RMS of the weighted residuals of the current fit (NaN until there are more samples than unknowns) */
+  get residualRms(): number { return this.rms }
+  /** the measurement currently held back, if any */
+  get pending(): { x: number; y: number; z: number } | null { return this.suspect ? { x: this.suspect.x, y: this.suspect.y, z: this.suspect.z } : null }
+
+  /** Feed one measured focus position. */
+  update(x: number, y: number, z: number, weight = 1): PlaneUpdate {
+    const pred = this.predict(x, y)
+    const innovation = z - pred.z
+    // the gate needs a residual estimate with at least two degrees of freedom behind it
+    const gated = this.count >= this.minSamples + 2 && pred.confident && Math.abs(innovation) > this.gateSigma * pred.sigma
+    if (this.suspect) {
+      const s = this.suspect
+      const agreeWithSuspect = Math.abs(z - (s.z + this.coef.a * (x - s.x) + this.coef.b * (y - s.y))) <= this.gateSigma * Math.max(pred.sigma, 1e-9)
+      this.suspect = null
+      if (agreeWithSuspect) {
+        // the plane really moved: apply both
+        this.apply(s.x, s.y, s.z, s.weight); this.apply(x, y, z, weight)
+        return { accepted: true, innovation, sigma: pred.sigma }
+      }
+      // the suspect stood alone: drop it, judge this one normally
+    }
+    if (gated) {
+      this.suspect = { x, y, z, weight }
+      return { accepted: false, innovation, sigma: pred.sigma }
+    }
+    this.apply(x, y, z, weight)
+    return { accepted: true, innovation, sigma: pred.sigma }
+  }
+
+  /** Predicted focus z at (x, y) with its 1σ uncertainty (fit scatter plus leverage of the point). */
+  predict(x: number, y: number): PlanePrediction {
+    if (this.count === 0) return { z: NaN, sigma: this.priorSigma, confident: false }
+    const z = this.coef.a * x + this.coef.b * y + this.coef.c
+    if (this.count < this.minSamples || !this.inv || !Number.isFinite(this.rms)) return { z, sigma: this.priorSigma, confident: false }
+    const v = [x, y, 1]
+    let lev = 0
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) lev += v[i] * this.inv[i][j] * v[j]
+    // scatter inflated for few degrees of freedom (a 4-point plane fit has an almost meaningless rms)
+    const dof = Math.max(1, this.count - 3)
+    const scatter = Math.max(this.minSigma, this.rms * Math.sqrt(this.count / dof))
+    const sigma = scatter * Math.sqrt(Math.max(0, 1 + lev * this.Sw / Math.max(1, this.count)))
+    return { z, sigma: Number.isFinite(sigma) ? sigma : this.priorSigma, confident: Number.isFinite(sigma) }
+  }
+
+  /** ± range (steps) for the next autofocus sweep around the prediction: k·σ, but never under
+   *  3 depths of field and never over `maxRange`. */
+  suggestRange(dofSteps: number, k = 3): number {
+    const sigma = this.count >= this.minSamples && Number.isFinite(this.rms) ? Math.max(this.minSigma, this.rms) : this.priorSigma
+    return Math.min(this.maxRange, Math.max(k * sigma, 3 * Math.max(0, dofSteps)))
+  }
+
+  private apply(x: number, y: number, z: number, w: number): void {
+    const f = this.forget
+    this.Sxx = f * this.Sxx + w * x * x; this.Sxy = f * this.Sxy + w * x * y; this.Sx = f * this.Sx + w * x
+    this.Syy = f * this.Syy + w * y * y; this.Sy = f * this.Sy + w * y; this.Sw = f * this.Sw + w
+    this.Sxz = f * this.Sxz + w * x * z; this.Syz = f * this.Syz + w * y * z; this.Sz = f * this.Sz + w * z
+    this.Szz = f * this.Szz + w * z * z
+    this.count++
+    this.refit()
+  }
+
+  private refit(): void {
+    const lam = this.ridge * Math.max(1, this.Sxx + this.Syy)
+    const M = [[this.Sxx + lam, this.Sxy, this.Sx], [this.Sxy, this.Syy + lam, this.Sy], [this.Sx, this.Sy, this.Sw]]
+    const inv = invert3(M)
+    if (!inv || this.count < 3) {
+      // too few or degenerate: flat plane at the weighted mean
+      this.coef = { a: 0, b: 0, c: this.Sw > 0 ? this.Sz / this.Sw : 0 }
+      this.inv = null
+      this.rms = NaN
+      return
+    }
+    const v = [this.Sxz, this.Syz, this.Sz]
+    const a = inv[0][0] * v[0] + inv[0][1] * v[1] + inv[0][2] * v[2]
+    const b = inv[1][0] * v[0] + inv[1][1] * v[1] + inv[1][2] * v[2]
+    const c = inv[2][0] * v[0] + inv[2][1] * v[1] + inv[2][2] * v[2]
+    this.coef = { a, b, c }
+    this.inv = inv
+    // weighted residual sum of squares = Σw z² − βᵀ(Σw X z); degrees of freedom from the effective count
+    const rss = Math.max(0, this.Szz - (a * this.Sxz + b * this.Syz + c * this.Sz))
+    const dof = Math.max(1, this.count - 3)
+    this.rms = this.count > 3 ? Math.sqrt(rss / dof) : NaN
+  }
+}
+
+function invert3(m: number[][]): number[][] | null {
+  const [[a, b, c], [d, e, f], [g, h, i]] = m
+  const A = e * i - f * h, B = -(d * i - f * g), C = d * h - e * g
+  const det = a * A + b * B + c * C
+  if (!(Math.abs(det) > 1e-12)) return null
+  const D = -(b * i - c * h), E = a * i - c * g, F = -(a * h - b * g)
+  const G = b * f - c * e, H = -(a * f - c * d), I = a * e - b * d
+  return [[A / det, D / det, G / det], [B / det, E / det, H / det], [C / det, F / det, I / det]]
+}

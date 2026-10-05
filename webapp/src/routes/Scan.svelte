@@ -5,7 +5,7 @@
    *  how to join (stitching) — and the run itself lives in `services/scan.svelte.ts`, so switching
    *  tabs (e.g. to drive the stage to a corner on Live) loses nothing. */
   import { device } from '../lib/store/device.svelte'
-  import { calibration } from '../lib/store/calibration.svelte'
+  import { calibration, measuredIllumination } from '../lib/store/calibration.svelte'
   import { scan, fmtTime } from '../lib/services/scan.svelte'
   import ScanMap from '../components/ScanMap.svelte'
 
@@ -15,7 +15,9 @@
   const cfg = $derived(scan.cfg)
   const plan = $derived(scan.plan)
   const n = $derived(plan?.tiles.length ?? 0)
-  const flat = $derived(calibration.flat)
+  // the measured illumination map, if any (blank-field capture or the RAW flat field; see the Calibrate page)
+  const measured = $derived.by(() => { void calibration.flat; void calibration.rawFlatField; return measuredIllumination() })
+  const measuredLabel = $derived(measured ? `measured flat (captured ${measured.when ? new Date(measured.when).toLocaleDateString() : 'earlier'}${measured.source === 'raw' ? ', from RAW' : ''})` : 'measured flat (none captured)')
   const polygonMode = $derived(cfg.polygon.length >= 3)
   // the region select is the switch; leaving polygon mode drops the points
   let shape = $state<'rect' | 'polygon'>(scan.cfg.polygon.length ? 'polygon' : 'rect')
@@ -54,6 +56,7 @@
             <span>{scan.done}/{scan.total} tiles · {percent}%</span>
             <span>{fmtTime(scan.elapsedS)} elapsed · about {fmtTime(scan.remainingS)} left</span>
           </div>
+          {#if scan.focusSummary}<div class="muted mono small">{scan.focusSummary}</div>{/if}
         {/if}
       {:else if scan.phase === 'cancelled' && scan.captured >= 2}
         <div class="row between">
@@ -75,6 +78,7 @@
             {#if cfg.focusMode === 'interpolate' && n}· {scan.subgridCount} autofocused, rest interpolated{cfg.localRefine ? ' + refined' : ''}{/if}
           </span>
         </div>
+        {#if scan.focusSummary}<div class="muted mono small">{scan.focusSummary}</div>{/if}
         {#if scan.message}
           <div class="status-line" class:ok={scan.phase === 'done'} class:err={scan.phase === 'error'}>{scan.message}</div>
         {/if}
@@ -201,7 +205,14 @@
       <label class="check"><input type="checkbox" bind:checked={scan.cfg.refine} /> refine positions by correlation</label>
       <label class="check" title="solve per-tile brightness gains from the overlaps so exposure differences do not show as seams"><input type="checkbox" bind:checked={scan.cfg.gainEq} /> equalise tile brightness</label>
       <label class="check" title="3-level Laplacian blend: smoother large-scale transitions, sharp detail; limits the mosaic to 4096 px"><input type="checkbox" bind:checked={scan.cfg.multiband} /> multi-band blend</label>
-      <label class="check" title={flat ? `divide tiles by the blank-field map captured ${flat.when}` : 'no flat-field map captured yet (Calibrate page)'}><input type="checkbox" bind:checked={scan.cfg.useFlat} disabled={!flat} /> flat-field correction</label>
+      <label class="check shading" title="vignetting and colour shading repeat in every tile; the mosaic shows them as a tiled pattern unless each tile is divided by the illumination field first">
+        <span>shading</span>
+        <select bind:value={scan.cfg.shading} disabled={busy}>
+          <option value="auto" title="use the measured flat if one was captured, else estimate the field from the tiles themselves: the same scene point seen in two overlapping tiles differs only by the shading">auto (from the tiles)</option>
+          <option value="measured" disabled={!measured} title={measured ? 'divide every tile by the blank-field map from the Calibrate page' : 'capture a blank field on the Calibrate page first'}>{measuredLabel}</option>
+          <option value="off" title="leave the tiles as captured">off</option>
+        </select>
+      </label>
     </details>
   </aside>
 </div>
@@ -226,6 +237,7 @@
   input[type=number] { width: 72px; }
   .check { display: flex; gap: 6px; align-items: center; margin: 0; color: var(--text); font-size: 13px; }
   .check input[type=number] { width: 64px; }
+  .check.shading select { flex: 1; min-width: 0; }
   .adv summary { cursor: pointer; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
   .adv[open] summary { margin-bottom: 8px; }
   .adv .check { margin-top: 6px; }

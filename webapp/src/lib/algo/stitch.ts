@@ -1,7 +1,8 @@
 /** Mosaic stitching maths (pure TS, no DOM): refine nominal tile positions with pairwise FFT
  *  correlation on overlaps, solve the positions globally with outlier rejection, equalise per-tile
- *  luminance gains from overlap statistics, optionally divide tiles by a flat-field gain map, and blend
- *  tiles as a normalised weighted average (Σw·rgb / Σw) with feather weights, either directly (in row
+ *  gains (luminance, or per RGB channel from robust overlap means) from overlap statistics, optionally
+ *  divide tiles by a flat-field gain map, and blend tiles as a normalised weighted average (Σw·rgb / Σw)
+ *  with smoothstep feather weights sized to the overlap (`featherForOverlap`), either directly (in row
  *  bands, so an 8192² mosaic never needs a full-size float accumulator) or with a 2-3 level Laplacian
  *  multi-band blend. Approach after openflexure-stitching, simplified. */
 
@@ -141,6 +142,73 @@ function meanOf(g: Gray, x0: number, y0: number, w: number, h: number): number {
   return s / (w * h)
 }
 
+/** Interleaved RGB tile (0..255 floats), the downsampled colour version of a tile. Structurally the
+ *  same shape as `shading.ts`'s `RgbTile` so the two modules can share images. */
+export interface RgbTile { data: Float32Array /* interleaved rgb 0..255 */; width: number; height: number }
+
+/** Trimmed mean of a sample: drop `trim` of the values at each end (after sorting) and average the rest. */
+export function trimmedMean(v: Float32Array | number[], trim = 0.1): number {
+  const n = v.length
+  if (!n) return 0
+  const s = Float64Array.from(v).sort()
+  const k = Math.min(Math.floor(n * trim), (n - 1) >> 1)
+  let sum = 0
+  for (let i = k; i < n - k; i++) sum += s[i]
+  return sum / (n - 2 * k)
+}
+
+/** Per-channel version of `overlapGains`: one `PairGain` list per channel (R, G, B). The ratio of each
+ *  pair is taken from robust (trimmed) means over the *same* set of overlap pixels in both tiles, and a
+ *  pixel is skipped when any channel of either tile is dark (< `dark`) or saturated (> `sat`), so
+ *  specimen content, empty background and clipped highlights do not bias the ratio. The pair's weight
+ *  is the square root of the number of pixels kept. */
+export function overlapGainsRgb(tiles: StitchTile[], positions: Vec[], images: RgbTile[], minOverlapPx = 8, dark = 4, sat = 250, trim = 0.1): PairGain[][] {
+  const out: PairGain[][] = [[], [], []]
+  for (let i = 0; i < tiles.length; i++) for (let j = i + 1; j < tiles.length; j++) {
+    const a = tiles[i], b = tiles[j], ia = images[i], ib = images[j]
+    const s = ia.width / a.width
+    const r = overlapRect(a, positions[i], b, positions[j])
+    if (!r) continue
+    const ow = Math.floor((r.x1 - r.x0) * s), oh = Math.floor((r.y1 - r.y0) * s)
+    if (ow < minOverlapPx || oh < minOverlapPx) continue
+    const ax = Math.max(0, Math.floor((r.x0 - positions[i].x) * s)), ay = Math.max(0, Math.floor((r.y0 - positions[i].y) * s))
+    const bx = Math.max(0, Math.floor((r.x0 - positions[j].x) * s)), by = Math.max(0, Math.floor((r.y0 - positions[j].y) * s))
+    const w = Math.min(ow, ia.width - ax, ib.width - bx), h = Math.min(oh, ia.height - ay, ib.height - by)
+    if (w < minOverlapPx || h < minOverlapPx) continue
+    const va: Float32Array[] = [new Float32Array(w * h), new Float32Array(w * h), new Float32Array(w * h)]
+    const vb: Float32Array[] = [new Float32Array(w * h), new Float32Array(w * h), new Float32Array(w * h)]
+    let n = 0
+    for (let y = 0; y < h; y++) {
+      let pa = ((ay + y) * ia.width + ax) * 3, pb = ((by + y) * ib.width + bx) * 3
+      for (let x = 0; x < w; x++, pa += 3, pb += 3) {
+        let ok = true
+        for (let c = 0; c < 3 && ok; c++) {
+          const u = ia.data[pa + c], v = ib.data[pb + c]
+          if (!(u >= dark && u <= sat && v >= dark && v <= sat)) ok = false
+        }
+        if (!ok) continue
+        for (let c = 0; c < 3; c++) { va[c][n] = ia.data[pa + c]; vb[c][n] = ib.data[pb + c] }
+        n++
+      }
+    }
+    if (n < minOverlapPx * minOverlapPx) continue
+    const weight = Math.sqrt(n)
+    for (let c = 0; c < 3; c++) {
+      const ma = trimmedMean(va[c].subarray(0, n), trim), mb = trimmedMean(vb[c].subarray(0, n), trim)
+      if (!(ma > 1) || !(mb > 1)) continue
+      out[c].push({ a: i, b: j, logRatio: Math.log(mb / ma), weight })
+    }
+  }
+  return out
+}
+
+/** `solveGains` per channel. Returns one `[r, g, b]` gain triple per tile; a channel without pairs
+ *  gets unit gains. */
+export function solveGainsRgb(n: number, pairsPerChannel: PairGain[][], maxGain = 2, iterations = 200): [number, number, number][] {
+  const per = [0, 1, 2].map((c) => solveGains(n, pairsPerChannel[c] ?? [], maxGain, iterations))
+  return Array.from({ length: n }, (_, i) => [per[0][i], per[1][i], per[2][i]] as [number, number, number])
+}
+
 /** Least-squares log gains: minimise Σ w (g_b - g_a + logRatio)² + λ Σ g² over all tiles (the small
  *  ridge term anchors disconnected components), Gauss-Seidel like `solvePositions`, then the gains
  *  are normalised to a geometric mean of 1 and clamped to [1/maxGain, maxGain]. Returns multiplicative
@@ -238,21 +306,57 @@ export function applyFlatFieldRGBA(data: Uint8ClampedArray, w: number, h: number
 
 // ---- blending -------------------------------------------------------------------------------------
 
-/** Per-pixel feather weight for blending: 1 in the middle, tapering to 0 over `feather` px at the edges. */
+/** Per-pixel feather weight for blending: 1 in the middle, tapering linearly to 0 over `feather` px at
+ *  the edges. */
 export function featherWeight(x: number, y: number, w: number, h: number, feather: number): number {
   const fx = Math.min(1, Math.min(x + 0.5, w - x - 0.5) / feather)
   const fy = Math.min(1, Math.min(y + 0.5, h - y - 0.5) / feather)
   return Math.max(0, fx) * Math.max(0, fy)
 }
 
+/** Smoothstep (3t² - 2t³) of the linear ramp: continuous first derivative at both ends of the taper. */
+function smoothstep(t: number): number {
+  if (t <= 0) return 0
+  if (t >= 1) return 1
+  return t * t * (3 - 2 * t)
+}
+
+/** Smooth feather weight: like `featherWeight` but the taper is a smoothstep instead of a linear ramp,
+ *  so a normalised blend of two tiles has no kink where a taper starts or ends (the kink is what shows
+ *  as a band when the tiles differ in residual shading). 0 at the tile edge, 1 from `feather` px in. */
+export function featherWeightSmooth(x: number, y: number, w: number, h: number, feather: number): number {
+  const fx = smoothstep(Math.min(x + 0.5, w - x - 0.5) / feather)
+  const fy = smoothstep(Math.min(y + 0.5, h - y - 0.5) / feather)
+  return fx * fy
+}
+
+/** Feather width in mosaic px spanning ~90 % of the overlap between neighbouring tiles: the overlap is
+ *  `overlapFraction` of the smaller tile side (tile px), `scale` converts tile px to mosaic px. Never
+ *  below `min`. Callers used 8 % of the tile side before, far narrower than a typical 20-30 % overlap,
+ *  which left residual shading differences as visible bands. */
+export function featherForOverlap(tileW: number, tileH: number, overlapFraction: number, scale = 1, min = 1): number {
+  const overlapPx = Math.min(tileW, tileH) * Math.max(0, overlapFraction) * scale
+  return Math.max(min, Math.round(0.9 * overlapPx))
+}
+
+/** A per-tile colour gain: one scalar for all channels, or an `[r, g, b]` triple. */
+export type TileGain = number | readonly [number, number, number]
+
+function gainRgb(g: TileGain | undefined): readonly [number, number, number] {
+  if (g === undefined) return UNIT_GAIN
+  return typeof g === 'number' ? [g, g, g] : g
+}
+const UNIT_GAIN: readonly [number, number, number] = [1, 1, 1]
+
 /** A horizontal strip of one placed tile, ready to be accumulated: RGBA pixels of `width`×`height`
  *  whose top-left sits at mosaic (x, y); the whole tile is at (tileX, tileY) with size tileW×tileH,
- *  so feather weights can be computed for the strip's pixels. `gain` multiplies the colour. */
+ *  so feather weights can be computed for the strip's pixels. `gain` multiplies the colour (scalar
+ *  or per-channel `[r, g, b]`). */
 export interface BlendStrip {
   data: Uint8ClampedArray; width: number; height: number
   x: number; y: number
   tileX: number; tileY: number; tileW: number; tileH: number
-  gain?: number
+  gain?: TileGain
 }
 
 /** Normalised weighted-average accumulator (Σw·rgb / Σw) for one row band of the mosaic, in Float32
@@ -267,9 +371,10 @@ export class BandAccumulator {
   }
   /** Start a new band whose first mosaic row is `y0`. */
   reset(y0: number): void { this.y0 = y0; this.r.fill(0); this.g.fill(0); this.b.fill(0); this.w.fill(0) }
-  /** Accumulate a strip that lies (at least partly) inside the current band. */
+  /** Accumulate a strip that lies (at least partly) inside the current band. Feather weights use the
+   *  smooth (smoothstep) profile. */
   add(s: BlendStrip, feather: number): void {
-    const gain = s.gain ?? 1
+    const [gr, gg, gb] = gainRgb(s.gain)
     const yStart = Math.max(s.y, this.y0), yEnd = Math.min(s.y + s.height, this.y0 + this.bandHeight)
     const xStart = Math.max(s.x, 0), xEnd = Math.min(s.x + s.width, this.width)
     for (let y = yStart; y < yEnd; y++) {
@@ -278,10 +383,10 @@ export class BandAccumulator {
         const i = (sy * s.width + (x - s.x)) * 4
         const a = s.data[i + 3] / 255
         if (a === 0) continue
-        const wgt = featherWeight(x - s.tileX, ty, s.tileW, s.tileH, feather) * a
+        const wgt = featherWeightSmooth(x - s.tileX, ty, s.tileW, s.tileH, feather) * a
         if (wgt <= 0) continue
         const o = by * this.width + x
-        this.r[o] += wgt * gain * s.data[i]; this.g[o] += wgt * gain * s.data[i + 1]; this.b[o] += wgt * gain * s.data[i + 2]; this.w[o] += wgt
+        this.r[o] += wgt * gr * s.data[i]; this.g[o] += wgt * gg * s.data[i + 1]; this.b[o] += wgt * gb * s.data[i + 2]; this.w[o] += wgt
       }
     }
   }
@@ -340,7 +445,7 @@ export function pyrUp(src: Float32Array, w: number, h: number, ow: number, oh: n
   return out
 }
 
-export interface PlacedTile { data: Uint8ClampedArray; width: number; height: number; x: number; y: number; gain?: number }
+export interface PlacedTile { data: Uint8ClampedArray; width: number; height: number; x: number; y: number; gain?: TileGain }
 
 interface Level { r: Float32Array; g: Float32Array; b: Float32Array; w: Float32Array; width: number; height: number }
 
@@ -360,15 +465,15 @@ export function blendMultiband(tiles: PlacedTile[], W: number, H: number, feathe
   const acc: Level[] = dims.map((d) => ({ r: new Float32Array(d.width * d.height), g: new Float32Array(d.width * d.height), b: new Float32Array(d.width * d.height), w: new Float32Array(d.width * d.height), ...d }))
 
   for (const t of tiles) {
-    const gain = t.gain ?? 1
+    const [gr, gg, gb] = gainRgb(t.gain)
     const padX = ((t.x % align) + align) % align, padY = ((t.y % align) + align) % align
     const ox = t.x - padX, oy = t.y - padY   // aligned origin
     const tw = Math.ceil((t.width + padX) / align) * align, th = Math.ceil((t.height + padY) / align) * align
     let r = new Float32Array(tw * th), g = new Float32Array(tw * th), b = new Float32Array(tw * th), w = new Float32Array(tw * th)
     for (let y = 0; y < t.height; y++) for (let x = 0; x < t.width; x++) {
       const i = (y * t.width + x) * 4, o = (y + padY) * tw + x + padX
-      const wgt = featherWeight(x, y, t.width, t.height, feather) * (t.data[i + 3] / 255)
-      r[o] = gain * t.data[i]; g[o] = gain * t.data[i + 1]; b[o] = gain * t.data[i + 2]; w[o] = wgt
+      const wgt = featherWeightSmooth(x, y, t.width, t.height, feather) * (t.data[i + 3] / 255)
+      r[o] = gr * t.data[i]; g[o] = gg * t.data[i + 1]; b[o] = gb * t.data[i + 2]; w[o] = wgt
     }
     // outside the tile (padding) fill colour by nearest tile pixel so the Laplacian does not ring at the tile edge
     fillPadding(r, tw, th, padX, padY, t.width, t.height); fillPadding(g, tw, th, padX, padY, t.width, t.height); fillPadding(b, tw, th, padX, padY, t.width, t.height)

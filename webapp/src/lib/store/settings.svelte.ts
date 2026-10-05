@@ -32,7 +32,20 @@ export interface Settings {
   /** Numerical aperture of the objective in use (0.65 for a typical 40× plan achromat). Sets the
    *  theoretical depth of field that spaces focus-stack slices (`algo/stackPlan.ts`). */
   objectiveNA: number
+  /** Autofocus metrics (`services/autofocusService.ts`). `focusSweepMetric`: what the fast sweep scores
+   *  frames by: 'fom' = libcamera FocusFoM from the frame metadata (computed by the ISP before the
+   *  encoder, so rate control cannot flatten it; falls back to 'jpeg' size when the device sends none).
+   *  `focusMetric`: the at-rest measure for the step/fine/local-refine sweeps ('laplacian' default:
+   *  measured on the Pi, peak/floor 12 on the 820 px stream frame; 'nv', 'brenner'), scored over a 4x4
+   *  tile grid on a stream-frame grab `focusGrabWidth` px wide, default 'native' (the stream's own width,
+   *  never upsampled; full-res stills are JPEG-noise dominated, peak/floor 1.14, so never used). */
+  focusSweepMetric: 'fom' | 'jpeg'
+  focusMetric: 'nv' | 'laplacian' | 'brenner'
+  focusGrabWidth: number | 'native'
   showScaleBar: boolean
+  /** Shading correction (`services/shadingProcessor.ts`): divide by the illumination map in linear light */
+  shadingLive: boolean
+  shadingStills: boolean
   /** Video recording defaults (`PhotoPanel.svelte`); `codec` mirrors `services/recorder.svelte.ts`'s
    *  `VideoCodec` ('vp9' | 'av1' | 'vp8' | 'auto') but is kept as `string` here to avoid a runtime
    *  import into this plain settings module. */
@@ -99,7 +112,9 @@ const defaults: Settings = {
   },
   stageStepUm: { x: 0.088, y: 0.088, z: 0.050 },
   objectiveNA: 0.65,
+  focusSweepMetric: 'fom', focusMetric: 'laplacian', focusGrabWidth: 'native',
   showScaleBar: true,
+  shadingLive: false, shadingStills: false,
   videoCodec: 'vp9', videoBitrateMbps: 12, videoStabilise: false,
   videoCodecPref: 'auto', videoContainer: 'mp4', videoQuality: 'high', videoKeyframeS: 2, videoDeflicker: false, deflickerLive: false,
   videoRetime: 'vfr', videoRetimeFps: 18,

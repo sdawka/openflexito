@@ -10,6 +10,7 @@
 
 import type { RawImage } from './raw'
 import { splitBayer } from './raw'
+import { sampleGainMap, type GainMap } from './stitch'
 
 export interface FlatField {
   cols: number
@@ -133,4 +134,104 @@ export function applyFlatFieldRgb(data: Float32Array, w: number, h: number, f: F
     const o = (y * w + x) * 3
     data[o] *= sr(x, y); data[o + 1] *= sg(x, y); data[o + 2] *= sb(x, y)
   }
+}
+
+/** Relative illumination of the blank field, the shape stitching divides its tiles by
+ *  (`algo/stitch.ts` `GainMap`, channels 3): illumination = 1 / gain per channel, resampled to
+ *  `cols`×`rows` (default the field's own grid) and scaled to mean 1 per channel. Accepts the live
+ *  `FlatField` or its JSON form straight from the calibration store. */
+export function flatFieldToIllumination(f: FlatField | FlatFieldJson, cols = f.cols, rows = f.rows): { width: number; height: number; channels: 3; data: Float32Array } {
+  const planes = [f.r, f.g, f.b].map((p) => (p instanceof Float32Array ? p : Float32Array.from(p)))
+  const n = cols * rows, data = new Float32Array(n * 3)
+  for (let ch = 0; ch < 3; ch++) {
+    const s = flatFieldSampler(planes[ch], f.cols, f.rows, cols, rows)
+    let sum = 0
+    for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) {
+      const v = 1 / Math.max(1e-3, s(x, y))
+      data[(y * cols + x) * 3 + ch] = v; sum += v
+    }
+    const m = sum / n || 1
+    for (let i = 0; i < n; i++) data[i * 3 + ch] /= m
+  }
+  return { width: cols, height: rows, channels: 3, data }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Applying a relative-illumination map to 8-bit RGBA (live view, recordings, JPEG stills)
+// ---------------------------------------------------------------------------------------------
+
+/** A relative-illumination map as stored in the calibration store (plain arrays) or built by the
+ *  stitcher (`Float32Array`); `GainMap` shape, `data` may be a plain array. */
+export type IlluminationMap = Omit<GainMap, 'data'> & { data: ArrayLike<number> }
+
+export interface ApplyGainMapOptions {
+  /** Default true: decode sRGB to linear light, divide by the map, re-encode. The illumination is a
+   *  linear-light multiplier on the scene, but a JPEG is gamma-encoded: dividing the encoded values
+   *  (`false`) applies the full 1/ill to a value that only fell by ill^(1/2.2), so the dim rim ends up
+   *  brighter than the centre (E(L·ill)/ill = E(L)·ill^-0.55 > E(L)). `false` is kept for comparison. */
+  linear?: boolean
+  /** 0..1: how much of the correction to apply (multiplier = ill^-strength). Default 1. */
+  strength?: number
+  /** The image is a window of a frame of `tileW`×`tileH` (default: the image's own size) whose
+   *  top-left is at (`offX`, `offY`); the map is sampled over the whole frame. */
+  tileW?: number
+  tileH?: number
+  offX?: number
+  offY?: number
+}
+
+/** Per-pixel, per-channel multiplier (1 / illumination^strength), `w*h*3` floats, bilinear in the map. */
+export function buildShadingMultiplier(w: number, h: number, map: IlluminationMap, opts: ApplyGainMapOptions = {}): Float32Array {
+  const tw = opts.tileW ?? w, th = opts.tileH ?? h, ox = opts.offX ?? 0, oy = opts.offY ?? 0
+  const strength = Math.min(1, Math.max(0, opts.strength ?? 1))
+  const m = map as GainMap
+  const out = new Float32Array(w * h * 3)
+  const mono = m.channels === 1
+  for (let y = 0; y < h; y++) {
+    const v = (oy + y + 0.5) / th
+    for (let x = 0; x < w; x++) {
+      const u = (ox + x + 0.5) / tw
+      const o = (y * w + x) * 3
+      for (let ch = 0; ch < 3; ch++) {
+        const ill = Math.max(1e-3, sampleGainMap(m, u, v, mono ? 0 : ch))
+        out[o + ch] = strength === 1 ? 1 / ill : Math.pow(ill, -strength)
+      }
+    }
+  }
+  return out
+}
+
+const SRGB_DECODE = (() => {
+  const t = new Float32Array(256)
+  for (let i = 0; i < 256; i++) { const c = i / 255; t[i] = c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4) }
+  return t
+})()
+const ENCODE_N = 4096
+const SRGB_ENCODE = (() => {
+  const t = new Uint8ClampedArray(ENCODE_N + 1)
+  for (let i = 0; i <= ENCODE_N; i++) { const l = i / ENCODE_N; t[i] = Math.round(255 * (l <= 0.0031308 ? 12.92 * l : 1.055 * Math.pow(l, 1 / 2.4) - 0.055)) }
+  return t
+})()
+
+/** Multiply an RGBA buffer in place by a per-pixel multiplier (`buildShadingMultiplier`). Alpha untouched. */
+export function applyMultiplierRgba(data: Uint8ClampedArray, mult: Float32Array, linear = true): void {
+  const n = mult.length / 3
+  if (linear) {
+    for (let i = 0; i < n; i++) {
+      const p = i * 4, m = i * 3
+      data[p] = SRGB_ENCODE[Math.min(ENCODE_N, Math.round(SRGB_DECODE[data[p]] * mult[m] * ENCODE_N))]
+      data[p + 1] = SRGB_ENCODE[Math.min(ENCODE_N, Math.round(SRGB_DECODE[data[p + 1]] * mult[m + 1] * ENCODE_N))]
+      data[p + 2] = SRGB_ENCODE[Math.min(ENCODE_N, Math.round(SRGB_DECODE[data[p + 2]] * mult[m + 2] * ENCODE_N))]
+    }
+  } else {
+    for (let i = 0; i < n; i++) {
+      const p = i * 4, m = i * 3
+      data[p] *= mult[m]; data[p + 1] *= mult[m + 1]; data[p + 2] *= mult[m + 2]   // Uint8ClampedArray clamps and rounds
+    }
+  }
+}
+
+/** Divide an 8-bit RGBA image by a relative-illumination map, in place (see `ApplyGainMapOptions`). */
+export function applyGainMapRgba(data: Uint8ClampedArray, w: number, h: number, map: IlluminationMap, opts: ApplyGainMapOptions = {}): void {
+  applyMultiplierRgba(data, buildShadingMultiplier(w, h, map, opts), opts.linear ?? true)
 }

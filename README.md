@@ -34,7 +34,10 @@ recent design choices even if you're not continuing that specific work.
 
 The fake device renders a stage-coupled specimen (moves scroll it, z defocuses it), so calibration,
 autofocus and scans can be exercised end to end. Browser tests: `cd webapp && npm run test:e2e` with the fake
-running on port 8099 serving `webapp/dist` (needs Google Chrome installed).
+running on port 8099 serving `webapp/dist` (needs Google Chrome installed). The fake stamps every frame with a
+`focus_fom` stand-in for libcamera's FocusFoM (peaks at the focal plane); `OPENFLEXITO_FAKE_TILT=a,b` tilts that
+plane (z steps per x-step and per y-step, default `0,0`) so a scan must track it. `webapp/e2e/focusMetric.mjs`
+sweeps z and tabulates JPEG size vs `focus_fom` (usable on the Pi too).
 
 ```bash
 cd device && python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"

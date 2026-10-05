@@ -1,6 +1,7 @@
 <script lang="ts">
   import { device } from '../lib/store/device.svelte'
   import { liveStack } from '../lib/services/liveStack.svelte'
+  import { settings, saveSettings } from '../lib/store/settings.svelte'
   import { focusCtl } from '../lib/store/focusCtl.svelte'
   import { liveEdof } from '../lib/services/liveEdof.svelte'
   import LiveEdof from './LiveEdof.svelte'
@@ -11,14 +12,31 @@
   <div class="row">
     <button class="primary" onclick={() => focusCtl.run()} disabled={!device.connected || liveEdof.holdsStage}>{focusCtl.focusing ? 'Cancel' : 'Autofocus'}</button>
     <select bind:value={focusCtl.mode} disabled={focusCtl.focusing}>
-      <option value="fast">fast (JPEG size)</option>
+      <option value="fast">fast (sweep)</option>
       <option value="looping">looping</option>
       <option value="step">step (Laplacian)</option>
-      <option value="twopass" title="coarse JPEG-size sweep locates the plane, then a short fine Laplacian sweep sub-pixel-fits the peak">two-pass (fine sub-pixel)</option>
+      <option value="twopass" title="coarse FocusFoM sweep locates the plane, then a short fine stepped sweep (Laplacian on the stream frame) sub-pixel-fits the peak; the default, and the only mode with a usable fine metric on the Pi">two-pass (fine sub-pixel)</option>
     </select>
     <select bind:value={focusCtl.range} disabled={focusCtl.focusing}>
       <option value={500}>±250</option><option value={1000}>±500</option><option value={2000}>±1000</option><option value={4000}>±2000</option>
     </select>
+  </div>
+  <div class="row" title="what scores the sweep: the ISP's FocusFoM is computed before the encoder; JPEG size is the fallback when the device sends none. The at-rest measure grades step / fine / local sweeps over a 4x4 tile grid on a stream-width grab (full-resolution stills are too noisy to score focus).">
+    <label class="muted" style="font-size:12px">sweep
+      <select bind:value={settings.focusSweepMetric} onchange={saveSettings} disabled={focusCtl.focusing}>
+        <option value="fom">FocusFoM</option><option value="jpeg">JPEG size</option>
+      </select>
+    </label>
+    <label class="muted" style="font-size:12px">fine
+      <select bind:value={settings.focusMetric} onchange={saveSettings} disabled={focusCtl.focusing}>
+        <option value="laplacian">Laplacian</option><option value="nv">normalised variance</option><option value="brenner">Brenner</option>
+      </select>
+    </label>
+    <label class="muted" style="font-size:12px">grab
+      <select bind:value={settings.focusGrabWidth} onchange={saveSettings} disabled={focusCtl.focusing}>
+        <option value="native">stream width</option><option value={410}>410 px</option><option value={640}>640 px</option>
+      </select>
+    </label>
   </div>
   {#if focusCtl.log}<div class="muted mono" style="font-size:12px;margin-top:6px">{focusCtl.log}</div>{/if}
   <h4 class="sub">Live view processing</h4>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { fitPlane, planeZ, rejectOutliers, buildSubGrid, bilinearZ, predictHeightMap, heightColor, heightLegend, subGridIndices, isSubGridCell, type HeightSample } from '../heightMap'
+import { fitPlane, planeZ, rejectOutliers, buildSubGrid, bilinearZ, predictHeightMap, heightColor, heightLegend, subGridIndices, isSubGridCell, PlaneTracker, type HeightSample } from '../heightMap'
 
 describe('height map: plane fit', () => {
   it('recovers an exact plane from noiseless samples', () => {
@@ -137,5 +137,76 @@ describe('height map: legend units', () => {
   it('reports plain steps when no factor (or a non-positive one) is given', () => {
     expect(heightLegend(100, 300)).toEqual({ min: 100, max: 300, unit: 'steps' })
     expect(heightLegend(100, 300, 0)).toEqual({ min: 100, max: 300, unit: 'steps' })
+  })
+})
+
+describe('height map: PlaneTracker', () => {
+  const plane = (x: number, y: number) => 2.5 * x - 1.5 * y + 100
+  // deterministic "noise" with std about 2 steps
+  const noise = (i: number) => 2 * Math.sin(i * 12.9898) * 1.2
+
+  it('predicts a tilted noisy plane within 3 sigma after a few samples', () => {
+    const t = new PlaneTracker()
+    const pts: [number, number][] = [[0, 0], [1, 0], [2, 0], [0, 1], [1, 1], [2, 1], [0, 2]]
+    pts.forEach(([x, y], i) => t.update(x, y, plane(x, y) + noise(i)))
+    expect(t.n).toBe(7)
+    const p = t.predict(2, 2)
+    expect(p.confident).toBe(true)
+    expect(Math.abs(p.z - plane(2, 2))).toBeLessThan(3 * Math.max(p.sigma, 2))
+    expect(Math.abs(t.coefficients.a - 2.5)).toBeLessThan(1.5)
+    expect(Math.abs(t.coefficients.b + 1.5)).toBeLessThan(1.5)
+  })
+
+  it('holds a lone outlier back and accepts it when the next measurement confirms the change', () => {
+    const t = new PlaneTracker({ priorSigma: 5 })
+    for (let i = 0; i < 6; i++) t.update(i % 3, Math.floor(i / 3), plane(i % 3, Math.floor(i / 3)) + noise(i))
+    const before = t.n
+    const bad = t.update(0, 2, plane(0, 2) + 60)   // 60 steps off: suspect
+    expect(bad.accepted).toBe(false)
+    expect(t.n).toBe(before)
+    expect(t.pending).not.toBeNull()
+    // the next tile disagrees with the suspect -> suspect dropped, new one accepted
+    const ok = t.update(1, 2, plane(1, 2) + noise(7))
+    expect(ok.accepted).toBe(true)
+    expect(t.pending).toBeNull()
+    expect(t.n).toBe(before + 1)
+    // now a real step change confirmed by two tiles in a row is applied (both of them)
+    const n2 = t.n
+    expect(t.update(2, 2, plane(2, 2) + 60).accepted).toBe(false)
+    expect(t.update(0, 3, plane(0, 3) + 60).accepted).toBe(true)
+    expect(t.n).toBe(n2 + 2)
+  })
+
+  it('forgets: tracks a drifting offset', () => {
+    const t = new PlaneTracker({ forget: 0.8, minSamples: 3 })
+    let drift = 0
+    for (let i = 0; i < 30; i++) { drift += 3; t.update(i % 4, Math.floor(i / 4), 50 + drift + noise(i)) }
+    const p = t.predict(2, 7)
+    expect(Math.abs(p.z - (50 + drift)) < 15).toBe(true)
+  })
+
+  it('collinear samples (one row) still predict along that row with a zero cross slope', () => {
+    const t = new PlaneTracker()
+    for (let x = 0; x < 5; x++) t.update(x, 0, 10 + 4 * x)
+    const p = t.predict(6, 0)
+    expect(Math.abs(p.z - 34)).toBeLessThan(0.5)
+    expect(Math.abs(t.coefficients.b)).toBeLessThan(1e-3)
+  })
+
+  it('suggestRange shrinks with residuals, floors at 3 DOF and caps at maxRange', () => {
+    const wide = new PlaneTracker({ priorSigma: 100, maxRange: 250 })
+    expect(wide.suggestRange(10)).toBe(250)
+    const t = new PlaneTracker({ priorSigma: 100 })
+    for (let i = 0; i < 9; i++) t.update(i % 3, Math.floor(i / 3), plane(i % 3, Math.floor(i / 3)) + noise(i))
+    const r = t.suggestRange(10)
+    expect(r).toBeLessThan(300)
+    expect(r).toBeGreaterThanOrEqual(30)
+    expect(new PlaneTracker().suggestRange(10)).toBeGreaterThanOrEqual(30)
+  })
+
+  it('no samples: prediction is NaN and not confident', () => {
+    const p = new PlaneTracker().predict(1, 1)
+    expect(Number.isNaN(p.z)).toBe(true)
+    expect(p.confident).toBe(false)
   })
 })

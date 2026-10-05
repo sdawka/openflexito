@@ -7,24 +7,25 @@
  *  the whole run, visit every tile with an adaptive settle (∝ move length, min the configured value)
  *  and a stage-still check, focus it (none / autofocus every tile / coarse autofocus sub-grid +
  *  height map with an optional short local sweep around the predicted z), capture a stream frame
- *  or a full-res still, then stitch in a worker (robust position solve, gain equalisation, optional
- *  flat field and multi-band blend). Per-tile focus status is recorded in the gallery item;
+ *  or a full-res still, then stitch in a worker (robust position solve, shading removal — a measured
+ *  flat field or one estimated from the tiles themselves — per-channel gain equalisation and an
+ *  optional multi-band blend). Per-tile focus status is recorded in the gallery item;
  *  autofocus failures are counted and shown, never swallowed. Cancelling keeps what was captured
  *  and lets the operator stitch or discard it. The stage returns to where it started (x, y and z). */
 
 import { fetchSnapshot } from '../api/snapshot'
 import { waitForFrames, grabGray } from '../api/sampler'
 import { device } from '../store/device.svelte'
-import { calibration } from '../store/calibration.svelte'
+import { calibration, measuredIllumination, saveAutoShading } from '../store/calibration.svelte'
 import { settings } from '../store/settings.svelte'
 import { buildScanPlan, fovRectNorm, scaleMatrix, settleForMove, type NormRect, type Point, type ScanOrder, type ScanPlan, type ScanRegion, type TilePlan } from '../algo/scanPlan'
 import type { Mat2 } from '../algo/csm'
-import { runAutofocus } from './autofocusService'
-import { stepAutofocus } from '../algo/autofocus'
-import { laplacianVariance } from '../algo/sharpness'
+import { runAutofocus, measureSharpness } from './autofocusService'
+import { stepAutofocus, curveQuality, type CurveQuality } from '../algo/autofocus'
+import { depthOfFieldUm } from '../algo/stackPlan'
 import { lockCamera, type CameraLock } from './cameraLock'
 import { stitchInWorker } from './stitchService'
-import { predictHeightMap, rejectOutliers, isSubGridCell, type HeightSample } from '../algo/heightMap'
+import { predictHeightMap, rejectOutliers, isSubGridCell, PlaneTracker, type HeightSample } from '../algo/heightMap'
 import { deleteItem, makeThumb, newId, putBlob, putItem, type GalleryItem } from '../store/gallery'
 import { activity } from './activity.svelte'
 
@@ -42,13 +43,14 @@ export interface ScanConfig extends ScanRegion {
   refine: boolean          // stitch: refine positions by correlation
   gainEq: boolean          // stitch: equalise tile brightness
   multiband: boolean       // stitch: 3-level Laplacian blend
-  useFlat: boolean         // stitch: divide by the measured flat field
+  shading: ShadingMode     // stitch: 'auto' (measured map if any, else estimated from the tiles), 'measured' only, 'off'
 }
+export type ShadingMode = 'auto' | 'measured' | 'off'
 
 export const DEFAULT_CONFIG: ScanConfig = {
   extent: 'centre', cols: 3, rows: 3, cornerA: null, cornerB: null, overlap: 0.3, polygon: [], order: 'snake',
   focusMode: 'none', afStep: 3, afRange: 600, localRefine: true, localRange: 40,
-  settleMs: 150, fullRes: true, refine: true, gainEq: true, multiband: false, useFlat: true,
+  settleMs: 150, fullRes: true, refine: true, gainEq: true, multiband: false, shading: 'auto',
 }
 const STORAGE_KEY = 'openflexito.scan.config'
 
@@ -57,6 +59,8 @@ export interface TileState {
   status: TileStatus
   z?: number
   focus?: TileFocus['status']
+  /** why the focus quality gate refused the sweep (flat / multimodal / edge / few / suspect) */
+  reason?: TileFocus['reason']
   error?: string
   /** object URL of a small thumbnail of the captured tile, for the map */
   thumb?: string
@@ -73,16 +77,26 @@ export interface ScanResult {
   summary: string
 }
 
-const AF_TIME_S = 3.5, LOCAL_AF_TIME_S = 2.5
+const AF_TIME_S = 6, LOCAL_AF_TIME_S = 2.5
+/** smallest sweep the plane tracker may shrink an autofocus to, in steps (also at least 6 DOF) */
+const MIN_AF_RANGE = 60
+const REASON_LABEL: Record<string, string> = { flat: 'flat curve', multimodal: 'several peaks', edge: 'peak at sweep edge', few: 'too few samples', suspect: 'off the plane', coarse: 'coarse sweep only' }
 
 function loadConfig(): ScanConfig {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
-    if (raw) return { ...DEFAULT_CONFIG, ...(JSON.parse(raw) as Partial<ScanConfig>) }
+    if (raw) {
+      const saved = JSON.parse(raw) as Partial<ScanConfig> & { useFlat?: boolean }
+      // migrate the old `useFlat` checkbox: on → measured map only, off → self-calibrating
+      if (saved.shading == null && typeof saved.useFlat === 'boolean') saved.shading = saved.useFlat ? 'measured' : 'auto'
+      delete saved.useFlat
+      return { ...DEFAULT_CONFIG, ...saved }
+    }
   } catch { /* private mode, corrupt json */ }
   return { ...DEFAULT_CONFIG }
 }
 
+const round2 = (x: number) => Math.round(x * 100) / 100
 export const fmtTime = (s: number) => (s < 90 ? `${Math.round(s)} s` : `${(s / 60).toFixed(1)} min`)
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -127,6 +141,19 @@ class ScanService {
   readonly plan = $derived<ScanPlan | null>(this.activePlan ?? this.livePlan)
   /** the current field of view inside the plan's box (moves with the stage, also during a run) */
   readonly here = $derived<NormRect | null>(this.plan && this.matrix ? fovRectNorm(this.plan, this.matrix, device.position) : null)
+  /** per-run focus outcome for the status line: "focus: 7 measured, 2 predicted (flat curve)" */
+  readonly focusSummary = $derived.by((): string => {
+    if (this.cfg.focusMode === 'none') return ''
+    const by: Record<string, { n: number; reasons: Set<string> }> = {}
+    for (const t of this.tiles) {
+      if (!t.focus || t.focus === 'none') continue
+      const e = (by[t.focus] ??= { n: 0, reasons: new Set() })
+      e.n++
+      if (t.reason) e.reasons.add(REASON_LABEL[t.reason] ?? t.reason)
+    }
+    const parts = (['measured', 'refined', 'predicted', 'failed'] as const).filter((k) => by[k]).map((k) => `${by[k].n} ${k}${by[k].reasons.size ? ` (${[...by[k].reasons].join(', ')})` : ''}`)
+    return parts.length ? `focus: ${parts.join(', ')}` : ''
+  })
   readonly cornersReady = $derived(!!(this.cfg.cornerA && this.cfg.cornerB))
 
   readonly subgridStep = $derived(Math.max(1, Math.round(this.cfg.afStep)))
@@ -288,6 +315,8 @@ class ScanService {
         if (focus.status === 'failed') {
           item.scan!.focusFailures = (item.scan!.focusFailures ?? 0) + 1
           say(`${tag}: autofocus failed (${focus.error}), capturing anyway`)
+        } else if (focus.reason) {
+          say(`${tag}: focus curve refused (${REASON_LABEL[focus.reason] ?? focus.reason}), ${focus.status === 'predicted' ? 'using the plane prediction' : 'kept z'}`)
         }
         await this.waitStageStill()
       }
@@ -306,20 +335,97 @@ class ScanService {
       this.done++; this.captured = this.blobs.length
       let thumb: string | undefined
       try { thumb = URL.createObjectURL(await makeThumb(blob, 192)); this.thumbUrls.push(thumb) } catch { /* the map just shows a tint */ }
-      this.setTile(t, { status: focus.status === 'failed' ? 'failed' : 'done', z: zRec, focus: focus.status, error: focus.error, thumb })
+      this.setTile(t, { status: focus.status === 'failed' ? 'failed' : 'done', z: zRec, focus: focus.status, reason: focus.reason, error: focus.error, thumb })
     }
-    const autofocusHere = async (): Promise<{ z?: number; zMeasured?: boolean; focus: TileFocus }> => {
+    // ---- focus plane model, kept across the run for both focus modes ----------------------------
+    const tracker = new PlaneTracker()
+    const dofSteps = (() => {
+      const um = settings.stageStepUm?.z
+      return um && um > 0 ? Math.max(4, Math.round(depthOfFieldUm(settings.objectiveNA ?? 0.65) / um)) : 0
+    })()
+    /** Sweep size for the next autofocus: the tracker's suggested range once it has a plane (never
+     *  below max(MIN_AF_RANGE, 6 DOF), never above the configured range), else the configured one. */
+    const sweepRange = (): number => {
+      if (!dofSteps || tracker.n < 3) return cfg.afRange
+      const r = Math.round(2 * tracker.suggestRange(dofSteps))   // suggestRange is ± steps; the sweep size is the total
+      if (!Number.isFinite(r)) return cfg.afRange
+      return Math.min(cfg.afRange, Math.max(MIN_AF_RANGE, 6 * dofSteps, r))
+    }
+    const reasonOf = (q: CurveQuality): TileFocus['reason'] => q.reason
+    /** A refused or failed measurement: fall back to the plane prediction when the tracker is
+     *  confident there, else keep the z the sweep started from (reported as 'failed'). */
+    const fallback = async (t: TilePlan, keepZ: number, why: string, reason: TileFocus['reason'], extra: Partial<TileFocus> = {}) => {
+      const p = tracker.n >= 3 ? tracker.predict(t.col, t.row) : null
       try {
-        const r = await runAutofocus({ mode: 'fast', dz: cfg.afRange, metric: 'jpeg' })
-        return { z: r.peakZ, zMeasured: true, focus: { status: 'measured' } }
+        if (p?.confident) {
+          const zp = Math.round(p.z)
+          await device.moveRel({ z: zp - device.position.z }, 'z')
+          return { z: zp, zMeasured: false, focus: { status: 'predicted', reason, error: why, ...extra } as TileFocus }
+        }
+        await device.moveRel({ z: keepZ - device.position.z }, 'z')
+      } catch { /* the capture proceeds wherever the stage is */ }
+      return { z: device.position.z, zMeasured: false, focus: { status: 'failed', reason, error: why, ...extra } as TileFocus }
+    }
+    /** Feed an accepted measurement to the tracker. False when its innovation gate held it back. */
+    const learn = (t: TilePlan, z: number): boolean => tracker.update(t.col, t.row, z).accepted
+
+    const autofocusHere = async (t: TilePlan): Promise<{ z?: number; zMeasured?: boolean; focus: TileFocus }> => {
+      const range = sweepRange()
+      try {
+        const p = tracker.n >= 3 ? tracker.predict(t.col, t.row) : null
+        if (p?.confident) {
+          await device.moveRel({ z: Math.round(p.z) - device.position.z }, 'z')
+          await this.waitStageStill()
+        }
+        const centre = device.position.z
+        try {
+          // two-pass: coarse continuous sweep (FocusFoM, JPEG size only if the device sends none), then a
+          // stepped fine pass on the configured at-rest metric at the stream's native width. The fine span
+          // is half the sweep (the Laplacian peak is ~200 steps wide at half maximum on the IMX219 stream,
+          // a quarter-range window sat on its slope and was refused as 'edge'/'flat').
+          const fineRange = Math.min(range, Math.max(120, Math.round(range / 2)))
+          const r = await runAutofocus({ mode: 'twopass', dz: range, fineRange, fineSteps: 9 })
+          const metricName = `${r.metric}+${settings.focusMetric ?? 'laplacian'}`
+          let q = r.quality, peakZ = r.peakZ, retried = false
+          if (!q.ok && (q.reason === 'edge' || q.reason === 'flat')) {
+            // one retry with a stepped pass only: recentred where the fine pass ended ('edge', the peak is
+            // just outside the window) or twice as wide ('flat', the window missed the peak entirely)
+            await this.waitStageStill()
+            const span = q.reason === 'flat' ? Math.min(range, 2 * fineRange) : fineRange
+            const s2 = await stepAutofocus({
+              moveZ: (dz) => device.moveRel({ z: dz }, false),
+              currentZ: () => device.position.z,
+              measure: measureSharpness,
+            }, span, 9)
+            const q2 = curveQuality(s2.samples)
+            if (q2.ok) { q = q2; peakZ = s2.peakZ; retried = true }
+          }
+          if (!q.ok) {
+            const c = r.coarse
+            if (c?.quality.ok) {
+              // the fine pass found nothing it trusts but the coarse sweep did: its peak stands (reason 'coarse')
+              await device.moveRel({ z: c.peakZ - device.position.z }, 'z')
+              const ok = learn(t, c.peakZ)
+              return { z: c.peakZ, zMeasured: true, focus: { status: 'measured', contrast: round2(c.quality.contrast), metric: r.metric, range, reason: ok ? 'coarse' : 'suspect' } }
+            }
+            return await fallback(t, centre, `focus curve refused (${REASON_LABEL[q.reason ?? ''] ?? q.reason}, contrast ${q.contrast.toFixed(2)})`, reasonOf(q), { contrast: round2(q.contrast), metric: metricName, range })
+          }
+          const ok = learn(t, peakZ)
+          return { z: peakZ, zMeasured: true, focus: { status: 'measured', contrast: round2(q.contrast), metric: retried ? `${metricName} (retry)` : metricName, range, ...(ok ? {} : { reason: 'suspect' as const }) } }
+        } catch (e) {
+          // fastAutofocus throws on a featureless sweep (and has already returned to `centre`)
+          const msg = (e as Error).message
+          return await fallback(t, centre, msg, /featureless|no focus signal/.test(msg) ? 'flat' : undefined, { range })
+        }
       } catch (e) {
         return { focus: { status: 'failed', error: (e as Error).message } }
       }
     }
     /** Height-map focus: move to the predicted z (Z_ONLY backlash correction, as v3's final approach),
-     *  then optionally a 5-point Laplacian sweep over ±localRange steps to catch what the plane/bilinear
-     *  model missed (tilt within the cell, a thick specimen). */
-    const predictedFocus = (zTarget: number) => async (): Promise<{ z?: number; zMeasured?: boolean; focus: TileFocus }> => {
+     *  then optionally a 5-point sweep (the configured fine metric, full-width grab) over ±localRange
+     *  steps to catch what the plane/bilinear model missed (tilt within the cell, a thick specimen).
+     *  The refined z must pass the same curve gate, else the prediction stands. */
+    const predictedFocus = (t: TilePlan, zTarget: number) => async (): Promise<{ z?: number; zMeasured?: boolean; focus: TileFocus }> => {
       await device.moveRel({ z: zTarget - device.position.z }, 'z')
       if (!cfg.localRefine || cfg.localRange <= 0) return { z: zTarget, zMeasured: false, focus: { status: 'predicted' } }
       try {
@@ -327,9 +433,16 @@ class ScanService {
         const r = await stepAutofocus({
           moveZ: (dz) => device.moveRel({ z: dz }, false),
           currentZ: () => device.position.z,
-          measure: async () => laplacianVariance(await grabGray(410, 60)),
+          measure: measureSharpness,
         }, 2 * cfg.localRange, 5)
-        return { z: r.peakZ, zMeasured: true, focus: { status: 'refined' } }
+        const q = curveQuality(r.samples)
+        if (!q.ok) {
+          // stepAutofocus has already moved to its own peak; go back to the prediction
+          await device.moveRel({ z: zTarget - device.position.z }, 'z')
+          return { z: zTarget, zMeasured: false, focus: { status: 'predicted', reason: reasonOf(q), contrast: round2(q.contrast), range: 2 * cfg.localRange } }
+        }
+        const ok = learn(t, r.peakZ)
+        return { z: r.peakZ, zMeasured: true, focus: { status: 'refined', contrast: round2(q.contrast), range: 2 * cfg.localRange, ...(ok ? {} : { reason: 'suspect' as const }) } }
       } catch (e) {
         return { z: zTarget, zMeasured: false, focus: { status: 'failed', error: `local refine: ${(e as Error).message}` } }
       }
@@ -345,23 +458,25 @@ class ScanService {
         for (const t of subgrid) {
           if (this.cancelFlag) break
           await captureTile(t, async () => {
-            const r = await autofocusHere()
-            if (r.z !== undefined) heightSamples.push({ col: t.col, row: t.row, z: r.z })
+            const r = await autofocusHere(t)
+            // only a measurement that passed the curve gate (and the plane tracker's) feeds the height map
+            if (r.z !== undefined && r.zMeasured && r.focus.reason !== 'suspect') heightSamples.push({ col: t.col, row: t.row, z: r.z })
             return r
           })
         }
         const grid = !this.cancelFlag && heightSamples.length >= 3 ? predictHeightMap(plan.cols, plan.rows, rejectOutliers(heightSamples), 'bilinear', step) : null
         for (const t of rest) {
           if (this.cancelFlag) break
-          if (grid) await captureTile(t, predictedFocus(Math.round(grid[t.row][t.col])))
+          if (grid) await captureTile(t, predictedFocus(t, Math.round(grid[t.row][t.col])))
           else await captureTile(t, async () => ({ focus: { status: 'failed', error: 'height map needs at least 3 focused tiles' } }))
         }
       } else {
         for (const t of tiles) {
           if (this.cancelFlag) break
-          await captureTile(t, mode === 'every' ? autofocusHere : undefined)
+          await captureTile(t, mode === 'every' ? () => autofocusHere(t) : undefined)
         }
       }
+      this.recordFocusMeta(item, tracker, dofSteps)
       if (this.cancelFlag) {
         if (this.blobs.length >= 2) {
           this.phase = 'cancelled'
@@ -392,6 +507,22 @@ class ScanService {
     }
   }
 
+  /** Persist what the focus model learned (additive `item.scan.focus` fields). */
+  private recordFocusMeta(item: GalleryItem, tracker: PlaneTracker, dofSteps: number): void {
+    const f = item.scan?.focus
+    if (!f || f.mode === 'none') return
+    const outcome = { measured: 0, predicted: 0, refined: 0, failed: 0, reasons: {} as Record<string, number> }
+    for (const t of item.scan!.tiles) {
+      const st = t.focus?.status
+      if (st === 'measured' || st === 'predicted' || st === 'refined' || st === 'failed') outcome[st]++
+      if (t.focus?.reason) outcome.reasons[t.focus.reason] = (outcome.reasons[t.focus.reason] ?? 0) + 1
+    }
+    const c = tracker.coefficients
+    f.tracker = { n: tracker.n, coefficients: [c.a, c.b, c.c], residualRms: Number.isFinite(tracker.residualRms) ? Math.round(tracker.residualRms * 100) / 100 : 0 }
+    f.dofSteps = dofSteps || undefined
+    f.outcome = outcome
+  }
+
   cancel(): void {
     if (!this.running) return
     this.cancelFlag = true
@@ -407,21 +538,27 @@ class ScanService {
     this.phase = 'stitching'
     this.message = 'stitching…'
     const analysisWidth = this.runFov.w > 2000 ? 512 : 256
-    const flat = calibration.flat
-    const flatMap = cfg.useFlat && flat ? $state.snapshot(flat) : null
+    const measured = cfg.shading === 'off' ? null : measuredIllumination()
     const res = await stitchInWorker({
       tiles: this.blobs, maxDim: 8192, analysisWidth, refine: cfg.refine, robust: true, gainEqualise: cfg.gainEq, multiband: cfg.multiband ? 3 : 0,
-      flatField: flatMap ? { width: flatMap.width, height: flatMap.height, channels: flatMap.channels, data: flatMap.data } : null,
+      shading: cfg.shading, overlap: cfg.overlap,
+      flatField: measured ? { width: measured.width, height: measured.height, channels: measured.channels, data: measured.data } : null,
     }, (m) => (this.message = m))
+    // remember a self-calibrated shading map (when the worker returns one: `shadingMap`) for later scans
+    if (res.shading === 'auto' && res.shadingMap && res.shadingMap.channels === 3) saveAutoShading({ ...res.shadingMap, channels: 3 }, new Date().toISOString())
+    const r3 = (g: number) => Math.round(g * 1000) / 1000
     item.scan!.positions = res.positions
-    item.scan!.stitch = { pairs: res.pairs, dropped: res.dropped, gains: res.gains.map((g) => Math.round(g * 1000) / 1000), blend: res.blend, flatField: res.flatField, analysisWidth }
+    item.scan!.stitch = {
+      pairs: res.pairs, dropped: res.dropped, gains: res.gains.map(r3), gainsRgb: res.gainsRgb.map((g) => [r3(g[0]), r3(g[1]), r3(g[2])] as [number, number, number]),
+      blend: res.blend, flatField: res.flatField, shading: res.shading, shadingFit: res.shadingFit, analysisWidth,
+    }
     if (partial) { item.scan!.partial = { captured: this.blobs.length, planned: this.total }; item.name = `${item.name} (partial ${this.blobs.length}/${this.total})` }
     item.width = res.width; item.height = res.height
     await putBlob(item.id, 'image', res.mosaic); item.blobs.push('image')
     await putBlob(item.id, 'thumb', await makeThumb(res.mosaic)); item.blobs.push('thumb')
     await putItem(item)
     const fails = item.scan!.focusFailures ?? 0
-    const summary = `${res.width}×${res.height} px · ${res.pairs} overlaps refined${res.dropped ? `, ${res.dropped} rejected` : ''} · ${res.blend} blend · scale ${res.scale.toFixed(2)}${fails ? ` · ${fails} tile(s) with failed autofocus` : ''}`
+    const summary = `${res.width}×${res.height} px · ${res.pairs} overlaps refined${res.dropped ? `, ${res.dropped} rejected` : ''} · ${res.blend} blend · shading ${res.shading}${res.shadingFit ? ` (rms ${res.shadingFit.rms.toFixed(3)})` : ''} · scale ${res.scale.toFixed(2)}${fails ? ` · ${fails} tile(s) with failed autofocus` : ''}`
     this.result = {
       item, url: URL.createObjectURL(res.mosaic), summary,
       footprint: { origin: plan.origin, cols: plan.cols, rows: plan.rows, overlap: cfg.overlap, fovW: plan.fov.w },

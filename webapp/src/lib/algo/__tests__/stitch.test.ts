@@ -2,8 +2,9 @@ import { describe, expect, it } from 'vitest'
 import {
   solvePositions, solvePositionsRobust, pairResiduals, overlapGains, solveGains,
   normaliseGainMap, sampleGainMap, applyFlatField, applyFlatFieldRGBA, pairwiseOffsets,
-  BandAccumulator, bandRows, blendMultiband, pyrDown, pyrUp, featherWeight,
-  type StitchTile, type PairOffset, type GainMap, type BlendStrip, type PlacedTile,
+  BandAccumulator, bandRows, blendMultiband, pyrDown, pyrUp, featherWeight, featherWeightSmooth, featherForOverlap,
+  overlapGainsRgb, solveGainsRgb, trimmedMean,
+  type StitchTile, type PairOffset, type GainMap, type BlendStrip, type PlacedTile, type RgbTile,
 } from '../stitch'
 import type { Gray } from '../sharpness'
 
@@ -74,6 +75,71 @@ describe('luminance gain equalisation', () => {
     expect(solveGains(3, [])).toEqual([1, 1, 1])
     const g = solveGains(2, [{ a: 0, b: 1, logRatio: Math.log(10), weight: 1 }], 2)
     expect(g[0] / g[1]).toBeLessThanOrEqual(4.0001)
+  })
+})
+
+describe('per-channel gain equalisation', () => {
+  const w = 96, h = 64
+  // colour scene: three different textures per channel, kept well inside 0..255
+  const sceneRgb = (x: number, y: number): [number, number, number] => {
+    const g = scene(x, y) * 0.6 + 30
+    return [g * 1.1, g, g * 0.9 + 8]
+  }
+  function rgbTile(x0: number, y0: number, mul: readonly [number, number, number] = [1, 1, 1], paint?: (x: number, y: number, px: Float32Array, i: number) => void): RgbTile {
+    const data = new Float32Array(w * h * 3)
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const [r, g, b] = sceneRgb(x0 + x, y0 + y), i = (y * w + x) * 3
+      data[i] = r * mul[0]; data[i + 1] = g * mul[1]; data[i + 2] = b * mul[2]
+      paint?.(x, y, data, i)
+    }
+    return { data, width: w, height: h }
+  }
+
+  it('recovers a colour cast between two tiles within 2 %', () => {
+    const pos = [{ x: 0, y: 0 }, { x: 70, y: 0 }]
+    const tiles = pos.map((p, id) => tile(id, p.x, p.y, w, h))
+    const cast = [1.2, 1.0, 0.85] as const
+    const images = [rgbTile(0, 0), rgbTile(70, 0, cast)]
+    const pairs = overlapGainsRgb(tiles, pos, images, 8)
+    expect(pairs.length).toBe(3)
+    for (const ch of pairs) expect(ch.length).toBe(1)
+    const gains = solveGainsRgb(2, pairs)
+    expect(gains.length).toBe(2)
+    for (let c = 0; c < 3; c++) {
+      // gain_b × cast_c should equal gain_a per channel
+      const ratio = (gains[1][c] * cast[c]) / gains[0][c]
+      expect(Math.abs(ratio - 1)).toBeLessThan(0.02)
+    }
+    // the green channel carried no cast: its gains stay at 1
+    expect(Math.abs(gains[0][1] - 1)).toBeLessThan(0.02)
+    expect(Math.abs(gains[1][1] - 1)).toBeLessThan(0.02)
+  })
+
+  it('robust means ignore a saturated blob and dark background in one tile', () => {
+    const pos = [{ x: 0, y: 0 }, { x: 70, y: 0 }]
+    const tiles = pos.map((p, id) => tile(id, p.x, p.y, w, h))
+    // tile b has a saturated white blob and a black patch inside the overlap (x 70..96 of a = 0..26 of b)
+    const blob = (x: number, y: number, px: Float32Array, i: number) => {
+      if (x < 12 && y < 24) { px[i] = 255; px[i + 1] = 255; px[i + 2] = 255 }
+      if (x < 10 && y >= 40 && y < 56) { px[i] = 0; px[i + 1] = 0; px[i + 2] = 0 }
+    }
+    const clean = overlapGainsRgb(tiles, pos, [rgbTile(0, 0), rgbTile(70, 0)], 8)
+    const dirty = overlapGainsRgb(tiles, pos, [rgbTile(0, 0), rgbTile(70, 0, [1, 1, 1], blob)], 8)
+    for (let c = 0; c < 3; c++) {
+      expect(Math.abs(clean[c][0].logRatio)).toBeLessThan(1e-6)
+      expect(Math.abs(dirty[c][0].logRatio)).toBeLessThan(0.01)
+      expect(dirty[c][0].weight).toBeLessThan(clean[c][0].weight)   // fewer pixels kept
+    }
+  })
+
+  it('trimmed mean drops the tails', () => {
+    expect(trimmedMean([1, 2, 3, 4, 100], 0.2)).toBe(3)
+    expect(trimmedMean([], 0.1)).toBe(0)
+    expect(trimmedMean([7])).toBe(7)
+  })
+
+  it('solveGainsRgb returns unit triples without pairs', () => {
+    expect(solveGainsRgb(2, [[], [], []])).toEqual([[1, 1, 1], [1, 1, 1]])
   })
 })
 
@@ -162,9 +228,55 @@ describe('normalised feather blending in bands', () => {
     expect(ref[(15 * W + 5) * 4]).toBe(200)   // tile A × gain 2
   })
 
+  it('an RGB gain triple with equal channels matches the scalar gain exactly', () => {
+    const a = new BandAccumulator(W, H), b = new BandAccumulator(W, H)
+    a.reset(0); b.reset(0)
+    for (const s of strips({ y0: 0, rows: H })) {
+      a.add({ ...s, gain: s.tileX === 0 ? 1.5 : 0.8 }, 10)
+      b.add({ ...s, gain: s.tileX === 0 ? [1.5, 1.5, 1.5] : [0.8, 0.8, 0.8] }, 10)
+    }
+    expect(Array.from(b.toRGBA())).toEqual(Array.from(a.toRGBA()))
+  })
+
+  it('an RGB gain triple scales each channel independently', () => {
+    const acc = new BandAccumulator(W, H)
+    acc.reset(0)
+    const [sA] = strips({ y0: 0, rows: H })
+    acc.add({ ...sA, gain: [1.2, 1.0, 0.5] }, 10)
+    const out = acc.toRGBA()
+    const o = (15 * W + 5) * 4
+    expect(out[o]).toBe(120); expect(out[o + 1]).toBe(100); expect(out[o + 2]).toBe(50)
+  })
+
   it('band size respects the memory budget', () => {
     expect(bandRows(8192, 8192, 128e6)).toBe(976)
     expect(bandRows(100, 50)).toBe(50)
+  })
+})
+
+describe('feather profiles', () => {
+  it('smooth profile is 0 at the edge, 1 beyond the feather and monotone in between', () => {
+    const f = 12, w = 100, h = 100
+    expect(featherWeightSmooth(0, 50, w, h, f)).toBeGreaterThanOrEqual(0)
+    expect(featherWeightSmooth(0, 50, w, h, f)).toBeLessThan(0.01)
+    expect(featherWeightSmooth(-0.5, 50, w, h, f)).toBe(0)
+    expect(featherWeightSmooth(f, 50, w, h, f)).toBe(1)
+    expect(featherWeightSmooth(50, 50, w, h, f)).toBe(1)
+    expect(featherWeightSmooth(w - 1 - f, 50, w, h, f)).toBe(1)
+    let prev = -1
+    for (let x = 0; x <= f; x++) { const v = featherWeightSmooth(x, 50, w, h, f); expect(v).toBeGreaterThanOrEqual(prev); prev = v }
+    // smoother than linear near the edge, equal at the midpoint
+    expect(featherWeightSmooth(1, 50, w, h, f)).toBeLessThan(featherWeight(1, 50, w, h, f))
+    expect(featherWeightSmooth(f / 2 - 0.5, 50, w, h, f)).toBeCloseTo(0.5)
+    // symmetric in x and y
+    expect(featherWeightSmooth(3, 50, w, h, f)).toBeCloseTo(featherWeightSmooth(50, 3, w, h, f))
+  })
+
+  it('featherForOverlap spans ~90 % of the overlap and respects the minimum', () => {
+    expect(featherForOverlap(1000, 800, 0.25)).toBe(180)        // 0.9 × 200
+    expect(featherForOverlap(1000, 800, 0.25, 0.5)).toBe(90)    // mosaic at half scale
+    expect(featherForOverlap(1000, 800, 0, 1, 4)).toBe(4)
+    expect(featherForOverlap(100, 100, 0.01, 1, 3)).toBe(3)
   })
 })
 
@@ -202,5 +314,18 @@ describe('multi-band blending', () => {
   it('feather weights taper at the edges', () => {
     expect(featherWeight(50, 50, 100, 100, 10)).toBe(1)
     expect(featherWeight(0, 50, 100, 100, 10)).toBeCloseTo(0.05)
+  })
+
+  it('applies an RGB gain triple identically to an equal scalar, and per channel otherwise', () => {
+    const W = 64, H = 32, tw = 40
+    const mk = (gain: number | [number, number, number]): PlacedTile[] => [
+      { data: constRGBA(tw, H, 100), width: tw, height: H, x: 0, y: 0, gain },
+      { data: constRGBA(tw, H, 200), width: tw, height: H, x: 24, y: 0, gain: 1 },
+    ]
+    const scalar = blendMultiband(mk(1.3), W, H, 8, 2), triple = blendMultiband(mk([1.3, 1.3, 1.3]), W, H, 8, 2)
+    expect(Array.from(triple)).toEqual(Array.from(scalar))
+    const per = blendMultiband(mk([1.2, 1.0, 0.5]), W, H, 8, 2)
+    const o = (16 * W + 2) * 4
+    expect(Math.abs(per[o] - 120)).toBeLessThanOrEqual(1); expect(Math.abs(per[o + 1] - 100)).toBeLessThanOrEqual(1); expect(Math.abs(per[o + 2] - 50)).toBeLessThanOrEqual(1)
   })
 })

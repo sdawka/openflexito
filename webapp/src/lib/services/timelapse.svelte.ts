@@ -191,7 +191,7 @@ class TimelapseService {
 
   private async autofocus(why: string): Promise<boolean> {
     this.status = `autofocus (${why})…`
-    try { await runAutofocus({ mode: 'fast', dz: 1000, metric: 'jpeg' }); this.refocuses++; return true }
+    try { await runAutofocus({ mode: 'fast', dz: 1000 }); this.refocuses++; return true }
     catch (e) { this.status = `autofocus: ${(e as Error).message}`; return false }
   }
 

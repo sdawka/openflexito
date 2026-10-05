@@ -2,8 +2,15 @@
   import { device } from '../lib/store/device.svelte'
   import { settings, saveSettings } from '../lib/store/settings.svelte'
   import type { StageStatus } from '../lib/api/types'
+  import { illuminationMap } from '../lib/store/calibration.svelte'
 
   let stage = $state<StageStatus | null>(null)
+  const shadingNote = $derived.by(() => {
+    const m = illuminationMap()
+    if (!m) return 'No illumination map yet: capture a blank-field flat (Calibrate) or run a scan to estimate one.'
+    const what = m.source === 'auto' ? 'estimated from the last scan' : m.source === 'raw' ? 'measured RAW flat field' : 'measured blank-field flat'
+    return `Using the map ${what}${m.when ? ', captured ' + new Date(m.when).toLocaleString() : ''}. Applied in linear light, so colour shading and vignetting are divided out.`
+  })
   let stillCleanBusy = $state(false)
   let idleBusy = $state(false)
   async function setIdle(minutes: number) {
@@ -124,6 +131,15 @@
       <div title="numerical aperture of the objective (engraved on it: 40×/0.65 → 0.65); spaces focus-stack slices by its depth of field"><div class="label">objective NA</div><input class="mono" type="number" step="0.05" min="0.05" max="1.4" style="width:70px" aria-label="objective NA" bind:value={settings.objectiveNA} onchange={saveSettings} /></div>
       <label style="display:flex;gap:8px;align-items:center;margin-left:auto"><input type="checkbox" bind:checked={settings.showScaleBar} onchange={saveSettings} /> show scale bar</label>
     </div>
+  </div>
+
+  <div class="panel">
+    <h3>Shading correction</h3>
+    <div class="row">
+      <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" bind:checked={settings.shadingLive} onchange={saveSettings} /> live view and recordings</label>
+      <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" bind:checked={settings.shadingStills} onchange={saveSettings} /> single photos</label>
+    </div>
+    <p class="muted" style="font-size:12px;margin:0">{shadingNote}</p>
   </div>
 
   <div class="panel">

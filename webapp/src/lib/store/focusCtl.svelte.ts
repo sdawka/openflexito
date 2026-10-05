@@ -9,7 +9,7 @@ import { macroService } from '../services/macro.svelte'
 export type AfMode = 'fast' | 'looping' | 'step' | 'twopass'
 
 class FocusCtl {
-  mode = $state<AfMode>('fast')
+  mode = $state<AfMode>('twopass')
   range = $state(2000)
   focusing = $state(false)
   log = $state('')
@@ -20,8 +20,9 @@ class FocusCtl {
     this.focusing = true
     this.log = 'autofocus…'
     try {
-      const r = await runAutofocus({ mode: this.mode, dz: this.range, metric: 'jpeg', onProgress: (m) => (this.log = m) })
-      this.log = `focused at z=${r.peakZ} (${r.samples.length} samples)`
+      const r = await runAutofocus({ mode: this.mode, dz: this.range, onProgress: (m) => (this.log = m) })
+      const q = r.quality
+      this.log = `focused at z=${r.peakZ} (${r.samples.length} samples, ${r.metric}${q.ok ? '' : `, weak curve: ${q.reason ?? 'unknown'}`})`
       macroService.recordAction('autofocus', { mode: this.mode, dz: this.range }, `autofocus (${this.mode})`)
     } catch (e) {
       this.log = (e as Error).message

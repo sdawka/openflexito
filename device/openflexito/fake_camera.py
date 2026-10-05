@@ -1,12 +1,20 @@
 """Fake camera for developing on a laptop: synthesises a stage-coupled specimen (1 px/step, 4° axis
 rotation, defocus ∝ |z|) so calibration, autofocus and scans work end to end without hardware.
-Selected with `camera.fake = true` / `--fake`; see `make_camera` in camera.py."""
+Selected with `camera.fake = true` / `--fake`; see `make_camera` in camera.py.
+
+Focus model. The in-focus plane is z_focus = a*x + b*y (steps); defocus = |z - z_focus + focus_offset|.
+`OPENFLEXITO_FAKE_TILT=a,b` sets (a, b) as steps of z per x-step and per y-step (floats, default 0,0), so
+a scan has to track a tilted plane. Every stream frame and still carries `focus_fom`, a stand-in for
+libcamera's FocusFoM: the mean squared horizontal Brenner gradient (2 px apart) of the rendered grey
+frame (decimated to <= 410 px wide, the overlay text rows excluded) times 100, as an int. It peaks at
+the focal plane and falls monotonically with defocus. Deterministic and ~1 ms."""
 from __future__ import annotations
 
 import asyncio
 import io
 import logging
 import math
+import os
 import threading
 import time
 from fractions import Fraction
@@ -20,6 +28,61 @@ from .camera import CameraBase, MosaicAccumulator, encode_bracket
 log = logging.getLogger(__name__)
 
 
+# ---- lens shading model -------------------------------------------------------------------------
+# Real scans show the same vignetting + colour shading in every tile (yellowish and magenta corners),
+# which a stitcher must remove. The fake reproduces it with one deterministic model, applied in
+# linear light to the stream/stills (`_shade`) and as the illumination of the RAW mosaic
+# (`_raw_mosaic`), so a measured flat field (`/flat.bin`) describes exactly what the stills carry.
+VIGNETTE = 0.17             # 1 - VIGNETTE * (nx² + ny²): corner (nx = ny = 1) = 0.66 of the centre
+WARM_CORNER = (0.06, 0.035, 0.0)    # +R +G toward the top-left corner (yellow)
+MAGENTA_CORNER = (0.045, 0.0, 0.06)  # +R +B toward the bottom-right corner
+HORIZONTAL_GRADIENT = 0.06  # left edge 0.97, right edge 1.03 of the centre (all channels)
+_SHADING_CACHE: dict = {}
+
+
+def shading(w: int, h: int):
+    """Per-channel linear-light multipliers (r, g, b), each float32 (h, w); cached per size."""
+    key = (int(w), int(h))
+    if key not in _SHADING_CACHE:
+        import numpy as np
+        u = (np.arange(w, dtype=np.float32) + 0.5) / w   # 0..1 across
+        v = (np.arange(h, dtype=np.float32) + 0.5) / h   # 0..1 down
+        u, v = np.meshgrid(u, v)
+        base = (1 - VIGNETTE * ((2 * u - 1) ** 2 + (2 * v - 1) ** 2)) * (1 + HORIZONTAL_GRADIENT * (u - 0.5))
+        tl = (1 - u) * (1 - v)   # 1 at the top-left corner, 0 along the right and bottom edges
+        br = u * v
+        chans = tuple((base * (1 + WARM_CORNER[c] * tl + MAGENTA_CORNER[c] * br)).astype(np.float32) for c in range(3))
+        if len(_SHADING_CACHE) >= 6:
+            _SHADING_CACHE.pop(next(iter(_SHADING_CACHE)))
+        _SHADING_CACHE[key] = chans
+    return _SHADING_CACHE[key]
+
+
+def shading_mosaic(w: int, h: int):
+    """The same shading laid out as a BGGR mosaic multiplier (h, w) for the RAW path; cached."""
+    key = ("mosaic", int(w), int(h))
+    if key not in _SHADING_CACHE:
+        import numpy as np
+        r, g, b = shading(w, h)
+        m = g.copy()
+        m[0::2, 0::2] = b[0::2, 0::2]
+        m[1::2, 1::2] = r[1::2, 1::2]
+        _SHADING_CACHE[key] = m
+    return _SHADING_CACHE[key]
+
+
+def shade(img):
+    """Apply `shading` to an sRGB PIL image in linear light (gamma 2.2 decode / encode)."""
+    import numpy as np
+    from PIL import Image
+    a = np.asarray(img.convert("RGB"), dtype=np.float32) / 255
+    lin = a ** 2.2
+    r, g, b = shading(img.width, img.height)
+    lin *= np.stack((r, g, b), axis=-1)
+    out = np.clip(lin, 0, 1) ** (1 / 2.2) * 255
+    return Image.fromarray(np.rint(out).astype(np.uint8), "RGB")
+
+
 class FakeCamera(CameraBase):
     is_fake = True
     """Synthesises a moving test pattern so the webapp can be developed without hardware."""
@@ -31,6 +94,8 @@ class FakeCamera(CameraBase):
         self._stop = threading.Event()
         self.sensor = {"model": "fake-imx219", "pixel_array_size": list(cfg.full_size), "modes": []}
         self.focus_offset = 0  # set by tests/dev tools to emulate defocus
+        self.tilt = self._parse_tilt(os.environ.get("OPENFLEXITO_FAKE_TILT", ""))  # (a, b): z_focus = a*x + b*y
+        self._still_fom: int | None = None
         # The fake specimen is coupled to the stage: the app installs a position provider so that
         # moving x/y scrolls the image (PX_PER_STEP at stream resolution, axes rotated slightly)
         # and moving z away from 0 defocuses it. This lets the browser-side mapping, scan and
@@ -43,22 +108,53 @@ class FakeCamera(CameraBase):
         self._rec: dict | None = None
         self._fast: dict | None = None
 
+    @staticmethod
+    def _parse_tilt(text: str) -> tuple[float, float]:
+        try:
+            a, b = (float(v) for v in text.split(","))
+            return a, b
+        except ValueError:
+            if text.strip():
+                log.warning("OPENFLEXITO_FAKE_TILT=%r is not 'a,b'; using 0,0", text)
+            return 0.0, 0.0
+
+    def z_focus(self, pos: dict) -> float:
+        """z (steps) at which the specimen is sharp for the stage position `pos`."""
+        return self.tilt[0] * pos.get("x", 0) + self.tilt[1] * pos.get("y", 0)
+
+    @staticmethod
+    def focus_fom(img) -> int:
+        """Stand-in for libcamera's FocusFoM from a rendered PIL image (see the module docstring)."""
+        import numpy as np
+        g = np.asarray(img.convert("L"), dtype=np.float32)
+        g = g[30:]  # skip the overlay text rows, which do not depend on focus
+        step = max(1, -(-g.shape[1] // 410))
+        g = g[::step, ::step]
+        d = g[:, 2:] - g[:, :-2]
+        return int(round(float(np.mean(d * d)) * 100))
+
     PX_PER_STEP = 1.0          # image pixels per motor step at stream resolution (a 1640 px field is ~1640 steps)
     AXIS_ROTATION_DEG = 4.0    # the camera is never perfectly aligned with the stage
     SPECIMEN_SIZE = (2048, 1536)
 
     def _make_specimen(self):
+        """Default: ~900 cells of 6–40 px radius plus fibres. `OPENFLEXITO_FAKE_SPECIMEN=fine` draws
+        ~20000 cells of 1.5–5 px instead: the same colours, but features small against the field, so
+        a stitched mosaic folded by the tile pitch (webapp/e2e/mosaicMetric.mjs) averages the
+        specimen out and shows only the per-tile shading."""
+        import os
         import random
         from PIL import Image, ImageDraw
         rnd = random.Random(42)
         w, h = self.SPECIMEN_SIZE
         img = Image.new("RGB", (w, h), (236, 232, 226))
         d = ImageDraw.Draw(img)
-        for _ in range(900):  # cells: filled ellipses with darker outlines, varied colour
+        fine = os.environ.get("OPENFLEXITO_FAKE_SPECIMEN", "cells") == "fine"
+        for _ in range(20000 if fine else 900):  # cells: filled ellipses with darker outlines, varied colour
             cx, cy = rnd.uniform(0, w), rnd.uniform(0, h)
-            rx, ry = rnd.uniform(6, 40), rnd.uniform(6, 40)
+            rx, ry = (rnd.uniform(1.5, 5), rnd.uniform(1.5, 5)) if fine else (rnd.uniform(6, 40), rnd.uniform(6, 40))
             col = (rnd.randint(120, 220), rnd.randint(60, 160), rnd.randint(120, 200))
-            d.ellipse([cx - rx, cy - ry, cx + rx, cy + ry], fill=col, outline=(70, 40, 90), width=2)
+            d.ellipse([cx - rx, cy - ry, cx + rx, cy + ry], fill=col, outline=(70, 40, 90), width=1 if fine else 2)
         for _ in range(300):  # fibres
             x0, y0 = rnd.uniform(0, w), rnd.uniform(0, h)
             d.line([(x0, y0), (x0 + rnd.uniform(-120, 120), y0 + rnd.uniform(-120, 120))], fill=(90, 70, 110), width=rnd.randint(1, 3))
@@ -83,9 +179,10 @@ class FakeCamera(CameraBase):
         shifted = ImageChops.offset(self._specimen, int(round(-dx)) % spec_w, int(round(-dy)) % spec_h)
         crop = shifted.crop(((spec_w - sw) // 2, (spec_h - sh) // 2, (spec_w - sw) // 2 + sw, (spec_h - sh) // 2 + sh))
         img = crop.resize((rw, rh), Image.BILINEAR)
-        defocus = abs(pos.get("z", 0) + self.focus_offset)
+        defocus = abs(pos.get("z", 0) - self.z_focus(pos) + self.focus_offset)
         if defocus:
             img = img.filter(ImageFilter.GaussianBlur(min(20, defocus / 100) * scale))
+        img = shade(img)  # the stage-coupled specimen under the lens' vignetting + colour shading
         d = ImageDraw.Draw(img)
         d.text((10, 10), f"openflexito fake camera {time.strftime('%H:%M:%S')}  x{pos['x']} y{pos['y']} z{pos['z']}", fill=(40, 40, 40))
         return img
@@ -120,7 +217,9 @@ class FakeCamera(CameraBase):
                 rec, fast = self._rec, self._fast
             if fast is not None:
                 t0 = time.monotonic()
-                jpeg = self._jpeg(self._render(self._position()), fast["size"])
+                fimg = self._render(self._position())
+                meta["focus_fom"] = self.focus_fom(fimg)
+                jpeg = self._jpeg(fimg, fast["size"])
                 fast["tap"].put_threadsafe((jpeg, ts))
                 if time.monotonic() - last_preview >= 1 / 15:
                     last_preview = time.monotonic()
@@ -133,6 +232,7 @@ class FakeCamera(CameraBase):
                 self._record_frame(rec, img, ts)
             else:
                 img = self._render(self._position())  # one render feeds both streams
+            meta["focus_fom"] = self.focus_fom(img)
             self.main.publish_threadsafe(self._jpeg(img, self.stream_size), meta)
             if rec is None:  # like the Pi, the lores stream pauses while recording
                 self.lores.publish_threadsafe(self._jpeg(img, tuple(self.cfg.lores_size)), meta)
@@ -233,6 +333,7 @@ class FakeCamera(CameraBase):
     def _still_jpeg(self, factor: float = 1.0) -> bytes:
         from PIL import Image, ImageEnhance
         img = self._render(self._position())
+        self._still_fom = self.focus_fom(img)
         if factor != 1.0:
             img = ImageEnhance.Brightness(img).enhance(factor)
         size = tuple(self.cfg.full_size)
@@ -248,18 +349,18 @@ class FakeCamera(CameraBase):
     async def still(self) -> tuple[bytes, dict]:
         jpeg = await asyncio.to_thread(self._still_jpeg)
         w, h = self.cfg.full_size
-        return jpeg, {**self._metadata(), "still": True, "matched": True, "width": w, "height": h, "size": len(jpeg)}
+        return jpeg, {**self._metadata(), "still": True, "matched": True, "width": w, "height": h, "size": len(jpeg),
+                      "focus_fom": self._still_fom}
 
     def _raw_mosaic(self, exposure: int | None = None):
-        """Vignetted BGGR mosaic with shot noise, scaled by exposure and gain (10 bit, uint16)."""
+        """Blank-field BGGR mosaic with shot noise, scaled by exposure and gain (10 bit, uint16), under
+        the same `shading` as the stills so a measured flat field matches them."""
         import numpy as np
         if self._rng is None:
             self._rng = np.random.default_rng(1)
         w, h = self.cfg.full_size
         exposure = int(self.controls["ExposureTime"]) if exposure is None else int(exposure)
-        yy, xx = np.mgrid[0:h, 0:w]
-        vignette = 1 - 0.5 * (((xx - w / 2) / (w / 2)) ** 2 + ((yy - h / 2) / (h / 2)) ** 2)
-        level = 600 * vignette * min(1.0, exposure / 5000) * float(self.controls["AnalogueGain"])
+        level = 600 * shading_mosaic(w, h) * min(1.0, exposure / 5000) * float(self.controls["AnalogueGain"])
         level[0::2, 0::2] *= 0.8  # B weaker
         level[1::2, 1::2] *= 0.9  # R weaker
         noisy = level + self._rng.normal(0, 8, size=level.shape) + self.cfg.black_level

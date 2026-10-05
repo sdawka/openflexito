@@ -148,7 +148,7 @@ async function laplacianWidth(range: number, count: number, say: Say): Promise<{
 export async function takeFineFocusStack(o: FocusStackOptions, say: Say, meta: PhotoMeta, source: 'jpeg' | 'raw'): Promise<GalleryItem> {
   const maxSlices = Math.max(3, Math.round(o.slices ?? 9)), range = Math.max(100, Math.round(o.range ?? 1000))
   say(`fine stack: locating the focus plane (sweep ±${range / 2})`)
-  const af = await runAutofocus({ mode: 'fast', dz: range, metric: 'jpeg', onProgress: (m) => say(`fine stack: ${m}`) })
+  const af = await runAutofocus({ mode: 'fast', dz: range, onProgress: (m) => say(`fine stack: ${m}`) })
   const band = focusBand(af.samples) ?? { lo: af.peakZ, hi: af.peakZ, peakZ: af.peakZ, clipped: false }
   if (band.clipped) say(`fine stack: the in-focus band reaches the end of the ±${range / 2} search — widen the search range if the specimen is deeper`)
   say('fine stack: measuring the depth of field…')

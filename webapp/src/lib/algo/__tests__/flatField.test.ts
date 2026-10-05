@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { flatFieldFromRaw, flatFieldToJson, flatFieldFromJson, flatFieldSampler, gridMean, smoothGrid, applyFlatFieldRgb, flatFieldLuminance } from '../flatField'
+import { flatFieldFromRaw, flatFieldToJson, flatFieldFromJson, flatFieldSampler, gridMean, smoothGrid, applyFlatFieldRgb, flatFieldLuminance, flatFieldToIllumination, applyGainMapRgba } from '../flatField'
+import { sampleGainMap } from '../stitch'
 import type { RawImage } from '../raw'
 
 function vignettedFlat(w: number, h: number, r0: number, g0: number, b0: number, strength: number): RawImage {
@@ -90,5 +91,75 @@ describe('flatFieldFromRaw', () => {
     const resampled = flatFieldLuminance(field, 4, 4)
     expect(resampled.length).toBe(16)
     expect(resampled[0]).toBeGreaterThan(resampled[5])   // corner cell dimmer -> needs more gain than centre
+  })
+
+  it('flatFieldToIllumination inverts the gains into a mean-1 RGB illumination map (stitching shading)', () => {
+    const raw = vignettedFlat(64, 64, 300, 200, 100, 0.5)
+    const field = flatFieldFromRaw(raw, { cols: 16, rows: 16 })
+    const ill = flatFieldToIllumination(flatFieldToJson(field), 8, 6)
+    expect(ill.width).toBe(8); expect(ill.height).toBe(6); expect(ill.channels).toBe(3); expect(ill.data.length).toBe(8 * 6 * 3)
+    for (let ch = 0; ch < 3; ch++) {
+      let s = 0
+      for (let i = 0; i < 48; i++) s += ill.data[i * 3 + ch]
+      expect(s / 48).toBeCloseTo(1, 5)
+    }
+    const centre = ((3 * 8) + 4) * 3, corner = 0
+    expect(ill.data[centre]).toBeGreaterThan(ill.data[corner])   // the corner is darker than the middle
+    expect(ill.data[corner + 1]).toBeCloseTo(ill.data[corner], 1)   // the same vignette on every channel
+  })
+
+  describe('applyGainMapRgba', () => {
+    const W = 64, H = 48
+    // a smooth relative-illumination map, per-channel tint, darker towards the rim
+    const map = (() => {
+      const w = 16, h = 12, data = new Float32Array(w * h * 3)
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const r2 = ((x + 0.5) / w - 0.5) ** 2 + ((y + 0.5) / h - 0.5) ** 2
+        const o = (y * w + x) * 3
+        data[o] = 1.1 - 1.2 * r2; data[o + 1] = 1.05 - 1.6 * r2; data[o + 2] = 0.95 - 1.9 * r2
+      }
+      return { width: w, height: h, channels: 3 as const, data }
+    })()
+    const encode = (l: number) => Math.round(255 * (l <= 0.0031308 ? 12.92 * l : 1.055 * Math.pow(l, 1 / 2.4) - 0.055))
+    // a scene of constant radiance lit through the map, JPEG-style gamma encoded
+    const scene = (radiance: [number, number, number]) => {
+      const d = new Uint8ClampedArray(W * H * 4)
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) for (let ch = 0; ch < 3; ch++)
+        d[(y * W + x) * 4 + ch] = encode(radiance[ch] * sampleGainMap(map, (x + 0.5) / W, (y + 0.5) / H, ch))
+      for (let i = 3; i < d.length; i += 4) d[i] = 255
+      return d
+    }
+    const spread = (d: Uint8ClampedArray, ch: number) => { let lo = 255, hi = 0; for (let i = ch; i < d.length; i += 4) { lo = Math.min(lo, d[i]); hi = Math.max(hi, d[i]) } return hi - lo }
+
+    it('flattens a vignetted gamma-encoded field within one level when working in linear light', () => {
+      const d = scene([0.4, 0.4, 0.4])
+      expect(spread(d, 1)).toBeGreaterThan(20)   // the vignette is visible to start with
+      const alpha = d[3]
+      applyGainMapRgba(d, W, H, map)
+      for (let ch = 0; ch < 3; ch++) expect(spread(d, ch)).toBeLessThanOrEqual(1)
+      expect(d[3]).toBe(alpha)
+    })
+
+    it('dividing the encoded values (linear = false) over-corrects the dim rim', () => {
+      const lin = scene([0.4, 0.4, 0.4]), enc = scene([0.4, 0.4, 0.4])
+      const target = encode(0.4)
+      applyGainMapRgba(lin, W, H, map)
+      applyGainMapRgba(enc, W, H, map, { linear: false })
+      expect(Math.abs(lin[1] - target)).toBeLessThanOrEqual(1)
+      expect(enc[1]).toBeGreaterThan(target + 8)   // corner (0,0) is far brighter than the centre target
+    })
+
+    it('strength 0 leaves the image alone and tile offsets sample the right part of the map', () => {
+      const d = scene([0.3, 0.3, 0.3]), copy = d.slice()
+      applyGainMapRgba(d, W, H, map, { strength: 0 })
+      expect(Array.from(d)).toEqual(Array.from(copy))
+      // a window of the left half of a frame twice as wide must match correcting the full frame's left half
+      const full = scene([0.3, 0.3, 0.3])
+      const half = new Uint8ClampedArray((W / 2) * H * 4)
+      for (let y = 0; y < H; y++) for (let x = 0; x < W / 2; x++) for (let c = 0; c < 4; c++) half[(y * (W / 2) + x) * 4 + c] = full[(y * W + x) * 4 + c]
+      applyGainMapRgba(half, W / 2, H, map, { tileW: W, tileH: H, offX: 0, offY: 0 })
+      applyGainMapRgba(full, W, H, map)
+      for (let y = 0; y < H; y++) for (let x = 0; x < W / 2; x++) expect(half[(y * (W / 2) + x) * 4 + 1]).toBe(full[(y * W + x) * 4 + 1])
+    })
   })
 })

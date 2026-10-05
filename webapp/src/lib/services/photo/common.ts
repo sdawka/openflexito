@@ -6,6 +6,9 @@ import { fetchSnapshot, fetchSnapshotWithMeta, type StillFrameMeta } from '../..
 import type { Rgba } from '../../algo/stack'
 import { currentScale } from '../../store/scaleCal.svelte'
 import type { GalleryItem } from '../../store/gallery'
+import { settings } from '../../store/settings.svelte'
+import { illuminationMap } from '../../store/calibration.svelte'
+import { applyGainMapRgba } from '../../algo/flatField'
 
 export type { Rgba }
 export type Say = (m: string) => void
@@ -46,3 +49,24 @@ export async function encodeRgba8Png(img: { data: Uint8ClampedArray; width: numb
 export const encodeRgba8 = (img: { data: Uint8ClampedArray; width: number; height: number }, quality = 0.9) => encode(img as Rgba, quality)
 
 export const settle = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+/** Where a corrected still's illumination map came from (recorded in the item's `capture.meta.shading`). */
+export interface ShadingNote { source: 'measured' | 'raw' | 'auto'; when?: string }
+
+/** Full-resolution still, divided by the illumination map in linear light when `settings.shadingStills`
+ *  is on and a map exists (`services/shadingProcessor.ts` does the same for the live view). Otherwise
+ *  the blob is returned untouched. The JPEG is re-encoded once at quality 0.95. */
+export async function captureFullShaded(): Promise<{ blob: Blob; meta: StillFrameMeta | null; shading?: ShadingNote }> {
+  const { blob, meta } = await captureFullWithMeta()
+  const map = settings.shadingStills ? illuminationMap() : null
+  if (!map) return { blob, meta }
+  const img = await decode(blob)
+  applyGainMapRgba(img.data, img.width, img.height, map)
+  return { blob: await encode(img, 0.95), meta, shading: { source: map.source === 'flat' ? 'measured' : map.source, when: map.when } }
+}
+
+/** `captureField` plus the `shading` note, when the still was corrected. */
+export function captureFieldShaded(meta: StillFrameMeta | Record<string, unknown> | null | undefined, shading?: ShadingNote): NonNullable<GalleryItem['capture']> {
+  const f = captureField(meta)
+  return shading ? { ...f, meta: { ...(f.meta ?? {}), shading } } : f
+}

@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import { device } from './lib/store/device.svelte'
   import { activity } from './lib/services/activity.svelte'
+  import './lib/services/shadingProcessor' // registers the illumination-map frame-chain processor (live view + recordings)
   import StatusBar from './components/StatusBar.svelte'
   import PowerButton from './components/PowerButton.svelte'
   import Live from './routes/Live.svelte'

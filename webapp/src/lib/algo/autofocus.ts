@@ -111,7 +111,75 @@ export function countTurningPoints(values: number[], threshold = 0.5): number {
   return turns
 }
 
-export interface FastAutofocusResult { peakZ: number; samples: Sample[]; refined: QuadraticPeak | null; startZ: number }
+export interface FastAutofocusResult { peakZ: number; samples: Sample[]; refined: QuadraticPeak | null; startZ: number; quality: CurveQuality }
+
+export interface CurveQuality {
+  /** peak / robust floor (median of the lowest third), on the smoothed curve */
+  contrast: number
+  /** (peak - floor) / robust noise of the floor (MAD of the residuals at the lowest third of the smoothed curve); copes
+   *  with a metric that sits on a large baseline, where peak/floor stays near 1 */
+  snr: number
+  /** sign changes of significant differences (`countTurningPoints`); a clean peak has 1 */
+  turningPoints: number
+  /** FWHM of the peak in samples (half-way between floor and peak); NaN if a side never drops that far */
+  widthSamples: number
+  /** index of the peak among the valid (finite) samples, in the order given */
+  peakIndex: number
+  ok: boolean
+  reason?: 'flat' | 'multimodal' | 'edge' | 'few'
+}
+
+export interface CurveQualityOptions { minContrast?: number; minSnr?: number; maxTurningPoints?: number; smooth?: number }
+
+/** Score a focus curve, not just its peak. A curve passes the signal test when contrast >=
+ *  `minContrast` (default 1.3) OR snr >= `minSnr` (default 6). Measured on the Pi: JPEG size shows
+ *  no contrast at all (dead on the hardware encoder), libcamera FocusFoM 1.29 on a ~4000 baseline
+ *  (so only the SNR test passes it), Laplacian on the 820 px stream 12, Laplacian on a full-res
+ *  still downscaled to 1640 only 1.14 (JPEG noise dominates). Non-finite samples are dropped. Reasons are checked in
+ *  order few (< 5 valid samples), flat (contrast below `minContrast`: empty field), edge (peak at an
+ *  end: true focus lies outside the sweep), multimodal (more than `maxTurningPoints`: debris or
+ *  several planes). */
+export function curveQuality(samples: readonly { z: number; s: number }[], opts: CurveQualityOptions = {}): CurveQuality {
+  const minContrast = opts.minContrast ?? 1.3, minSnr = opts.minSnr ?? 6, maxTurns = opts.maxTurningPoints ?? 1
+  const win = Math.max(1, Math.round(opts.smooth ?? 3))
+  const v = samples.map((x) => x.s).filter((x) => Number.isFinite(x))
+  const n = v.length
+  if (n < 5) return { contrast: NaN, snr: NaN, turningPoints: 0, widthSamples: NaN, peakIndex: n ? v.indexOf(Math.max(...v)) : -1, ok: false, reason: 'few' }
+  const half = win >> 1
+  const sm = v.map((_, i) => {
+    const a = Math.max(0, i - half), b = Math.min(n - 1, i + half)
+    let t = 0
+    for (let k = a; k <= b; k++) t += v[k]
+    return t / (b - a + 1)
+  })
+  let pk = 0
+  for (let i = 1; i < n; i++) if (sm[i] > sm[pk]) pk = i
+  const peak = sm[pk]
+  const low = [...sm].sort((a, b) => a - b).slice(0, Math.max(1, Math.floor(n / 3)))
+  const floor = (low[(low.length - 1) >> 1] + low[low.length >> 1]) / 2
+  const contrast = floor > 0 ? peak / floor : peak > floor ? Infinity : 1
+  // noise: MAD of raw-minus-smoothed residuals at the lowest third (selected by smoothed value, so
+  // the selection does not truncate the residuals); 1.4826 -> sigma, sqrt(n/(n-1)) undoes the
+  // smoothing's shrinkage, and the smoothed peak's own noise is sigma/sqrt(window)
+  const cut = low[low.length - 1]
+  const res: number[] = []
+  for (let i = 0; i < n; i++) if (sm[i] <= cut) res.push(v[i] - sm[i])
+  res.sort((a, b) => a - b)
+  const rm = (res[(res.length - 1) >> 1] + res[res.length >> 1]) / 2
+  const dev = res.map((x) => Math.abs(x - rm)).sort((a, b) => a - b)
+  const mad = (dev[(dev.length - 1) >> 1] + dev[dev.length >> 1]) / 2
+  const sigma = (1.4826 * mad) / Math.sqrt(Math.max(0.5, 1 - 1 / win))
+  const noise = Math.max(sigma / Math.sqrt(win), 1e-9 * Math.max(1, Math.abs(peak)))
+  const snr = (peak - floor) / noise
+  const turningPoints = countTurningPoints(sm)
+  const level = floor + (peak - floor) / 2
+  let left = NaN, right = NaN
+  for (let i = pk; i > 0; i--) if (sm[i - 1] <= level) { left = i - (sm[i] - level) / (sm[i] - sm[i - 1]); break }
+  for (let i = pk; i < n - 1; i++) if (sm[i + 1] <= level) { right = i + (sm[i] - level) / (sm[i] - sm[i + 1]); break }
+  const widthSamples = right - left
+  const reason: CurveQuality['reason'] = contrast < minContrast && !(snr >= minSnr) ? 'flat' : pk === 0 || pk === n - 1 ? 'edge' : turningPoints > maxTurns ? 'multimodal' : undefined
+  return { contrast, snr, turningPoints, widthSamples, peakIndex: pk, ok: !reason, ...(reason ? { reason } : {}) }
+}
 
 /** v3 fast_autofocus: move dz/2 down (backlash-corrected on z), sweep +dz recording sharpness,
  *  then move to the peak with z backlash correction. The correction makes the final approach come
@@ -143,7 +211,7 @@ export async function fastAutofocus(io: FastAutofocusIO, dz = 2000, metric: Shar
   const peakZ = Math.round(refined?.confident && Math.abs(refined.z - best.z) < dz / 10 ? refined.z : best.z)
   io.onProgress?.(`peak at z=${peakZ} (metric ${best.s})`)
   await io.moveZ(peakZ - io.currentZ(), 'z')   // v3: move_absolute(z=peak, Z_ONLY)
-  return { peakZ, samples, refined, startZ }
+  return { peakZ, samples, refined, startZ, quality: curveQuality(samples) }
 }
 
 /** Repeat fast autofocus until the peak lies in the middle 3/5 of the sweep (v3 looping_autofocus). */
@@ -195,7 +263,8 @@ export interface TwoPassOptions {
   confirm?(z: number): Promise<number>
 }
 
-export interface TwoPassResult { peakZ: number; coarse: FastAutofocusResult; fineSamples: Sample[]; finePeak: QuadraticPeak | null; confirmed: boolean }
+/** `quality` scores the fine curve (NaN samples dropped); the coarse sweep's is `coarse.quality`. */
+export interface TwoPassResult { peakZ: number; coarse: FastAutofocusResult; fineSamples: Sample[]; finePeak: QuadraticPeak | null; confirmed: boolean; quality: CurveQuality }
 
 /** Two-pass autofocus: a fast, coarse JPEG-size (or FocusFoM) sweep over the full range locates the
  *  focus plane roughly, then a short step sweep around it measures a sharper, metric-agnostic
@@ -234,7 +303,7 @@ export async function twoPassAutofocus(io: TwoPassIO, opts: TwoPassOptions = {})
       await io.moveZ(peakZ - io.currentZ(), 'z')
     }
   }
-  return { peakZ, coarse, fineSamples, finePeak, confirmed }
+  return { peakZ, coarse, fineSamples, finePeak, confirmed, quality: curveQuality(fineSamples) }
 }
 
 export interface StepAutofocusIO {
