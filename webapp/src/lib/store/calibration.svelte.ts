@@ -6,7 +6,7 @@
 
 import type { Calibration1D, Mat2 } from '../algo/csm'
 import { settings } from './settings.svelte'
-import { flatFieldToIllumination, type FlatFieldJson } from '../algo/flatField'
+import type { FlatFieldJson } from '../algo/flatField'
 
 export interface CsmCalibration {
   matrix: Mat2                    // image px -> stage steps
@@ -109,14 +109,12 @@ export function saveRawFlatField(f: FlatFieldJson | null, fromDevice = false): v
  *  (relative illumination, mean 1): the blank-field JPEG capture (`calibration.flat`) when there is
  *  one, else derived from the RAW per-channel flat field (1 / gain per channel), else `null`. Plain
  *  arrays, never `$state` proxies, so the result can be posted to the stitch worker as is. */
-export function measuredIllumination(): { width: number; height: number; channels: 1 | 3; data: number[]; when?: string; source: 'flat' | 'raw' } | null {
+export function measuredIllumination(): { width: number; height: number; channels: 1 | 3; data: number[]; when?: string; source: 'flat' } | null {
+  // Only the stream-domain flat applies to scan tiles: they are JPEGs the ISP has already lens-shading
+  // corrected (ALSC from the tuning file), so dividing them by the RAW flat field (sensor-domain, before
+  // the ISP) corrects the shading twice and paints the corners magenta. The RAW flat serves RAW develop.
   const f = calibration.flat
   if (f) return { width: f.width, height: f.height, channels: f.channels, data: Array.from(f.data), when: f.when, source: 'flat' }
-  const r = calibration.rawFlatField
-  if (r) {
-    const ill = flatFieldToIllumination($state.snapshot(r))
-    return { width: ill.width, height: ill.height, channels: 3, data: Array.from(ill.data), when: r.when, source: 'raw' }
-  }
   return null
 }
 

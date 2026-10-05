@@ -433,6 +433,8 @@ class ScanService {
           const fineRange = Math.min(range, Math.max(120, Math.round(range / 2)))
           const r = await runAutofocus({ mode: 'twopass', dz: range, fineRange, fineSteps: 9, coarse: 'stepped' })
           const metricName = `${r.metric}+${settings.focusMetric ?? 'laplacian'}${r.coarseMode === 'stepped' ? ' (stepped coarse)' : ''}`
+          // a stepped coarse pass measures the at-rest metric, not FocusFoM: name what the accepted curve really was
+          const coarseName = r.coarseMode === 'stepped' ? `${settings.focusMetric ?? 'laplacian'} (stepped coarse)` : r.metric
           // the coarse sweep spans the whole range, so its curve shows the specimen's depth; the fine one only its peak
           focusCurve = r.coarse?.samples?.length ? r.coarse.samples : r.samples
           let q = r.quality, peakZ = r.peakZ, retried = false
@@ -455,7 +457,7 @@ class ScanService {
               // the fine pass found nothing it trusts but the coarse sweep did: its peak stands (reason 'coarse')
               await device.moveRel({ z: c.peakZ - device.position.z }, 'z')
               const ok = learn(t, c.peakZ)
-              return { z: c.peakZ, zMeasured: true, focus: { status: 'measured', contrast: round2(c.quality.contrast), metric: r.metric, range, reason: ok ? 'coarse' : 'suspect' } }
+              return { z: c.peakZ, zMeasured: true, focus: { status: 'measured', contrast: round2(c.quality.contrast), metric: coarseName, range, reason: ok ? 'coarse' : 'suspect' } }
             }
             return await fallback(t, centre, `focus curve refused (${REASON_LABEL[q.reason ?? ''] ?? q.reason}, contrast ${q.contrast.toFixed(2)})`, reasonOf(q), { contrast: round2(q.contrast), metric: metricName, range })
           }

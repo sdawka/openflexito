@@ -17,9 +17,10 @@
   const cfg = $derived(scan.cfg)
   const plan = $derived(scan.plan)
   const n = $derived(plan?.tiles.length ?? 0)
-  // the measured illumination map, if any (blank-field capture or the RAW flat field; see the Calibrate page)
-  const measured = $derived.by(() => { void calibration.flat; void calibration.rawFlatField; return measuredIllumination() })
-  const measuredLabel = $derived(measured ? `measured flat (captured ${measured.when ? new Date(measured.when).toLocaleDateString() : 'earlier'}${measured.source === 'raw' ? ', from RAW' : ''})` : 'measured flat (none captured)')
+  // the measured illumination map, if any (the blank-field capture from the Calibrate page; the RAW flat
+  // field is sensor-domain and does not apply to ISP-corrected tiles)
+  const measured = $derived.by(() => { void calibration.flat; return measuredIllumination() })
+  const measuredLabel = $derived(measured ? `measured flat (captured ${measured.when ? new Date(measured.when).toLocaleDateString() : 'earlier'})` : 'measured flat (none captured)')
   const polygonMode = $derived(cfg.polygon.length >= 3)
   // the region select is the switch; leaving polygon mode drops the points
   let shape = $state<'rect' | 'polygon'>(scan.cfg.polygon.length ? 'polygon' : 'rect')
