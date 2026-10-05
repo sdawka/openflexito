@@ -11,6 +11,7 @@
 // Environment:
 //   STITCH_FOCUS=none|every|interpolate   scan focus mode (default: leave the page's setting)
 //   STITCH_RANGE=300|600|1200             autofocus sweep (total steps) when STITCH_FOCUS is set
+//   STITCH_EDOF=1|0  STITCH_EDOF_RANGE=600  extended-focus tiles on/off and their sweep length
 //   STITCH_ONLY=auto        run only the corrected scan (no off baseline, no ratio assertions); prints its focus line
 //   STITCH_SAVE=<dir>       save each mosaic (≤1600 px wide JPEG) and a 2× crop of the first tile-corner
 //                           junction to <dir>, plus the gallery item's stitch meta as JSON
@@ -56,8 +57,10 @@ async function rpc(method, params = {}) {
 }
 
 // the fake persists power state and calibrations in ~/.openflexito like the Pi does: a fake left idle for
-// 10 minutes restarts in standby, so wake it, and start every suite with no stored calibration
-for (const [method, params] of [['power.set', { on: true }], ['calibration.clear', {}]])
+// 10 minutes restarts in standby, so wake it, and start every suite with no stored calibration. Only on
+// the fake: on a real microscope the stored calibrations are the user's and must survive a test run.
+const isFake = /^https?:\/\/(127\.0\.0\.1|localhost)(:|\/|$)/.test(base)
+for (const [method, params] of [['power.set', { on: true }], ...(isFake ? [['calibration.clear', {}]] : [])])
   await (await page.request.post(base + '/rpc', { data: { jsonrpc: '2.0', method, params } })).json()
 await page.goto(`${base}/#/calibrate`, { waitUntil: 'load' })
 await page.waitForFunction(() => /\d+ fps/.test(document.querySelector('nav')?.textContent || ''), null, { timeout: 15000 })
@@ -102,7 +105,8 @@ const stitchMeta = () => page.evaluate(() => new Promise((res) => {
       const it = scans[0]
       db.close()
       res(it ? { name: it.name, when: it.when, width: it.width, height: it.height, stitch: it.scan?.stitch ?? null, cfg: it.scan?.cfg ?? null,
-                 tiles: it.scan?.tiles?.map((t) => ({ col: t.col, row: t.row, z: t.z, zMeasured: t.zMeasured, focus: t.focus ?? null })) ?? [] } : null)
+                 tiles: it.scan?.tiles?.map((t) => ({ col: t.col, row: t.row, z: t.z, zMeasured: t.zMeasured, focus: t.focus ?? null, edof: t.edof ?? null })) ?? [],
+                 edofFailures: it.scan?.edofFailures ?? 0 } : null)
     }
     q.onerror = () => { db.close(); res(null) }
   }
@@ -113,6 +117,12 @@ const onlyAuto = process.env.STITCH_ONLY === 'auto'
 if (focusMode) {
   await page.selectOption('.panel:has(h3:has-text("Focus")) select >> nth=0', focusMode)
   if (process.env.STITCH_RANGE && focusMode !== 'none') await page.selectOption('.panel:has(h3:has-text("Focus")) select >> nth=1', process.env.STITCH_RANGE)
+  // STITCH_EDOF=1|0: extended-focus tiles (a focal sweep fused per tile); STITCH_EDOF_RANGE sets its sweep length
+  if (process.env.STITCH_EDOF) {
+    const box = page.locator('label.check:has-text("Extended focus tiles") input[type=checkbox]')
+    if (process.env.STITCH_EDOF === '1') await box.check(); else await box.uncheck()
+    if (process.env.STITCH_EDOF === '1' && process.env.STITCH_EDOF_RANGE) await page.fill('label.check:has-text("sweep") input[type=number]', process.env.STITCH_EDOF_RANGE)
+  }
 }
 
 async function scanWith(shading, { multiband = false, tag = shading } = {}) {
@@ -127,6 +137,8 @@ async function scanWith(shading, { multiband = false, tag = shading } = {}) {
   }
   const summary = (await page.locator('main').innerText()).replace(/\s+/g, ' ')
   const focusLine = summary.match(/focus: [^·]*?(measured|predicted|failed)[^·]*/)?.[0]
+  const sweepLog = (await page.locator('pre.log, .log').allInnerTexts().catch(() => [])).join('\n').split('\n').filter((l) => /sweep|single frame|extended/i.test(l))
+  if (sweepLog.length) console.log('        sweep log: ' + sweepLog.slice(0, 12).map((l) => l.trim()).join(' | ').slice(0, 900))
   if (focusLine) console.log(`        ${focusLine.trim()}`)
   const m = await page.evaluate(async ({ src, overlap, cols, save }) => {
     const tilePeriodicity = new Function('return ' + src)()
@@ -157,7 +169,7 @@ async function scanWith(shading, { multiband = false, tag = shading } = {}) {
     return out
   }, { src: tilePeriodicitySource, overlap, cols: 3, save: !!saveDir })
   const sh = summary.match(/· shading \w+( \(rms [\d.]+\))?/)?.[0] ?? '(no shading in summary)'
-  const fullSummary = summary.match(/\d+×\d+ px · .*?· scale [\d.]+( · \d+ tile\(s\) with failed autofocus)?/)?.[0] ?? '(no summary line found)'
+  const fullSummary = summary.match(/\d+×\d+ px · .*?· scale [\d.]+( · \d+ tile\(s\) with failed autofocus)?( · extended focus[^·]*)?/)?.[0] ?? '(no summary line found)'
   console.log(`${tag.padEnd(7)} ${m.width}×${m.height} ${sh}: contrast ${m.contrast.toFixed(3)} colour ${m.colourContrast.toFixed(3)} raw ${m.rawContrast.toFixed(3)} fitRms ${m.fitRms.toFixed(3)} coverage ${m.coverage.toFixed(2)}`)
   console.log(`        summary: ${fullSummary}`)
   const meta = await stitchMeta()
@@ -168,7 +180,7 @@ async function scanWith(shading, { multiband = false, tag = shading } = {}) {
   } else console.log('        (no stitch meta found in the gallery database)')
   if (meta?.tiles?.some((t) => t.focus && t.focus.status !== 'none')) {
     // one line per tile: status, reason, contrast, z — the summary line only counts failures
-    const line = meta.tiles.map((t) => `(${t.col},${t.row}) ${t.focus?.status ?? '-'}${t.focus?.reason ? '/' + t.focus.reason : ''}${t.focus?.contrast != null ? ' c' + t.focus.contrast : ''}${t.z != null ? ' z' + t.z : ''}`).join('  ')
+    const line = meta.tiles.map((t) => `(${t.col},${t.row}) ${t.focus?.status ?? '-'}${t.focus?.reason ? '/' + t.focus.reason : ''}${t.focus?.contrast != null ? ' c' + t.focus.contrast : ''}${t.z != null ? ' z' + t.z : ''}${t.edof ? (t.edof.fused ? ` sweep${t.edof.range}/${t.edof.frames}f` : ' sweep-FAILED') : ''}`).join('  ')
     console.log(`        tiles: ${line}`)
   }
   if (saveDir) {

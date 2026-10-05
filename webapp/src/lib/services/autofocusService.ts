@@ -17,6 +17,9 @@ export interface AutofocusOptions {
   /** 'twopass' only: z span and sample count of the fine Laplacian sweep, and its peak-fit shape. */
   fineRange?: number
   fineSteps?: number
+  /** twopass: 'stepped' skips the proxy sweep and steps the fine metric across `dz` (default 'auto'). */
+  coarse?: 'auto' | 'stepped'
+  coarseSteps?: number
   fineModel?: PeakModel
   /** 'twopass' only: confirm the fitted peak against a full-resolution capture (any function that
    *  returns a sharpness figure comparable to the fine-pass metric, e.g. Laplacian on a full still);
@@ -56,7 +59,7 @@ export function cancelAutofocus(): void { cancelFlag = true }
  *  samples/fit. `quality` scores the curve that decided the peak (`curveQuality`): callers that
  *  must not accept a random z (the scan) gate on `quality.ok`. `metric` is the sweep metric actually
  *  used (after the FocusFoM fallback), `startZ` where the stage was before the sweep. */
-export async function runAutofocus(opts: AutofocusOptions): Promise<{ peakZ: number; samples: { z: number; s: number }[]; coarse?: FastAutofocusResult; confirmed?: boolean; quality: CurveQuality; metric: SharpnessMetric; startZ: number }> {
+export async function runAutofocus(opts: AutofocusOptions): Promise<{ peakZ: number; samples: { z: number; s: number }[]; coarse?: FastAutofocusResult; coarseMode?: 'sweep' | 'stepped'; confirmed?: boolean; quality: CurveQuality; metric: SharpnessMetric; startZ: number }> {
   cancelFlag = false
   const startZ = device.position.z
   const metric = resolveSweepMetric(opts.metric)
@@ -76,9 +79,9 @@ export async function runAutofocus(opts: AutofocusOptions): Promise<{ peakZ: num
   }
   if (opts.mode === 'twopass') {
     const r: TwoPassResult = await twoPassAutofocus({ ...io, measure }, {
-      coarseDz: opts.dz, coarseMetric: metric, fineRange: opts.fineRange, fineSteps: opts.fineSteps, fineModel: opts.fineModel, confirm: opts.confirm,
+      coarseDz: opts.dz, coarseMetric: metric, fineRange: opts.fineRange, fineSteps: opts.fineSteps, fineModel: opts.fineModel, confirm: opts.confirm, coarse: opts.coarse, coarseSteps: opts.coarseSteps,
     })
-    return { peakZ: r.peakZ, samples: r.fineSamples, coarse: r.coarse, confirmed: r.confirmed, quality: r.quality, metric, startZ }
+    return { peakZ: r.peakZ, samples: r.fineSamples, coarse: r.coarse, coarseMode: r.coarseMode, confirmed: r.confirmed, quality: r.quality, metric, startZ }
   }
   const r: FastAutofocusResult = opts.mode === 'looping' ? await loopingAutofocus(io, opts.dz, metric) : await fastAutofocus(io, opts.dz, metric)
   return { peakZ: r.peakZ, samples: r.samples, quality: r.quality, metric, startZ }

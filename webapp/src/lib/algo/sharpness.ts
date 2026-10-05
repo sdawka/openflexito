@@ -64,8 +64,12 @@ export function brenner(g: Gray, step = 2): number {
   return n ? e / n : 0
 }
 
-/** Median of `metric` over a grid x grid tiling, so one piece of debris or one saturated spot
- *  cannot dominate the score. Tiles smaller than 3 px fall back to the whole image. */
+/** `metric` over a grid x grid tiling, aggregated as the second-sharpest tile: one piece of debris or
+ *  one saturated spot cannot dominate the score (the maximum is dropped), but neither can empty glass
+ *  (any two textured tiles out of sixteen carry the curve). The median used before went flat on sparse specimens (measured on the Pi: a 3×3
+ *  scan over debris gave fine-curve contrasts of 1.1 while the whole-frame Laplacian peaked 20×),
+ *  because more than half of the 16 tiles were featureless. Tiles smaller than 3 px fall back to the
+ *  whole image. */
 export function tileMetric(g: Gray, metric: (g: Gray) => number, grid = 4): number {
   const { data, width: w, height: h } = g
   const gx = Math.max(1, Math.min(Math.floor(grid), Math.floor(w / 3))), gy = Math.max(1, Math.min(Math.floor(grid), Math.floor(h / 3)))
@@ -81,9 +85,8 @@ export function tileMetric(g: Gray, metric: (g: Gray) => number, grid = 4): numb
     if (Number.isFinite(v)) vals.push(v)
   }
   if (!vals.length) return NaN
-  vals.sort((a, b) => a - b)
-  const m = vals.length >> 1
-  return vals.length % 2 ? vals[m] : (vals[m - 1] + vals[m]) / 2
+  vals.sort((a, b) => b - a)
+  return vals[Math.min(vals.length - 1, 1)]
 }
 
 export type FocusMetricName = 'laplacian' | 'nv' | 'brenner'

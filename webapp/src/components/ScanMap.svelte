@@ -6,6 +6,7 @@
    *  itself lives in `lib/algo/scanPlan.ts`). One picture for planning, running and reviewing. */
   import { tileRectNorm, type NormRect, type Point, type ScanPlan } from '../lib/algo/scanPlan'
   import type { TileState } from '../lib/services/scan.svelte'
+  import { describeTileFocus } from '../lib/algo/focusReasons'
 
   let {
     plan, states = [], here = null, live = null, underlay = null, polygon = [], editable = false, onpolygon,
@@ -40,11 +41,13 @@
   }
   const focusMark = (s: TileState) => s.focus === 'measured' ? '●' : s.focus === 'refined' ? '◐' : s.focus === 'predicted' ? '○' : s.status === 'failed' ? '!' : ''
   const title = (t: { col: number; row: number }, s: TileState | undefined) => {
-    const base = `col ${t.col} row ${t.row}`
-    if (!s || s.status === 'pending') return `${base}: planned`
-    const z = s.z !== undefined ? ` · z ${s.z}` : ''
-    const f = s.focus && s.focus !== 'none' ? ` · focus ${s.focus}` : ''
-    return `${base}: ${s.status}${z}${f}${s.error ? ` · ${s.error}` : ''}`
+    const base = `(${t.col},${t.row})`
+    if (!s || s.status === 'pending') return `${base} planned`
+    if (s.focus && s.focus !== 'none' || s.status === 'failed') {
+      const status = s.focus && s.focus !== 'none' ? s.focus : 'failed'
+      return describeTileFocus({ status, reason: s.reason, error: s.error }, { col: t.col, row: t.row, z: s.z })
+    }
+    return `${base} ${s.status}${s.z !== undefined ? ` · z ${Math.round(s.z)}` : ''}${s.error ? ` · ${s.error}` : ''}`
   }
 </script>
 
@@ -55,7 +58,7 @@
     {#if plan}
       {#each plan.tiles as t, i (t.index)}
         {@const s = states[i]}
-        <div class="tile {s?.status ?? 'pending'}" style={rectStyle(tileRectNorm(plan, t))} title={title(t, s)}>
+        <div class="tile {s?.status ?? 'pending'} f-{s?.focus ?? 'none'}" style={rectStyle(tileRectNorm(plan, t))} title={title(t, s)}>
           {#if s?.thumb}<img src={s.thumb} alt="" draggable="false" />{/if}
           {#if s && s.status !== 'pending' && s.status !== 'done' && s.status !== 'failed'}<span class="pulse"></span>{/if}
           {#if s && focusMark(s)}<span class="mark" class:bad={s.status === 'failed'}>{focusMark(s)}</span>{/if}
@@ -90,6 +93,8 @@
   .tile img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; pointer-events: none; }
   .tile.moving, .tile.focusing, .tile.capturing { border-color: var(--accent); background: rgba(79, 140, 255, .18); z-index: 2; }
   .tile.done { border-color: rgba(60, 207, 122, .7); background: rgba(60, 207, 122, .10); }
+  .tile.f-predicted, .tile.f-refined { box-shadow: inset 0 0 0 1px var(--accent); }
+  .tile.f-failed, .tile.failed { box-shadow: inset 0 0 0 2px var(--warn); }
   .tile.failed { border-color: var(--warn); background: rgba(245, 185, 66, .12); }
   .pulse { position: absolute; inset: 0; border: 2px solid var(--accent); animation: pulse 1s ease-in-out infinite; }
   @keyframes pulse { 0%, 100% { opacity: .2; } 50% { opacity: 1; } }

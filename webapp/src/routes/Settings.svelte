@@ -120,6 +120,7 @@
 
   <div class="panel">
     <h3>Scale bar &amp; measurement</h3>
+    <p class="muted" style="font-size:11px;margin:0 0 8px">Shared with every client of this microscope (stored on the device).</p>
     <p class="muted" style="font-size:12px;margin:0 0 8px">Stage step size (µm/step), used with the CSM calibration to derive µm/px for the scale bar and
       the measurement tool. Default is the OpenFlexure v7 low-cost actuator's measured resolution (28BYJ-48 motor + printed
       gears + M3 leadscrew: xy 88 nm/step, z 50 nm/step — Stewart et al., "The OpenFlexure Block Stage", arXiv:1911.09986);

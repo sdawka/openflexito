@@ -50,8 +50,10 @@ async function tool(name) {
 }
 
 // the fake persists power state and calibrations in ~/.openflexito like the Pi does: a fake left idle for
-// 10 minutes restarts in standby, so wake it, and start every suite with no stored calibration
-for (const [method, params] of [['power.set', { on: true }], ['calibration.clear', {}]])
+// 10 minutes restarts in standby, so wake it, and start every suite with no stored calibration. Only on
+// the fake: on a real microscope the stored calibrations are the user's and must survive a test run.
+const isFake = /^https?:\/\/(127\.0\.0\.1|localhost)(:|\/|$)/.test(base)
+for (const [method, params] of [['power.set', { on: true }], ...(isFake ? [['calibration.clear', {}]] : [])])
   await (await page.request.post(base + '/rpc', { data: { jsonrpc: '2.0', method, params } })).json()
 await page.goto(`${base}/#/live`, { waitUntil: 'load' })
 

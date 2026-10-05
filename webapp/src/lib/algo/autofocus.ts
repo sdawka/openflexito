@@ -261,10 +261,21 @@ export interface TwoPassOptions {
    *  comparable across calls, e.g. Laplacian on a full-res still) so a stream-proxy false peak can be
    *  rejected. Not called unless provided (an extra full-res capture costs ~1.3 s on the Pi). */
   confirm?(z: number): Promise<number>
+  /** Points of the stepped coarse pass that replaces the continuous sweep when the sweep's proxy
+   *  shows no signal or fails the curve gate (default 11). Measured on an IMX219 Pi: libcamera's
+   *  FocusFoM varied 5 % across z over a thick specimen while the stream Laplacian rose 20×, so a
+   *  sweep-only coarse pass refused every tile of a scan; the stepped pass uses `measure()`. */
+  coarseSteps?: number
+  /** 'auto' (default): continuous proxy sweep, stepped fallback when it shows no signal or fails the
+   *  gate; 'stepped': skip the proxy sweep and step the fine metric across the range from the start
+   *  (a scan over a thick specimen, where the proxy passed its gate with wrong peaks). */
+  coarse?: 'auto' | 'stepped'
 }
 
-/** `quality` scores the fine curve (NaN samples dropped); the coarse sweep's is `coarse.quality`. */
-export interface TwoPassResult { peakZ: number; coarse: FastAutofocusResult; fineSamples: Sample[]; finePeak: QuadraticPeak | null; confirmed: boolean; quality: CurveQuality }
+/** `quality` scores the fine curve (NaN samples dropped); the coarse sweep's is `coarse.quality`.
+ *  `coarseMode` says whether the coarse peak came from the continuous proxy sweep or from the stepped
+ *  fallback on the fine metric. */
+export interface TwoPassResult { peakZ: number; coarse: FastAutofocusResult; coarseMode: 'sweep' | 'stepped'; fineSamples: Sample[]; finePeak: QuadraticPeak | null; confirmed: boolean; quality: CurveQuality }
 
 /** Two-pass autofocus: a fast, coarse JPEG-size (or FocusFoM) sweep over the full range locates the
  *  focus plane roughly, then a short step sweep around it measures a sharper, metric-agnostic
@@ -274,7 +285,29 @@ export interface TwoPassResult { peakZ: number; coarse: FastAutofocusResult; fin
  *  need to search blindly if not seeded by the coarse peak. */
 export async function twoPassAutofocus(io: TwoPassIO, opts: TwoPassOptions = {}): Promise<TwoPassResult> {
   const coarseDz = opts.coarseDz ?? 2000
-  const coarse = await fastAutofocus(io, coarseDz, opts.coarseMetric ?? 'jpeg')
+  let coarse: FastAutofocusResult | null = null, coarseMode: 'sweep' | 'stepped' = 'sweep'
+  try {
+    if (opts.coarse === 'stepped') throw new Error('autofocus: no focus signal (stepped coarse pass requested)')
+    const c = await fastAutofocus(io, coarseDz, opts.coarseMetric ?? 'jpeg')
+    if (c.quality.ok) coarse = c
+    else io.onProgress?.(`coarse sweep refused (${c.quality.reason}, contrast ${c.quality.contrast.toFixed(2)}): stepping the fine metric across the range instead`)
+  } catch (e) {
+    if (!/featureless|no focus signal/.test((e as Error).message)) throw e
+    io.onProgress?.(opts.coarse === 'stepped' ? 'stepping the fine metric across the range' : 'coarse sweep saw no signal in its proxy: stepping the fine metric across the range instead')
+  }
+  if (!coarse) {
+    // fastAutofocus has returned to the start z (it does so before throwing, and a refused curve
+    // ends at its own best guess); step the fine metric over the whole range from here
+    const startZ = io.currentZ()
+    const stepped = await stepAutofocus(io, coarseDz, Math.max(5, opts.coarseSteps ?? 11))
+    const q = curveQuality(stepped.samples)
+    if (!q.ok) {
+      await io.moveZ(startZ - io.currentZ(), 'z')
+      throw new Error('autofocus: no focus signal, the image is featureless (put a sample in view, LED on)')
+    }
+    coarse = { peakZ: stepped.peakZ, samples: stepped.samples, refined: null, startZ, quality: q }
+    coarseMode = 'stepped'
+  }
   const range = Math.max(20, opts.fineRange ?? Math.round(coarseDz / 10)), steps = Math.max(5, opts.fineSteps ?? 9)
   const step = Math.max(1, range / (steps - 1))
   io.onProgress?.(`fine pass: ${steps} points across ${range} steps around z=${coarse.peakZ}`)
@@ -303,7 +336,7 @@ export async function twoPassAutofocus(io: TwoPassIO, opts: TwoPassOptions = {})
       await io.moveZ(peakZ - io.currentZ(), 'z')
     }
   }
-  return { peakZ, coarse, fineSamples, finePeak, confirmed, quality: curveQuality(fineSamples) }
+  return { peakZ, coarse, coarseMode, fineSamples, finePeak, confirmed, quality: curveQuality(fineSamples) }
 }
 
 export interface StepAutofocusIO {

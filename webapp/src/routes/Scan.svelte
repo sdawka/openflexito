@@ -7,6 +7,8 @@
   import { device } from '../lib/store/device.svelte'
   import { calibration, measuredIllumination } from '../lib/store/calibration.svelte'
   import { scan, fmtTime } from '../lib/services/scan.svelte'
+  import { summariseTileFocus } from '../lib/algo/focusReasons'
+  import { edofTileSeconds } from '../lib/algo/edofTiles'
   import ScanMap from '../components/ScanMap.svelte'
 
   // persist the configuration on every change (reads cfg, writes localStorage: no state written)
@@ -28,6 +30,7 @@
   const liveSrc = $derived(device.connected ? device.url('/stream.mjpg') : null)
   const percent = $derived(scan.total ? Math.round((scan.done / scan.total) * 100) : 0)
   const busy = $derived(scan.running)
+  const focusLegend = $derived(cfg.focusMode === 'none' ? '' : summariseTileFocus(scan.tileStates.map((s) => s && { status: s.focus, reason: s.reason })))
   const fmtPos = (p: { x: number; y: number } | null) => (p ? `${p.x}, ${p.y}` : '—')
   const openInGallery = () => { location.hash = '#/gallery' }
 </script>
@@ -79,6 +82,7 @@
           </span>
         </div>
         {#if scan.focusSummary}<div class="muted mono small">{scan.focusSummary}</div>{/if}
+        {#if focusLegend}<div class="muted mono small" title="tiles by autofocus outcome; ○ predicted tiles took the plane prediction">{focusLegend}</div>{/if}
         {#if scan.message}
           <div class="status-line" class:ok={scan.phase === 'done'} class:err={scan.phase === 'error'}>{scan.message}</div>
         {/if}
@@ -173,6 +177,11 @@
             <select bind:value={scan.cfg.afRange} disabled={busy}><option value={300}>±150 steps</option><option value={600}>±300 steps</option><option value={1200}>±600 steps</option></select></div>
         {/if}
       </div>
+      {#if cfg.focusMode !== 'none'}
+        <details class="muted small" style="margin-top:6px"><summary>How each tile is focused</summary>
+          Every tile: coarse FocusFoM sweep then a fine Laplacian pass over half the sweep; a refused fine pass retries once and falls back to the coarse peak; tiles with no detail take the plane prediction.
+        </details>
+      {/if}
       {#if cfg.focusMode === 'interpolate'}
         <div class="row" style="margin-top:8px">
           <div><div class="label">N</div><input type="number" min="1" max="10" bind:value={scan.cfg.afStep} disabled={busy} /></div>
@@ -183,6 +192,16 @@
         <p class="muted small">Autofocus on a coarse sub-grid (plus the corners), fit a height map, move the other tiles to the predicted z.</p>
       {:else if cfg.focusMode === 'every'}
         <p class="muted small">Sharpest result on tilted or uneven samples; adds a few seconds per tile.</p>
+      {/if}
+      <label class="check" style="margin-top:8px" title="each tile is a focal sweep fused sharp across its depth (sensor H.264, binned 1640×1232) instead of one still; about {Math.round(edofTileSeconds(cfg.edofRange))} s per tile">
+        <input type="checkbox" bind:checked={scan.cfg.edofTiles} disabled={busy} /> Extended focus tiles (focal sweep per tile)
+      </label>
+      {#if cfg.edofTiles}
+        <div class="row" style="margin-top:6px">
+          <label class="check" title="sweep length when the tile's autofocus gave no in-focus band; otherwise twice that band. ~{Math.round(edofTileSeconds(cfg.edofRange))} s per tile">
+            sweep <input type="number" min="120" max="2000" step="20" bind:value={scan.cfg.edofRange} disabled={busy} /> steps
+          </label>
+        </div>
       {/if}
     </div>
 

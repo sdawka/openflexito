@@ -4,6 +4,7 @@
    *    2. stage <-> camera mapping           (needs a FOCUSED sample with visible detail)
    *  All maths runs in this browser; the device only supplies raw frames and moves the stage. */
   import { device } from '../lib/store/device.svelte'
+  import { syncState } from '../lib/services/calibrationSync.svelte'
   import { calibration, saveCsm, saveZCal } from '../lib/store/calibration.svelte'
   import { runZCalibration, type ZCalRun } from '../lib/services/zCalibration'
   import { settings } from '../lib/store/settings.svelte'
@@ -122,6 +123,14 @@
 
   // ---- 2. stage <-> camera mapping ----------------------------------------------------------
   const csm = $derived(calibration.csm)
+  /** Where the calibrations on this page come from: the microscope's own store (`calibration.json`,
+   *  shared by every client) or, while it cannot be reached, this browser's cached copy. */
+  const STORED_LABEL: Record<string, string> = { csm: 'stage↔camera', z: 'focus', raw_flat: 'flat field', flat: 'flat field (JPEG)', auto_shading: 'scan shading', scale: 'pixel scale', settings: 'settings' }
+  const storedLine = $derived.by(() => {
+    const c = device.status?.calibration ?? {}
+    const parts = Object.entries(c).filter(([k]) => k in STORED_LABEL).map(([k, when]) => `${STORED_LABEL[k]} ${when ? new Date(when).toLocaleDateString() : ''}`.trim())
+    return parts.length ? parts.join(' · ') : 'nothing stored yet'
+  })
   const calibrateCsm = () => run('stage-camera mapping', async () => {
     const io = {
       grab: () => grabGray(410, 80),
@@ -197,6 +206,18 @@
           : 'Not calibrated. Click-to-move, follow and scanning need this.'}</div>
       </div>
     </div>
+    <p class="muted small stored" data-sync={syncState.status}>
+      {#if syncState.status === 'error'}
+        Calibrations could not be loaded from the microscope ({syncState.error}); showing this browser's copy.
+        <button class="link" onclick={() => device.reconnect()}>Retry</button>
+      {:else if syncState.status === 'syncing' || (syncState.status === 'idle' && device.connected)}
+        Loading calibrations from the microscope…
+      {:else if !device.connected}
+        Microscope not connected; showing this browser's cached calibrations.
+      {:else}
+        Stored on the microscope, shared by every client: {storedLine}.
+      {/if}
+    </p>
     <p class="muted small">Redo 1 after changing the LED, objective or camera; redo 2 after changing the objective or the stream size.
       Calibration 1 is stored on the microscope; calibration 2 is stored in this browser.</p>
   </div>
@@ -264,7 +285,7 @@
     <div class="row">
       <button class="primary" onclick={calibrateCsm} disabled={!!busy || !device.connected}>Calibrate XY</button>
       {#if csm}<button onclick={applyBacklash} disabled={!!busy || !device.connected} title="Use the measured backlash for compensated moves">Apply measured backlash to the stage</button>
-        <button onclick={() => saveCsm(null)} disabled={!!busy}>Clear</button>{/if}
+        <button onclick={() => saveCsm(null)} disabled={!!busy} title="Forget the stage↔camera mapping on the microscope (every client)">Clear</button>{/if}
     </div>
     {#if csm}
       <div class="scroll-x">
@@ -328,7 +349,7 @@
     <div class="row">
       <label>Frames <input class="mono" type="number" min="2" max="8" style="width:70px" bind:value={flatFrames} disabled={!!busy || !device.connected} /></label>
       <button class="primary" onclick={captureFlat} disabled={!!busy || !device.connected}>Capture flat field</button>
-      {#if rawFlat}<button class="danger" onclick={clearFlat} disabled={!!busy}>Clear</button>{/if}
+      {#if rawFlat}<button class="danger" onclick={clearFlat} disabled={!!busy} title="Forget the flat field on the microscope (every client)">Clear</button>{/if}
     </div>
   </div>
 
@@ -340,6 +361,8 @@
 </div>
 
 <style>
+  .stored button.link { background: none; border: none; color: var(--accent, inherit); text-decoration: underline; cursor: pointer; padding: 0 0 0 .4em; font: inherit; }
+
   .callout { border: 1px solid var(--warn); border-left-width: 4px; background: rgba(255, 190, 60, .08); padding: 10px 12px; border-radius: 6px; margin: 0 0 12px; font-size: 13px; line-height: 1.45; }
 
   .wrap { padding: 16px; display: flex; flex-direction: column; gap: 12px; max-width: 1100px; }

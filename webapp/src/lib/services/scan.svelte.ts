@@ -23,6 +23,8 @@ import type { Mat2 } from '../algo/csm'
 import { runAutofocus, measureSharpness } from './autofocusService'
 import { stepAutofocus, curveQuality, type CurveQuality } from '../algo/autofocus'
 import { depthOfFieldUm } from '../algo/stackPlan'
+import { EDOF_DEFAULT_RANGE, EDOF_SLICES, EDOF_STEPS_PER_FRAME, edofSweepPlan, edofTileSeconds } from '../algo/edofTiles'
+import { captureSweepStack, sweepStackAvailable } from './photo/sweepStack'
 import { lockCamera, type CameraLock } from './cameraLock'
 import { stitchInWorker } from './stitchService'
 import { predictHeightMap, rejectOutliers, isSubGridCell, PlaneTracker, type HeightSample } from '../algo/heightMap'
@@ -40,6 +42,8 @@ export interface ScanConfig extends ScanRegion {
   localRange: number       // ± steps for that sweep
   settleMs: number         // minimum settle after each move
   fullRes: boolean         // full-resolution stills instead of stream frames
+  edofTiles: boolean       // each tile is a focal sweep fused sharp (binned record-mode size, ignores fullRes)
+  edofRange: number        // that sweep's length in steps when the tile's own autofocus gave no band
   refine: boolean          // stitch: refine positions by correlation
   gainEq: boolean          // stitch: equalise tile brightness
   multiband: boolean       // stitch: 3-level Laplacian blend
@@ -50,7 +54,7 @@ export type ShadingMode = 'auto' | 'measured' | 'off'
 export const DEFAULT_CONFIG: ScanConfig = {
   extent: 'centre', cols: 3, rows: 3, cornerA: null, cornerB: null, overlap: 0.3, polygon: [], order: 'snake',
   focusMode: 'none', afStep: 3, afRange: 600, localRefine: true, localRange: 40,
-  settleMs: 150, fullRes: true, refine: true, gainEq: true, multiband: false, shading: 'auto',
+  settleMs: 150, fullRes: true, edofTiles: false, edofRange: EDOF_DEFAULT_RANGE, refine: true, gainEq: true, multiband: false, shading: 'auto',
 }
 const STORAGE_KEY = 'openflexito.scan.config'
 
@@ -127,7 +131,11 @@ class ScanService {
   // ---- geometry ---------------------------------------------------------------------------
 
   readonly streamSize = $derived<[number, number]>((device.status?.camera?.stream_size as [number, number] | undefined) ?? [1640, 1232])
-  readonly fov = $derived<[number, number]>(this.cfg.fullRes ? [3280, 2464] : this.streamSize)
+  /** size of the sensor's recording mode (the H.264 sweep's frames): the tile size of extended-focus tiles */
+  readonly recordSize = $derived<[number, number]>((device.status?.camera?.record?.size as [number, number] | undefined) ?? [1640, 1232])
+  /** tile size in pixels: the fused sweep is the binned recording mode (same field of view as the
+   *  full-res still at half the resolution), so extended-focus tiles are laid out like stream frames */
+  readonly fov = $derived<[number, number]>(this.cfg.edofTiles ? this.recordSize : this.cfg.fullRes ? [3280, 2464] : this.streamSize)
   /** calibration matrix expressed for the tile pixel size (it was measured on a downsampled frame) */
   readonly matrix = $derived<Mat2 | null>(calibration.csm ? scaleMatrix(calibration.csm.matrix, calibration.csm.imageWidth, this.fov[0]) : null)
   readonly ready = $derived(!!this.matrix)
@@ -165,7 +173,7 @@ class ScanService {
   readonly estimateS = $derived.by(() => {
     const n = this.plan?.tiles.length ?? 0
     if (!n) return 0
-    const captureS = this.cfg.fullRes ? 1.4 : 0.4
+    const captureS = this.cfg.edofTiles ? edofTileSeconds(this.cfg.edofRange) : this.cfg.fullRes ? 1.4 : 0.4
     const perTile = this.cfg.settleMs / 1000 + captureS + 0.3
     const afCount = this.cfg.focusMode === 'every' ? n : this.cfg.focusMode === 'interpolate' ? this.subgridCount : 0
     const localCount = this.cfg.focusMode === 'interpolate' && this.cfg.localRefine ? n - this.subgridCount : 0
@@ -247,9 +255,14 @@ class ScanService {
   async start(opts: { overview?: boolean } = {}): Promise<void> {
     if (this.running || !this.matrix || !this.livePlan?.tiles.length) return
     const cfg: ScanConfig = opts.overview
-      ? { ...$state.snapshot(this.cfg), fullRes: false, focusMode: 'none', multiband: false }
+      ? { ...$state.snapshot(this.cfg), fullRes: false, edofTiles: false, focusMode: 'none', multiband: false }
       : $state.snapshot(this.cfg)
-    const fovW = cfg.fullRes ? 3280 : this.streamSize[0], fovH = cfg.fullRes ? 2464 : this.streamSize[1]
+    if (cfg.edofTiles && !sweepStackAvailable()) {
+      this.phase = 'error'
+      this.message = 'extended focus tiles need sensor recording on the device and H.264 playback in this browser'
+      return
+    }
+    const [fovW, fovH] = cfg.edofTiles ? this.recordSize : cfg.fullRes ? [3280, 2464] : this.streamSize
     const matrix = calibration.csm ? scaleMatrix(calibration.csm.matrix, calibration.csm.imageWidth, fovW) : null
     if (!matrix) return
     const plan = buildScanPlan(cfg, fovW, fovH, matrix, { x: device.position.x, y: device.position.y })
@@ -291,12 +304,15 @@ class ScanService {
     const heightSamples: HeightSample[] = []
     let lock: CameraLock | null = null
     const say = (m: string) => { this.message = m }
+    /** the in-focus curve of the tile just focused (the coarse sweep's samples), for sizing its focal sweep */
+    let focusCurve: { z: number; s: number }[] | undefined
 
     /** Move to the tile, settle (∝ move length), make sure the stage is still, optionally run
      *  something (autofocus, or a move to a predicted z plus a local sweep) that returns the z to
      *  record and how it was found, then capture and store. */
     const captureTile = async (t: TilePlan, afterSettle?: () => Promise<{ z?: number; zMeasured?: boolean; focus: TileFocus }>) => {
       const tag = `tile ${this.done + 1}/${this.total}`
+      focusCurve = undefined
       this.setTile(t, { status: 'moving' })
       say(`${tag}: moving`)
       const target = { x: plan.origin.x + t.stage.x, y: plan.origin.y + t.stage.y }
@@ -321,16 +337,47 @@ class ScanService {
         await this.waitStageStill()
       }
       this.setTile(t, { status: 'capturing' })
-      say(`${tag}: waiting for a fresh frame`)
-      await waitForFrames(2)
-      say(`${tag}: capturing`)
-      const blob = await fetchSnapshot({ full: cfg.fullRes })
+      // the tile's z as focus left it, before a sweep moves the stage; the record keeps this one
+      const zTile = z ?? device.position.z
+      let blob: Blob, edof: NonNullable<GalleryItem['scan']>['tiles'][number]['edof'] | undefined
+      if (cfg.edofTiles) {
+        const plan = edofSweepPlan(focusCurve, zTile, cfg.edofRange)
+        say(`${tag}: focal sweep ${plan.range} steps${plan.fromBand ? ' (from this tile\'s focus band)' : ''}`)
+        try {
+          const c = await captureSweepStack({
+            slices: EDOF_SLICES, range: plan.range, stepsPerFrame: EDOF_STEPS_PER_FRAME,
+            centreZ: plan.centreZ, endZ: zTile, lock: false, keepSlices: false,
+          }, (m) => say(`${tag}: ${m}`))
+          blob = c.blob
+          edof = { range: c.range, frames: c.frames, slices: c.fused, fused: true, fromBand: plan.fromBand, peakZ: c.peakZ }
+          if (c.width !== fovW || c.height !== fovH) say(`${tag}: sweep frames are ${c.width}×${c.height}, the plan assumed ${fovW}×${fovH}; the stitch rescales`)
+        } catch (e) {
+          if (this.cancelFlag) { this.setTile(t, { status: 'pending' }); return }
+          // a failed sweep must not end a long scan: take a stream frame (same size and field), say so
+          const msg = (e as Error).message
+          say(`${tag}: ${msg} — using a single frame`)
+          item.scan!.edofFailures = (item.scan!.edofFailures ?? 0) + 1
+          await this.waitStageStill().catch(() => {})
+          await sleep(500)   // the device leaves its recording mode
+          await waitForFrames(2)
+          blob = await fetchSnapshot({ full: false })
+          edof = { range: plan.range, frames: 0, fused: false, error: msg }
+        }
+        await this.waitStageStill()
+        await sleep(300)   // the recording mode ends a moment after the stream closes
+        await waitForFrames(2)
+      } else {
+        say(`${tag}: waiting for a fresh frame`)
+        await waitForFrames(2)
+        say(`${tag}: capturing`)
+        blob = await fetchSnapshot({ full: cfg.fullRes })
+      }
       say(`${tag}: storing`)
       const key = `tile/${t.index}`
       await putBlob(id, key, blob)
       item.blobs.push(key)
-      const zRec = z ?? device.position.z
-      item.scan!.tiles.push({ ...t, x: t.pixel.x, y: t.pixel.y, width: fovW, height: fovH, blob: key, z: zRec, zMeasured, focus, settleMs: settle })
+      const zRec = zTile
+      item.scan!.tiles.push({ ...t, x: t.pixel.x, y: t.pixel.y, width: fovW, height: fovH, blob: key, z: zRec, zMeasured, focus, settleMs: settle, ...(edof ? { edof } : {}) })
       this.blobs.push({ blob, x: t.pixel.x, y: t.pixel.y, width: fovW, height: fovH })
       this.done++; this.captured = this.blobs.length
       let thumb: string | undefined
@@ -384,8 +431,10 @@ class ScanService {
           // is half the sweep (the Laplacian peak is ~200 steps wide at half maximum on the IMX219 stream,
           // a quarter-range window sat on its slope and was refused as 'edge'/'flat').
           const fineRange = Math.min(range, Math.max(120, Math.round(range / 2)))
-          const r = await runAutofocus({ mode: 'twopass', dz: range, fineRange, fineSteps: 9 })
-          const metricName = `${r.metric}+${settings.focusMetric ?? 'laplacian'}`
+          const r = await runAutofocus({ mode: 'twopass', dz: range, fineRange, fineSteps: 9, coarse: 'stepped' })
+          const metricName = `${r.metric}+${settings.focusMetric ?? 'laplacian'}${r.coarseMode === 'stepped' ? ' (stepped coarse)' : ''}`
+          // the coarse sweep spans the whole range, so its curve shows the specimen's depth; the fine one only its peak
+          focusCurve = r.coarse?.samples?.length ? r.coarse.samples : r.samples
           let q = r.quality, peakZ = r.peakZ, retried = false
           if (!q.ok && (q.reason === 'edge' || q.reason === 'flat')) {
             // one retry with a stepped pass only: recentred where the fine pass ended ('edge', the peak is
@@ -558,7 +607,8 @@ class ScanService {
     await putBlob(item.id, 'thumb', await makeThumb(res.mosaic)); item.blobs.push('thumb')
     await putItem(item)
     const fails = item.scan!.focusFailures ?? 0
-    const summary = `${res.width}×${res.height} px · ${res.pairs} overlaps refined${res.dropped ? `, ${res.dropped} rejected` : ''} · ${res.blend} blend · shading ${res.shading}${res.shadingFit ? ` (rms ${res.shadingFit.rms.toFixed(3)})` : ''} · scale ${res.scale.toFixed(2)}${fails ? ` · ${fails} tile(s) with failed autofocus` : ''}`
+    const edofTiles = item.scan!.tiles.filter((t) => t.edof), edofFails = edofTiles.filter((t) => !t.edof!.fused).length
+    const summary = `${res.width}×${res.height} px · ${res.pairs} overlaps refined${res.dropped ? `, ${res.dropped} rejected` : ''} · ${res.blend} blend · shading ${res.shading}${res.shadingFit ? ` (rms ${res.shadingFit.rms.toFixed(3)})` : ''} · scale ${res.scale.toFixed(2)}${fails ? ` · ${fails} tile(s) with failed autofocus` : ''}${edofTiles.length ? ` · extended focus${edofFails ? ` (${edofFails} tile(s) fell back to a single frame)` : ''}` : ''}`
     this.result = {
       item, url: URL.createObjectURL(res.mosaic), summary,
       footprint: { origin: plan.origin, cols: plan.cols, rows: plan.rows, overlap: cfg.overlap, fovW: plan.fov.w },

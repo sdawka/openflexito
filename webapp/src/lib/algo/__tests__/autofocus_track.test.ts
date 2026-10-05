@@ -69,6 +69,52 @@ describe('autofocus maths', () => {
     expect(q).toEqual(quadraticPeak([{ z: 0, s: -1 }, { z: 1, s: 0 }, { z: 2, s: -1 }]))
   })
 
+  it('two-pass autofocus: a flat coarse proxy (FocusFoM that barely moves) falls back to a stepped coarse pass on the fine metric', async () => {
+    // the proxy varies 2 % across the sweep (as libcamera's FocusFoM did over a thick specimen on the
+    // Pi) so the continuous sweep throws "featureless"; the stepped fallback on measure() still finds
+    // the plane at z = 400 and the fine pass refines it
+    let z = 0, now = 1000
+    const frames: FrameMeta[] = []
+    const io = {
+      currentZ: () => z,
+      frames: () => frames,
+      onProgress: () => {},
+      async moveZ(dz: number): Promise<MoveResult> {
+        const t0 = now, z0 = z
+        for (let k = 10; k <= Math.abs(dz); k += 10) {
+          const zz = z0 + Math.sign(dz) * k
+          frames.push(frame(t0 + k, Math.round(4000 + 40 * Math.exp(-(((zz - 400) / 300) ** 2)) + Math.sin(zz) * 20)))
+        }
+        z += dz; now += Math.abs(dz) + 1
+        return { position: { x: 0, y: 0, z }, t0, t1: now - 1, start_hw: { x: 0, y: 0, z: z0 }, end_hw: { x: 0, y: 0, z }, cancelled: false }
+      },
+      async measure() { return 4 + 80 * Math.exp(-(((z - 400) / 90) ** 2)) },
+    }
+    const r = await twoPassAutofocus(io, { coarseDz: 1200, fineRange: 300, fineSteps: 9 })
+    expect(r.coarseMode).toBe('stepped')
+    expect(r.coarse.samples.length).toBe(11)
+    expect(Math.abs(r.peakZ - 400)).toBeLessThan(15)
+    expect(r.quality.ok).toBe(true)
+    expect(z).toBe(r.peakZ)
+  })
+
+  it('two-pass autofocus: a featureless field (flat proxy and flat fine metric) still throws and returns to the start z', async () => {
+    let z = 50, now = 1000
+    const frames: FrameMeta[] = []
+    const io = {
+      currentZ: () => z, frames: () => frames, onProgress: () => {},
+      async moveZ(dz: number): Promise<MoveResult> {
+        const t0 = now, z0 = z
+        for (let k = 10; k <= Math.abs(dz); k += 10) frames.push(frame(t0 + k, 4000 + Math.round(Math.sin(z0 + k) * 10)))
+        z += dz; now += Math.abs(dz) + 1
+        return { position: { x: 0, y: 0, z }, t0, t1: now - 1, start_hw: { x: 0, y: 0, z: z0 }, end_hw: { x: 0, y: 0, z }, cancelled: false }
+      },
+      async measure() { return 3 + Math.sin(z) * 0.05 },
+    }
+    await expect(twoPassAutofocus(io, { coarseDz: 600, fineRange: 300 })).rejects.toThrow(/featureless/)
+    expect(z).toBe(50)
+  })
+
   it('two-pass autofocus: coarse JPEG sweep seeds a fine Laplacian pass that lands closer to the true peak', async () => {
     // simulated device as in the fast-autofocus test, but the "JPEG size" coarse metric is a noisy,
     // broad proxy while the fine `measure()` is a clean, narrow Laplacian-like curve centred exactly

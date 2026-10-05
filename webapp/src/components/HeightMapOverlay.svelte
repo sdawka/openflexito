@@ -7,6 +7,7 @@
    *  current `stageStepUm.z`, or plain steps if that isn't set either. */
   import type { GalleryItem } from '../lib/store/gallery'
   import { heightColor, heightLegend } from '../lib/algo/heightMap'
+  import { describeTileFocus } from '../lib/algo/focusReasons'
   import { settings } from '../lib/store/settings.svelte'
 
   let { item }: { item: GalleryItem } = $props()
@@ -35,7 +36,7 @@
         {#each Array.from({ length: rows }) as _, row}
           {#each Array.from({ length: cols }) as __, col}
             {@const t = cellOf(col, row)}
-            <div class="hm-cell" title={t?.z !== undefined ? `col ${col} row ${row}: z ${fmtZ(t.z)}${t.zMeasured ? ' (measured)' : ' (predicted)'}` : 'no focus data'}
+            <div class="hm-cell" title={t?.z !== undefined ? describeTileFocus(t.focus ?? { status: t.zMeasured ? 'measured' : 'predicted' }, { col, row }) + ` · z ${fmtZ(t.z)}` : 'no focus data'}
                  style="background:{t?.z !== undefined ? heightColor(t.z, zMin, zMax) : 'transparent'}"></div>
           {/each}
         {/each}

@@ -46,6 +46,17 @@ describe('focus metrics', () => {
     expect(Math.abs(normalisedVariance(g2) - normalisedVariance(base))).toBeLessThan(1e-6)
     expect(laplacianVariance(g2) / laplacianVariance(base)).toBeCloseTo(2.25, 3)
   })
+  it('tileMetric ignores empty glass: a sparse specimen (3 of 16 tiles textured) still scores by its texture', () => {
+    const w = 64, h = 64, data = new Float32Array(w * h).fill(128)
+    // texture in three tiles of a 4×4 grid (16×16 px each), flat everywhere else
+    for (const [tx, ty] of [[0, 0], [2, 1], [3, 3]]) for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) data[(ty * 16 + y) * w + tx * 16 + x] = ((x + y) & 1) ? 200 : 60
+    const g: Gray = { data, width: w, height: h }
+    const tile = new Float32Array(16 * 16)
+    for (let y = 0; y < 16; y++) tile.set(data.subarray(y * w, y * w + 16), y * 16)
+    const textured = laplacianVariance({ data: tile, width: 16, height: 16 })
+    expect(tileMetric(g, laplacianVariance, 4)).toBeGreaterThan(0.5 * textured)
+  })
+
   it('tileMetric ignores one saturated tile', () => {
     const g: Gray = { data: new Float32Array(base.data), width: base.width, height: base.height }
     const clean = tileMetric(g, laplacianVariance, 4)

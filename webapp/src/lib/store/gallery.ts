@@ -131,7 +131,12 @@ export interface GalleryItem {
         /** sweep half of the tile: metric used ('fom' | 'jpeg' | 'nv' ...) and sweep range, steps */
         metric?: string; range?: number
       }
-      settleMs?: number }[]
+      settleMs?: number
+      /** extended-focus tile (additive): a focal sweep fused into this tile instead of one still.
+       *  `range` is the sweep length in steps, `frames` the recorded frames inside it, `slices` how many were
+       *  fused, `fromBand` whether the range came from this tile's autofocus band. `fused: false` = the sweep
+       *  failed (`error`) and the tile is a single stream frame of the same size. */
+      edof?: { range: number; frames: number; slices?: number; fused: boolean; fromBand?: boolean; peakZ?: number; error?: string } }[]
     positions?: { x: number; y: number }[]
     /** stitching diagnostics: overlaps measured, dropped as outliers, per-tile luminance gains (and,
      *  additive, per-channel `gainsRgb`), blend mode, whether a shading map was applied and which one
@@ -144,6 +149,8 @@ export interface GalleryItem {
     /** camera lock held for the run and the number of tiles whose autofocus failed */
     locked?: { ae: boolean; awb: boolean }
     focusFailures?: number
+    /** extended-focus tiles whose sweep failed and fell back to a single frame (additive) */
+    edofFailures?: number
     /** how autofocus was used during this scan, and its region/order settings, for the gallery's height-map overlay */
     focus?: {
       mode: 'none' | 'every' | 'interpolate'; step?: number; method?: 'plane' | 'bilinear'

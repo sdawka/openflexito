@@ -1,4 +1,6 @@
-/** Per-browser settings persisted in localStorage. */
+/** Settings persisted in localStorage; the subset in `DEVICE_SETTING_KEYS` is also stored on the microscope. */
+
+import { pickKeys, acceptRemote } from './deviceSettings'
 
 const KEY = 'openflexito.settings'
 
@@ -136,6 +138,44 @@ function load(): Settings {
 
 export const settings = $state<Settings>(load())
 
-export function saveSettings(): void {
+/** Settings that describe the MICROSCOPE (its optics, stage mechanics, illumination hardware), not this
+ *  browser. They are stored on the device under calibration key `settings` and shared by every client
+ *  (`services/calibrationSync.svelte.ts`); localStorage is only a cache. Rule: a field belongs here iff its
+ *  correct value follows from the instrument; UI preferences, jog steps, gamepad, models, video/photo
+ *  defaults, look/LUT and `deviceUrl` stay per browser. */
+export const DEVICE_SETTING_KEYS = [
+  'stageStepUm', 'objectiveNA', 'lightPresets', 'focusSweepMetric', 'focusMetric', 'focusGrabWidth',
+] as const satisfies readonly (keyof Settings)[]
+export type DeviceSettingKey = (typeof DEVICE_SETTING_KEYS)[number]
+
+/** Set by `services/calibrationSync.svelte.ts`; called after a save when a device-shared field changed. */
+export const settingsSync: { push: (subset: Pick<Settings, DeviceSettingKey>) => void } = { push: () => {} }
+
+const snapshotShared = (): string => JSON.stringify(pickKeys($state.snapshot(settings) as Settings, DEVICE_SETTING_KEYS))
+let lastShared = ''
+
+function write(): void {
   try { localStorage.setItem(KEY, JSON.stringify(settings)) } catch { /* private mode etc. */ }
 }
+
+export function saveSettings(): void {
+  write()
+  const now = snapshotShared()
+  if (now === lastShared) return
+  lastShared = now
+  settingsSync.push(JSON.parse(now))
+}
+
+/** The device-shared subset as it stands now. */
+export function deviceSettingsSubset(): Pick<Settings, DeviceSettingKey> {
+  return pickKeys($state.snapshot(settings) as Settings, DEVICE_SETTING_KEYS)
+}
+
+/** Apply a `settings` blob that came from the device (device wins). Does not push back. */
+export function applyDeviceSettings(remote: unknown): void {
+  Object.assign(settings, acceptRemote(remote, DEVICE_SETTING_KEYS, defaults))
+  lastShared = snapshotShared()
+  write()
+}
+
+lastShared = snapshotShared()

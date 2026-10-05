@@ -19,8 +19,8 @@ import { frameLagNs } from '../../store/calibration.svelte'
 import type { GalleryItem } from '../../store/gallery'
 import type { MoveResult } from '../../algo/types'
 import { withCameraLock } from '../cameraLock'
-import { moveZVerified, pyramidWorker, saveFusedStack, type FocusStackOptions } from './focusStack'
-import { settle, type Say, type PhotoMeta } from './common'
+import { moveZVerified, pyramidWorker, saveFusedStack, type FocusStackOptions, type FusedStack } from './focusStack'
+import { settle, encodeRgba8, type Say, type PhotoMeta } from './common'
 import { deconvolveSweepFrames, type DeconvResult } from './sweepDeconv'
 
 export interface SweepStackOptions extends FocusStackOptions {
@@ -28,6 +28,18 @@ export interface SweepStackOptions extends FocusStackOptions {
   stepsPerFrame?: number
   /** method 'deconvolve': Wiener noise-to-signal ratio (`algo/sweepDeconv#DeconvOptions.noise`) */
   deconvNoise?: number
+}
+
+/** What `captureSweepStack` adds for callers that run a sweep inside a larger job (the scan). */
+export interface SweepCaptureOptions extends SweepStackOptions {
+  /** absolute z the sweep is centred on; default: the current z (the Photo panel's behaviour) */
+  centreZ?: number
+  /** where the stage ends: the sharpest frame's z ('peak', default) or an absolute z */
+  endZ?: number | 'peak'
+  /** hold the camera lock for the sweep (default true); false when the caller already holds one */
+  lock?: boolean
+  /** also encode every fused slice as a JPEG (needed to save a stack, wasted work otherwise; default true) */
+  keepSlices?: boolean
 }
 
 const SHARPNESS_WIDTH = 410
@@ -104,7 +116,27 @@ async function waitFor(cond: () => boolean, timeoutMs: number, what: string): Pr
   }
 }
 
-export async function takeSweepStack(o: SweepStackOptions, say: Say, meta: PhotoMeta): Promise<GalleryItem> {
+/** Everything the sweep produced, handed to the caller of `runSweep` while the recording's video
+ *  is still open (the deconvolution re-reads frames from it). */
+interface SweepRun {
+  fused: FusedStack
+  video: { width: number; height: number; frame: (t: number) => Promise<HTMLVideoElement> }
+  samples: (SweepSample & { t: number })[]
+  sel: ReturnType<typeof chooseSweepSlices>
+  chosen: (SweepSample & { t: number })[]
+  zs: number[]
+  step: number
+  peakZ: number
+  move: { t0: number; t1: number; z0: number; z1: number }
+  rec: RecordInfo
+  fps: number
+  stepUs: number
+  stepsPerFrame: number
+  range: number
+  slices: Promise<Blob>[]
+}
+
+async function runSweep<T>(o: SweepCaptureOptions, say: Say, finish: (run: SweepRun) => Promise<T>): Promise<T> {
   if (!sweepStackAvailable()) throw new Error('sweep stack needs sensor recording on the device and H.264 playback in this browser')
   const maxSlices = Math.max(3, Math.round(o.slices ?? 9)), range = Math.max(40, Math.round(o.range ?? 1000))
   const stepsPerFrame = Math.max(1, o.stepsPerFrame ?? 8)
@@ -112,12 +144,13 @@ export async function takeSweepStack(o: SweepStackOptions, say: Say, meta: Photo
   const packets: RecordPacket[] = []
   let info: RecordInfo | null = null, move: MoveResult | null = null, z0 = 0, stepUs = minUs, fps = 0
   let streamError: Error | null = null
-  await withCameraLock(async () => {
+  const sweep = async () => {
     const stream = new RecordStream()
     let done: Promise<void> | null = null
     try {
       say(`sweep stack: moving to the bottom of the sweep (−${Math.round(range / 2)})`)
-      await moveZVerified(-Math.round(range / 2), 'z', say, 'sweep stack')
+      if (o.centreZ === undefined) await moveZVerified(-Math.round(range / 2), 'z', say, 'sweep stack')
+      else await moveZVerified(Math.round(o.centreZ - range / 2 - device.position.z), 'z', say, 'sweep stack')
       z0 = device.position.z
       say('sweep stack: starting the sensor recording')
       // every frame a keyframe: a <video> seek decodes from the previous keyframe, so with the
@@ -143,7 +176,9 @@ export async function takeSweepStack(o: SweepStackOptions, say: Say, meta: Photo
       stream.stop()
       await done
     }
-  }, { onError: (m) => say(`sweep stack: ${m}`) })
+  }
+  if (o.lock === false) await sweep()
+  else await withCameraLock(sweep, { onError: (m) => say(`sweep stack: ${m}`) })
   if (streamError) throw streamError
   if (!info || !move) throw new Error('sweep stack: the sweep did not run')
   const rec: RecordInfo = info, mv = { t0: (move as MoveResult).t0, t1: (move as MoveResult).t1, z0, z1: (move as MoveResult).position.z }
@@ -169,8 +204,9 @@ export async function takeSweepStack(o: SweepStackOptions, say: Say, meta: Photo
     const zs = chosen.map((c) => Math.round(c.z))
     const step = zs.length > 1 ? Math.round((zs[zs.length - 1] - zs[0]) / (zs.length - 1)) : 0
     say(`sweep stack: ${samples.length} frames over z ${Math.round(mv.z0)}…${Math.round(mv.z1)}, sharpest at z=${peakZ}; fusing ${chosen.length} from ${zs[0]}…${zs[zs.length - 1]}`)
-    // end on the sharpest plane while the browser fuses
-    const back = device.moveTo({ z: peakZ }, 'z').catch((e) => say(`sweep stack: could not move to z=${peakZ}: ${(e as Error).message}`))
+    // end on the sharpest plane (or where the caller wants the stage) while the browser fuses
+    const endZ = typeof o.endZ === 'number' ? Math.round(o.endZ) : peakZ
+    const back = device.moveTo({ z: endZ }, 'z').catch((e) => say(`sweep stack: could not move to z=${endZ}: ${(e as Error).message}`))
 
     // pass 2: the chosen frames at full size into the pyramid
     const w = video.width, h = video.height
@@ -184,7 +220,7 @@ export async function takeSweepStack(o: SweepStackOptions, say: Say, meta: Photo
     for (let i = 0; i < chosen.length; i++) {
       fctx.drawImage(await video.frame(chosen[i].t), 0, 0)
       const img = fctx.getImageData(0, 0, w, h)
-      slices.push(createImageBitmap(img).then((b) => {
+      if (o.keepSlices !== false) slices.push(createImageBitmap(img).then((b) => {
         const c = new OffscreenCanvas(b.width, b.height)
         c.getContext('2d')!.drawImage(b, 0, 0); b.close()
         return c.convertToBlob({ type: 'image/jpeg', quality: 0.9 })
@@ -195,6 +231,18 @@ export async function takeSweepStack(o: SweepStackOptions, say: Say, meta: Photo
     fuse.post({ type: 'finish' })
     const r = await fuse.finished.finally(() => fuse.worker.terminate())
     await back
+    return await finish({
+      fused: r, video: { width: w, height: h, frame: (t) => video.frame(t) }, samples, sel, chosen, zs, step, peakZ, move: mv, rec, fps, stepUs, stepsPerFrame, range, slices,
+    })
+  } finally {
+    video.close()
+  }
+}
+
+export async function takeSweepStack(o: SweepStackOptions, say: Say, meta: PhotoMeta): Promise<GalleryItem> {
+  return runSweep(o, say, async ({ fused: r, video, samples, sel, chosen, zs, step, peakZ, move: mv, rec, fps, stepUs, stepsPerFrame, range, slices }) => {
+    const deconvolve = o.method === 'deconvolve'
+    const w = video.width, h = video.height
     // method 'deconvolve': the pyramid above still aligns the slices (its shifts stand in for every
     // frame's) and gives the depth map; the picture itself is the deconvolved mean of the sweep
     let deconv: DeconvResult | null = null
@@ -202,7 +250,7 @@ export async function takeSweepStack(o: SweepStackOptions, say: Say, meta: Photo
       const order = chosen.map((c, i) => ({ z: c.z, s: r.shifts[i] ?? { dx: 0, dy: 0 } })).sort((a, b) => a.z - b.z)
       try {
         deconv = await deconvolveSweepFrames({
-          video: { width: w, height: h, frame: (t) => video.frame(t) },
+          video,
           samples, peak: sel.peak, band: sel.span, sweep: [Math.min(mv.z0, mv.z1), Math.max(mv.z0, mv.z1)],
           alignedZ: order.map((a) => a.z), shifts: order.map((a) => a.s), noise: o.deconvNoise,
         }, say)
@@ -224,7 +272,34 @@ export async function takeSweepStack(o: SweepStackOptions, say: Say, meta: Photo
         },
       },
     })
-  } finally {
-    video.close()
-  }
+  })
+}
+
+/** The fused image of one z sweep, for callers that store it themselves (a scan tile). */
+export interface SweepCapture {
+  /** the fused picture, JPEG at quality 0.95 */
+  blob: Blob
+  width: number
+  height: number
+  /** frames the recording held inside the sweep, and how many of them were fused */
+  frames: number
+  fused: number
+  /** z of the sharpest frame, and the z extent of the fused slices (steps) */
+  peakZ: number
+  zRange: [number, number]
+  /** the sweep's own length in steps (clamped) */
+  range: number
+}
+
+/** One sweep, fused with the pyramid and returned as an image instead of saved to the gallery:
+ *  `takeSweepStack`'s capture half. The stage is back where `o.endZ` says (default the sharpest
+ *  plane) when it resolves, and the sensor recording is closed, so stills work again (the device may
+ *  need a moment to leave its recording mode: wait for a stream frame before a still). */
+export async function captureSweepStack(o: SweepCaptureOptions, say: Say): Promise<SweepCapture> {
+  return runSweep({ ...o, keepSlices: o.keepSlices ?? false }, say, async ({ fused: r, samples, chosen, zs, peakZ, range }) => {
+    const rgba = r.data instanceof Uint16Array ? null : r.data
+    if (!rgba) throw new Error('sweep stack: unexpected 16-bit fusion result')
+    const blob = await encodeRgba8({ data: rgba, width: r.width, height: r.height }, 0.95)
+    return { blob, width: r.width, height: r.height, frames: samples.length, fused: chosen.length, peakZ, zRange: [zs[0], zs[zs.length - 1]] as [number, number], range }
+  })
 }
